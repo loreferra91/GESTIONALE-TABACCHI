@@ -19,12 +19,12 @@ export default function Magazzino() {
   return (
     <Layout title="Magazzino / Pivot" subtitle="analisi giacenze & valorizzazione">
       <div className="grid grid-cols-2 sm:grid-cols-3 2xl:grid-cols-6 gap-3 mb-6">
-        <KpiCard label="Val. acquistato" value={formatEur(k.valore_acquistato)} />
+        <KpiCard label={`Val. acquistato (−${((k.aggio_pct||0)*100).toFixed(0)}% aggio)`} value={formatEur(k.valore_acquistato)} />
         <KpiCard label="Val. venduto" value={formatEur(k.valore_venduto)} tone="success" />
+        <KpiCard label="Margine lordo" value={formatEur(k.margine_lordo)} tone={k.margine_lordo >= 0 ? "success" : "danger"} />
         <KpiCard label="Val. giacenza" value={formatEur(k.valore_giacenza)} />
         <KpiCard label="Da riordinare" value={formatNum(k.da_riordinare)} tone={k.da_riordinare ? "danger" : "default"} />
-        <KpiCard label="Fermi" value={formatNum(k.prodotti_fermi)} tone="warning" />
-        <KpiCard label="Lenti >6m" value={formatNum(k.lenti_oltre_6_mesi)} tone="warning" />
+        <KpiCard label="Fermi / Lenti" value={`${formatNum(k.prodotti_fermi)} / ${formatNum(k.lenti_oltre_6_mesi)}`} tone="warning" />
       </div>
 
       <div className="flex gap-3 mb-4">

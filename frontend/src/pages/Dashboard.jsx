@@ -17,17 +17,17 @@ export default function Dashboard() {
   return (
     <Layout title="Dashboard operativa" subtitle="panoramica magazzino & vendita">
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <KpiCard label="Valore acquistato" value={formatEur(k.valore_acquistato)} />
-        <KpiCard label="Valore venduto" value={formatEur(k.valore_venduto)} tone="success" />
-        <KpiCard label="Valore giacenza" value={formatEur(k.valore_giacenza)} />
-        <KpiCard label="Pezzi a magazzino" value={formatNum(k.pezzi_magazzino)} />
+        <KpiCard label={`Valore acquistato (netto aggio ${((k.aggio_pct||0)*100).toFixed(0)}%)`} value={formatEur(k.valore_acquistato)} />
+        <KpiCard label="Valore venduto (retail)" value={formatEur(k.valore_venduto)} tone="success" />
+        <KpiCard label="Margine lordo stimato" value={formatEur(k.margine_lordo)} tone={k.margine_lordo >= 0 ? "success" : "danger"} />
+        <KpiCard label="Valore giacenza (a costo)" value={formatEur(k.valore_giacenza)} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <KpiCard label="Prodotti totali" value={formatNum(k.prodotti_totali)} />
         <KpiCard label="Da riordinare" value={formatNum(k.da_riordinare)} tone={k.da_riordinare ? "danger" : "default"} />
         <KpiCard label="Prodotti fermi" value={formatNum(k.prodotti_fermi)} tone={k.prodotti_fermi ? "warning" : "default"} />
-        <KpiCard label="Giacenza negativa" value={formatNum(k.giacenza_negativa)} tone={k.giacenza_negativa ? "danger" : "default"} />
+        <KpiCard label="Pezzi a magazzino" value={formatNum(k.pezzi_magazzino)} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

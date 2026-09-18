@@ -155,6 +155,7 @@ DEFAULT_PARAMS = {
     "SLOW_VENDUTO30_MAX": {"valore": 2, "descrizione": "Venduto max 30gg per SLOW MOVER"},
     "SLOW_TARGET_FACTOR": {"valore": 0.6, "descrizione": "Fattore target settimanale slow mover"},
     "FATT_SETTIMANALE": {"valore": 1.15, "descrizione": "Fattore fabbisogno settimanale"},
+    "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
 }
 
 
@@ -821,6 +822,8 @@ async def pivot():
     prods = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
     params = await get_params()
     divisor = params.get("VENDITE_GIORNALIERE_MESE", 6.5)
+    aggio = params.get("AGGIO_PCT", 0.10)
+    cost_factor = max(0.0, 1.0 - aggio)  # costo acquisto = prezzo * cost_factor
     rows = []
     tot_acq = tot_vend = tot_giac = pezzi_mag = 0
     fermi = negativi = da_riord = lenti = 0
@@ -832,10 +835,11 @@ async def pivot():
         g_ven = p.get("giacenza_vending", 0) or 0
         g_tot = g_neg + g_ven
         prz = p.get("prezzo", 0) or 0
+        prz_costo = prz * cost_factor
         acq = p.get("acquistati", 0) or 0
-        ta = acq * prz
-        tv = v_tot * prz
-        tg = g_tot * prz
+        ta = acq * prz_costo       # valore acquistato al COSTO (netto aggio)
+        tv = v_tot * prz           # ricavo vendita al PREZZO retail
+        tg = g_tot * prz_costo     # valore giacenza al COSTO (netto aggio)
         vend_mese = v_tot / max(1, divisor) if divisor else 0
         mesi_smalt = round(g_tot / vend_mese, 2) if vend_mese > 0 else 0
         stato = "OK"
@@ -874,6 +878,8 @@ async def pivot():
             "valore_acquistato": round(tot_acq, 2),
             "valore_venduto": round(tot_vend, 2),
             "valore_giacenza": round(tot_giac, 2),
+            "margine_lordo": round(tot_vend - tot_acq, 2),
+            "aggio_pct": round(aggio, 4),
             "pezzi_magazzino": pezzi_mag,
             "prodotti_totali": len(rows),
             "prodotti_fermi": fermi,
