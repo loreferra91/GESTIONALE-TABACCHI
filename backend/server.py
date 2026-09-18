@@ -512,6 +512,51 @@ async def del_ordine(o_id: str):
     return {"ok": True}
 
 
+class BulkOrdineIn(BaseModel):
+    file_sorgente: str = "carico manuale"
+    data: Optional[str] = None
+    righe: List[Dict[str, Any]]  # {codice, descrizione, quantita, prezzo}
+
+
+@api.post("/ordini/bulk")
+async def bulk_carico(body: BulkOrdineIn):
+    """Carico merce: registra multiple righe d'ordine e aggiorna giacenze."""
+    data = body.data or datetime.now(timezone.utc).isoformat()
+    inserted = 0
+    creati_prodotti = 0
+    errors = []
+    for i, r in enumerate(body.righe):
+        try:
+            codice = str(r.get("codice") or "").strip()
+            qta = int(float(r.get("quantita") or 0))
+            if not codice or qta == 0:
+                continue
+            prezzo = float(r.get("prezzo") or 0)
+            desc = str(r.get("descrizione") or "")
+            o = OrdineStorico(data=data, file_sorgente=body.file_sorgente, codice=codice, descrizione=desc, quantita=qta, prezzo=prezzo)
+            await db.storico_ordini.insert_one(o.model_dump())
+            prod = await db.prodotti.find_one({"codice": codice})
+            if prod:
+                await db.prodotti.update_one(
+                    {"codice": codice},
+                    {"$inc": {"giacenza_negozio": qta, "acquistati": qta}},
+                )
+            else:
+                # crea prodotto minimale
+                await db.prodotti.insert_one(Prodotto(
+                    codice=codice, descrizione=desc or codice,
+                    categoria="SIGARETTE" if codice.startswith("AMMS") else "ACCESSORI",
+                    prezzo=prezzo, acquistati=qta, giacenza_negozio=qta,
+                ).model_dump())
+                creati_prodotti += 1
+            inserted += 1
+        except Exception as e:
+            errors.append({"riga": i + 1, "errore": str(e)})
+    return {"caricate": inserted, "prodotti_nuovi": creati_prodotti, "errori": errors}
+
+
+
+
 # ------------------------- Cassa -------------------------
 @api.get("/cassa")
 async def list_cassa(limit: int = 500):

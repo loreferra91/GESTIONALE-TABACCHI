@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import Layout from "../components/Layout";
 import { api, API } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
@@ -18,6 +18,15 @@ export default function Vendite() {
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
+  const [prodMap, setProdMap] = useState(new Map());
+
+  useEffect(() => {
+    api.get("/prodotti", { params: { limit: 5000 } }).then(r => {
+      const m = new Map();
+      (r.data || []).forEach(p => m.set(p.codice, p));
+      setProdMap(m);
+    });
+  }, []);
 
   const load = async () => {
     const r = await api.get("/vendite", { params: { giorno } });
@@ -72,10 +81,10 @@ export default function Vendite() {
   };
 
   const submitBulk = async () => {
-    const righe = parseBulk(bulkText, bulkData);
+    const righe = parseBulk(bulkText, bulkData).filter(r => r._include !== false);
     if (!righe.length) return toast.error("Nessuna riga valida");
     try {
-      const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe });
+      const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) });
       setBulkResult(r.data);
       toast.success(`Bulk: ${r.data.inseriti} inserite, ${r.data.saltati} saltate`);
       setBulkText("");
@@ -84,6 +93,18 @@ export default function Vendite() {
       toast.error("Errore bulk");
     }
   };
+
+  // Anteprima memoized
+  const bulkPreview = useMemo(() => {
+    const parsed = parseBulk(bulkText, bulkData);
+    return parsed.map(r => {
+      const trimmed = (r.codice || "").trim();
+      const known = trimmed && prodMap.has(trimmed);
+      const stato = !trimmed ? "vuoto" : !known ? "sconosciuto" : (r.quantita <= 0 ? "qta zero" : (r.importo <= 0 ? "importo zero" : "ok"));
+      return { ...r, _known: known, _stato: stato };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkText, bulkData, prodMap]);
 
   const uploadCsv = async (e) => {
     const f = e.target.files?.[0];
@@ -171,10 +192,56 @@ export default function Vendite() {
           data-testid="bulk-text"
           value={bulkText}
           onChange={e => setBulkText(e.target.value)}
-          rows={10}
+          rows={8}
           placeholder="AMMS338	WINSTON BLUE*AST20	5	29.00&#10;AMMS20659	TEREA AZURE	2	11.00&#10;..."
           className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"
         />
+
+        {bulkPreview.length > 0 && (
+          <div className="mt-4">
+            <div className="flex items-baseline justify-between mb-2">
+              <h3 className="font-heading font-black text-base">Anteprima <span className="text-slate-400 font-normal">({bulkPreview.length} righe)</span></h3>
+              <div className="flex gap-3 text-xs">
+                <Badge tone="ok">OK {bulkPreview.filter(r => r._stato === "ok").length}</Badge>
+                <Badge tone="error">Sconosciuto {bulkPreview.filter(r => r._stato === "sconosciuto").length}</Badge>
+                <Badge tone="warning">Errori {bulkPreview.filter(r => ["qta zero", "importo zero", "vuoto"].includes(r._stato)).length}</Badge>
+              </div>
+            </div>
+            <div className="border border-slate-200 rounded-md overflow-hidden max-h-96 overflow-y-auto">
+              <table className="data-table w-full">
+                <thead>
+                  <tr>
+                    <th>#</th><th>Data</th><th>Codice</th><th>Descrizione</th>
+                    <th className="text-right">Qtà</th><th className="text-right">Importo</th><th>Stato</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bulkPreview.map((r, i) => {
+                    const rowClass = r._stato === "sconosciuto" ? "bg-red-50" : r._stato === "ok" ? "" : "bg-amber-50";
+                    const tone = r._stato === "ok" ? "ok" : r._stato === "sconosciuto" ? "error" : "warning";
+                    const label = r._stato === "ok" ? "OK" : r._stato === "sconosciuto" ? "CODICE NON TROVATO" : r._stato.toUpperCase();
+                    const prod = prodMap.get((r.codice || "").trim());
+                    return (
+                      <tr key={i} className={rowClass} data-testid={`bulk-preview-row-${i}`}>
+                        <td className="font-mono text-xs text-slate-400">{i + 1}</td>
+                        <td className="font-mono text-xs">{r.data}</td>
+                        <td className="font-mono">{r.codice || <span className="text-slate-400 italic">vuoto</span>}</td>
+                        <td className="max-w-xs truncate">{r.descrizione || (prod ? <span className="text-slate-400 italic">{prod.descrizione}</span> : "")}</td>
+                        <td className="font-mono text-right">{r.quantita}</td>
+                        <td className="font-mono text-right font-semibold">{formatEur(r.importo)}</td>
+                        <td><Badge tone={tone}>{label}</Badge></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-slate-500 mt-2">
+              Le righe rosse ("CODICE NON TROVATO") verranno comunque salvate con quel codice: verifica prima di confermare.
+            </p>
+          </div>
+        )}
+
         {bulkResult && (
           <div className="mt-3 text-sm bg-slate-50 border border-slate-200 rounded-md p-3">
             <span className="font-bold text-emerald-700">{bulkResult.inseriti}</span> inserite · <span className="text-slate-600">{bulkResult.saltati}</span> saltate

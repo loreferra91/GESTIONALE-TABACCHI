@@ -12,6 +12,7 @@ import Ordini from "./pages/Ordini";
 import Cassa from "./pages/Cassa";
 import Parametri from "./pages/Parametri";
 import CassaRapida from "./pages/CassaRapida";
+import Carico from "./pages/Carico";
 
 function App() {
   return (
@@ -25,6 +26,7 @@ function App() {
           <Route path="/vending" element={<Vending />} />
           <Route path="/vendite" element={<Vendite />} />
           <Route path="/auto-order" element={<AutoOrder />} />
+          <Route path="/carico" element={<Carico />} />
           <Route path="/ordini" element={<Ordini />} />
           <Route path="/cassa" element={<Cassa />} />
           <Route path="/cassa-rapida" element={<CassaRapida />} />

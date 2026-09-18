@@ -1,18 +1,19 @@
 import { NavLink } from "react-router-dom";
 import {
   ChartBar, Package, ListChecks, Storefront, Receipt,
-  ShoppingCart, ClockCounterClockwise, CashRegister, Gear, GridFour, Lightning,
+  ShoppingCart, ClockCounterClockwise, CashRegister, Gear, GridFour, Lightning, Truck,
 } from "@phosphor-icons/react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: ChartBar, testid: "nav-dashboard", end: true },
-  { to: "/cassa-rapida", label: "Cassa Rapida", icon: Lightning, testid: "nav-cassa-rapida", highlight: true },
+  // { to: "/cassa-rapida", label: "Cassa Rapida", icon: Lightning, testid: "nav-cassa-rapida", highlight: true },
   { to: "/prodotti", label: "Prodotti", icon: Package, testid: "nav-prodotti" },
   { to: "/listino", label: "Listino ADM", icon: ListChecks, testid: "nav-listino" },
   { to: "/magazzino", label: "Magazzino / Pivot", icon: GridFour, testid: "nav-magazzino" },
   { to: "/vending", label: "Vending", icon: Storefront, testid: "nav-vending" },
   { to: "/vendite", label: "Vendite giornaliere", icon: Receipt, testid: "nav-vendite" },
   { to: "/auto-order", label: "Auto-Order", icon: ShoppingCart, testid: "nav-auto-order" },
+  { to: "/carico", label: "Carico Merce", icon: Truck, testid: "nav-carico" },
   { to: "/ordini", label: "Storico ordini", icon: ClockCounterClockwise, testid: "nav-ordini" },
   { to: "/cassa", label: "Cassa", icon: CashRegister, testid: "nav-cassa" },
   { to: "/parametri", label: "Parametri", icon: Gear, testid: "nav-parametri" },
