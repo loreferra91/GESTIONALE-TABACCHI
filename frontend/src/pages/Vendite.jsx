@@ -3,6 +3,7 @@ import Layout from "../components/Layout";
 import { api, API } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
+import { Trash } from "@phosphor-icons/react";
 
 export default function Vendite() {
   const [rows, setRows] = useState([]);
@@ -15,6 +16,7 @@ export default function Vendite() {
   const [bulkPagamento, setBulkPagamento] = useState("CONTANTI");
   const [bulkData, setBulkData] = useState(today);
   const [bulkResult, setBulkResult] = useState(null);
+  const [bulkRows, setBulkRows] = useState([]); // canonical editable rows for preview
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
@@ -94,30 +96,46 @@ export default function Vendite() {
   };
 
   const submitBulk = async () => {
-    const righe = parseBulk(bulkText, bulkData).filter(r => r._include !== false);
+    const righe = bulkRows.filter(r => r.codice && r.quantita > 0);
     if (!righe.length) return toast.error("Nessuna riga valida");
     try {
       const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) });
       setBulkResult(r.data);
       toast.success(`Bulk: ${r.data.inseriti} inserite, ${r.data.saltati} saltate`);
       setBulkText("");
+      setBulkRows([]);
       load();
     } catch (e) {
       toast.error("Errore bulk");
     }
   };
 
-  // Anteprima memoized
-  const bulkPreview = useMemo(() => {
+  // Ri-parsing automatico quando cambia testo o data default
+  useEffect(() => {
     const parsed = parseBulk(bulkText, bulkData);
-    return parsed.map(r => {
-      const trimmed = (r.codice || "").trim();
-      const known = trimmed && prodMap.has(trimmed);
-      const stato = !trimmed ? "vuoto" : !known ? "sconosciuto" : (r.quantita <= 0 ? "qta zero" : (r.importo <= 0 ? "importo zero" : "ok"));
-      return { ...r, _known: known, _stato: stato };
-    });
+    setBulkRows(parsed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bulkText, bulkData, prodMap]);
+  }, [bulkText, bulkData]);
+
+  // Deriva stato in tempo reale
+  const rowsWithStatus = useMemo(() => bulkRows.map(r => {
+    const trimmed = (r.codice || "").trim();
+    const known = trimmed && prodMap.has(trimmed);
+    const stato = !trimmed ? "vuoto" : !known ? "sconosciuto" : (r.quantita <= 0 ? "qta zero" : (r.importo <= 0 ? "importo zero" : "ok"));
+    return { ...r, _known: known, _stato: stato };
+  }), [bulkRows, prodMap]);
+
+  const updateBulkRow = (i, field, val) => {
+    setBulkRows(rs => rs.map((r, idx) => idx === i ? { ...r, [field]: val } : r));
+  };
+  const removeBulkRow = (i) => {
+    setBulkRows(rs => rs.filter((_, idx) => idx !== i));
+  };
+  const clearBulk = () => {
+    setBulkRows([]);
+    setBulkText("");
+    setBulkResult(null);
+  };
 
   const uploadCsv = async (e) => {
     const f = e.target.files?.[0];
@@ -209,39 +227,61 @@ export default function Vendite() {
           className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"
         />
 
-        {bulkPreview.length > 0 && (
+        {rowsWithStatus.length > 0 && (
           <div className="mt-4">
-            <div className="flex items-baseline justify-between mb-2">
-              <h3 className="font-heading font-black text-base">Anteprima <span className="text-slate-400 font-normal">({bulkPreview.length} righe)</span></h3>
-              <div className="flex gap-3 text-xs">
-                <Badge tone="ok">OK {bulkPreview.filter(r => r._stato === "ok").length}</Badge>
-                <Badge tone="error">Sconosciuto {bulkPreview.filter(r => r._stato === "sconosciuto").length}</Badge>
-                <Badge tone="warning">Errori {bulkPreview.filter(r => ["qta zero", "importo zero", "vuoto"].includes(r._stato)).length}</Badge>
+            <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
+              <h3 className="font-heading font-black text-base">Anteprima <span className="text-slate-400 font-normal">({rowsWithStatus.length} righe)</span></h3>
+              <div className="flex items-center gap-3">
+                <div className="flex gap-2 text-xs">
+                  <Badge tone="ok">OK {rowsWithStatus.filter(r => r._stato === "ok").length}</Badge>
+                  <Badge tone="error">Sconosciuto {rowsWithStatus.filter(r => r._stato === "sconosciuto").length}</Badge>
+                  <Badge tone="warning">Errori {rowsWithStatus.filter(r => ["qta zero", "importo zero", "vuoto"].includes(r._stato)).length}</Badge>
+                </div>
+                <button data-testid="bulk-clear-all" onClick={clearBulk} className="text-red-600 hover:text-red-800 flex items-center gap-1 text-xs font-bold uppercase tracking-wider">
+                  <Trash size={14} /> Svuota tutto
+                </button>
               </div>
             </div>
-            <div className="border border-slate-200 rounded-md overflow-hidden max-h-96 overflow-y-auto">
+            <div className="border border-slate-200 rounded-md overflow-hidden max-h-[500px] overflow-y-auto">
               <table className="data-table w-full">
                 <thead>
                   <tr>
-                    <th>#</th><th>Data</th><th>Codice</th><th>Descrizione</th>
-                    <th className="text-right">Qtà</th><th className="text-right">Importo</th><th>Stato</th>
+                    <th>#</th><th>Data</th><th>Codice</th><th className="wrap">Descrizione</th>
+                    <th className="text-right">Qtà</th><th className="text-right">Importo</th><th>Stato</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {bulkPreview.map((r, i) => {
+                  {rowsWithStatus.map((r, i) => {
                     const rowClass = r._stato === "sconosciuto" ? "bg-red-50" : r._stato === "ok" ? "" : "bg-amber-50";
                     const tone = r._stato === "ok" ? "ok" : r._stato === "sconosciuto" ? "error" : "warning";
-                    const label = r._stato === "ok" ? "OK" : r._stato === "sconosciuto" ? "CODICE NON TROVATO" : r._stato.toUpperCase();
-                    const prod = prodMap.get((r.codice || "").trim());
+                    const label = r._stato === "ok" ? "OK" : r._stato === "sconosciuto" ? "NON TROVATO" : r._stato.toUpperCase();
                     return (
                       <tr key={i} className={rowClass} data-testid={`bulk-preview-row-${i}`}>
                         <td className="font-mono text-xs text-slate-400">{i + 1}</td>
                         <td className="font-mono text-xs">{r.data}</td>
-                        <td className="font-mono">{r.codice || <span className="text-slate-400 italic">vuoto</span>}</td>
-                        <td className="max-w-xs truncate">{r.descrizione || (prod ? <span className="text-slate-400 italic">{prod.descrizione}</span> : "")}</td>
-                        <td className="font-mono text-right">{r.quantita}</td>
-                        <td className="font-mono text-right font-semibold">{formatEur(r.importo)}</td>
+                        <td>
+                          <input
+                            data-testid={`bulk-row-${i}-codice`}
+                            value={r.codice}
+                            onChange={e => updateBulkRow(i, "codice", e.target.value)}
+                            className={`border rounded-md px-2 py-1 text-sm font-mono w-28 ${r._stato === "sconosciuto" ? "border-red-300 bg-white" : "border-slate-200 bg-white"}`}
+                          />
+                        </td>
+                        <td className="wrap">
+                          <input value={r.descrizione} onChange={e => updateBulkRow(i, "descrizione", e.target.value)} className="border border-slate-200 rounded-md px-2 py-1 text-sm w-full bg-white" />
+                        </td>
+                        <td className="text-right">
+                          <input type="number" min={0} value={r.quantita} onChange={e => updateBulkRow(i, "quantita", parseInt(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-16 text-right bg-white" />
+                        </td>
+                        <td className="text-right">
+                          <input type="number" step="0.01" min={0} value={r.importo} onChange={e => updateBulkRow(i, "importo", parseFloat(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-20 text-right bg-white" />
+                        </td>
                         <td><Badge tone={tone}>{label}</Badge></td>
+                        <td className="text-right">
+                          <button data-testid={`bulk-del-${i}`} onClick={() => removeBulkRow(i)} className="text-red-600 hover:text-red-800" title="Elimina riga">
+                            <Trash size={14} />
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -249,7 +289,7 @@ export default function Vendite() {
               </table>
             </div>
             <p className="text-xs text-slate-500 mt-2">
-              Le righe rosse ("CODICE NON TROVATO") verranno comunque salvate con quel codice: verifica prima di confermare.
+              Puoi <b>modificare il codice</b> di una riga rossa e la validazione si aggiorna in tempo reale. Elimina singole righe con il cestino o svuota tutto in un click.
             </p>
           </div>
         )}
