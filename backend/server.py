@@ -871,7 +871,7 @@ async def pivot():
     rows.sort(key=lambda x: -x["tot_giacenza"])
     return {
         "kpi": {
-            "valore_acquistato": round(tot_acq, 2),
+            "valore_acquistato": round(tot_acq * 0.90, 2),
             "valore_venduto": round(tot_vend, 2),
             "valore_giacenza": round(tot_giac, 2),
             "pezzi_magazzino": pezzi_mag,
