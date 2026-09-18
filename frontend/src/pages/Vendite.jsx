@@ -148,15 +148,15 @@ export default function Vendite() {
 
       {tab === "manuale" && (
       <Card className="p-4 mb-6">
-        <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
           <input data-testid="vend-data" type="date" value={form.data} onChange={e => setForm({...form, data: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
           <input data-testid="vend-codice" placeholder="Codice" value={form.codice} onChange={e => setForm({...form, codice: e.target.value})} onBlur={lookupPrezzo} className="border rounded-md px-3 py-2 text-sm font-mono" />
-          <input data-testid="vend-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm md:col-span-2" />
+          <input data-testid="vend-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm col-span-2" />
           <input data-testid="vend-qta" type="number" placeholder="Qta" value={form.quantita} onChange={e => setForm({...form, quantita: parseInt(e.target.value) || 1})} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <input data-testid="vend-importo" type="number" step="0.01" placeholder="Importo €" value={form.importo} onChange={e => setForm({...form, importo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
-          <button data-testid="vend-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors">Registra</button>
+          <button data-testid="vend-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors col-span-2 md:col-span-1">Registra</button>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+        <div className="grid grid-cols-2 gap-3 mt-3 md:max-w-md">
           <select data-testid="vend-canale" value={form.canale} onChange={e => setForm({...form, canale: e.target.value})} className="border rounded-md px-3 py-2 text-sm">
             <option>NEGOZIO</option><option>VENDING</option>
           </select>

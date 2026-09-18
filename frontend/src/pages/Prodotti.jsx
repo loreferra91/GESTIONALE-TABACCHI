@@ -10,7 +10,7 @@ export default function Prodotti() {
   const [cat, setCat] = useState("");
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: 0, giacenza_negozio: 0, giacenza_vending: 0 });
+  const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" });
 
   const load = async () => {
     setLoading(true);
@@ -22,11 +22,17 @@ export default function Prodotti() {
 
   const save = async () => {
     try {
-      if (editing) await api.put(`/prodotti/${editing}`, form);
-      else await api.post("/prodotti", form);
+      const payload = {
+        ...form,
+        prezzo: parseFloat(form.prezzo) || 0,
+        giacenza_negozio: parseInt(form.giacenza_negozio) || 0,
+        giacenza_vending: parseInt(form.giacenza_vending) || 0,
+      };
+      if (editing) await api.put(`/prodotti/${editing}`, payload);
+      else await api.post("/prodotti", payload);
       toast.success(editing ? "Prodotto aggiornato" : "Prodotto creato");
       setEditing(null);
-      setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: 0, giacenza_negozio: 0, giacenza_vending: 0 });
+      setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" });
       load();
     } catch (e) {
       toast.error("Errore salvataggio");
@@ -42,30 +48,30 @@ export default function Prodotti() {
 
   const startEdit = (r) => {
     setEditing(r.id);
-    setForm({ codice: r.codice, descrizione: r.descrizione, categoria: r.categoria, prezzo: r.prezzo, giacenza_negozio: r.giacenza_negozio, giacenza_vending: r.giacenza_vending });
+    setForm({ codice: r.codice, descrizione: r.descrizione, categoria: r.categoria, prezzo: String(r.prezzo ?? ""), giacenza_negozio: String(r.giacenza_negozio ?? ""), giacenza_vending: String(r.giacenza_vending ?? "") });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   return (
     <Layout title="Prodotti" subtitle={`${rows.length} articoli`}>
       <Card className="p-4 mb-6">
-        <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           <input data-testid="prod-form-codice" placeholder="Codice" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.codice} onChange={e => setForm({...form, codice: e.target.value})} />
-          <input data-testid="prod-form-desc" placeholder="Descrizione" className="border rounded-md px-3 py-2 text-sm md:col-span-2" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} />
+          <input data-testid="prod-form-desc" placeholder="Descrizione" className="border rounded-md px-3 py-2 text-sm col-span-2" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} />
           <select data-testid="prod-form-cat" className="border rounded-md px-3 py-2 text-sm" value={form.categoria} onChange={e => setForm({...form, categoria: e.target.value})}>
             <option>SIGARETTE</option>
             <option>SIGARETTE ELETTRONICHE</option>
             <option>ACCESSORI</option>
           </select>
-          <input data-testid="prod-form-prezzo" type="number" step="0.01" placeholder="Prezzo" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.prezzo} onChange={e => setForm({...form, prezzo: parseFloat(e.target.value) || 0})} />
-          <div className="flex gap-2">
+          <input data-testid="prod-form-prezzo" type="number" step="0.01" placeholder="Prezzo" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.prezzo} onChange={e => setForm({...form, prezzo: e.target.value})} />
+          <div className="flex gap-2 col-span-2 md:col-span-1">
             <button data-testid="prod-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-slate-800 transition-colors flex-1">{editing ? "Aggiorna" : "Aggiungi"}</button>
-            {editing && <button onClick={() => { setEditing(null); setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: 0, giacenza_negozio: 0, giacenza_vending: 0 }); }} className="border rounded-md px-3 text-sm">✕</button>}
+            {editing && <button onClick={() => { setEditing(null); setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" }); }} className="border rounded-md px-3 text-sm">✕</button>}
           </div>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
-          <input type="number" placeholder="Giacenza negozio" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.giacenza_negozio} onChange={e => setForm({...form, giacenza_negozio: parseInt(e.target.value) || 0})} />
-          <input type="number" placeholder="Giacenza vending" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.giacenza_vending} onChange={e => setForm({...form, giacenza_vending: parseInt(e.target.value) || 0})} />
+        <div className="grid grid-cols-2 gap-3 mt-3 md:max-w-md">
+          <input type="number" placeholder="Giacenza negozio" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.giacenza_negozio} onChange={e => setForm({...form, giacenza_negozio: e.target.value})} />
+          <input type="number" placeholder="Giacenza vending" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.giacenza_vending} onChange={e => setForm({...form, giacenza_vending: e.target.value})} />
         </div>
       </Card>
 

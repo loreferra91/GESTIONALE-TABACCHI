@@ -18,7 +18,7 @@ export default function Magazzino() {
 
   return (
     <Layout title="Magazzino / Pivot" subtitle="analisi giacenze & valorizzazione">
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 2xl:grid-cols-6 gap-3 mb-6">
         <KpiCard label="Val. acquistato" value={formatEur(k.valore_acquistato)} />
         <KpiCard label="Val. venduto" value={formatEur(k.valore_venduto)} tone="success" />
         <KpiCard label="Val. giacenza" value={formatEur(k.valore_giacenza)} />

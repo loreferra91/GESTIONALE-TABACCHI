@@ -58,5 +58,8 @@ h1, h2, h3, .font-heading { font-family: 'Chivo', system-ui, sans-serif; letter-
   padding: 10px 12px;
   border-bottom: 1px solid #F1F5F9;
   font-size: 13px;
+  white-space: nowrap;
+  vertical-align: middle;
 }
+.data-table td.wrap { white-space: normal; }
 .data-table tr:hover { background: #F8FAFC; }

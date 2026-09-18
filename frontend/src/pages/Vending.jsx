@@ -43,7 +43,7 @@ export default function Vending() {
         <KpiCard label="Pezzi da caricare" value={totProposta} />
       </div>
 
-      <div className="grid grid-cols-4 md:grid-cols-8 lg:grid-cols-12 gap-2 mb-8">
+      <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 2xl:grid-cols-12 gap-2 mb-8">
         {rows.map(r => (
           <button
             key={r.id}
