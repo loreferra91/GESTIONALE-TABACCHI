@@ -1,0 +1,34 @@
+{
+  "summary": "UI regression testing at 1366x800 and 1920x1000 viewports for the Gestionale Tabacchi app after E1's KpiCard/Badge/layout fixes. Backend smoke also verified. All requested regressions fixed; no truncation, no row-height doubling, no form overflow. Layouts scale properly across both viewports.",
+  "tested_scope": ["frontend UI regressions", "backend smoke"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "passed": [
+    "Dashboard 1366x800: KPI cards show full values (162.974,90 €, 145.245,80 €, 24.148,10 €, 4412) with no ... truncation. document.querySelectorAll('.truncate') has 0 truly-truncated elements on the dashboard KPI area.",
+    "Magazzino/Pivot 1366x800: 6 KPI cards render on 3 per row (2 rows) via grid-cols-2 sm:grid-cols-3 2xl:grid-cols-6. All values (Val. acquistato 162.974,90 €, Val. venduto 145.245,80 €, Val. giacenza 24.148,10 €, Da riordinare 24, Fermi 9, Lenti >6m 52) fully readable.",
+    "Auto-Order 1366x800: tbody row heights uniformly 42px (single-line, no doubling). TIPO column shows 'ELETTR.' (60.5px wide, h=21) and 'SIGARETTE' (77.5px, h=21) badges — no wrap. MOTIVO column shows 'SLOW MOVER' shortened badge (88px wide, h=21), never the long 'SLOW MOVER: 1 LOTTO (STOCK ZERO)'.",
+    "Prodotti 1366x800: Add-product form inputs (Codice, Descrizione, Prezzo, Giacenza negozio, Giacenza vending) all have value='' with placeholders visible — no default '0' shown. Table category badges 'ELETTR.'/'ACCESSORI' single-line (h=21).",
+    "Vendite 1366x800 (Inserimento manuale tab): form fits within viewport (no elements overflow the body width). Canale (NEGOZIO) + Pagamento (CONTANTI) selects render on a separate second row constrained to the smaller width as expected.",
+    "Vending 1366x800: cell grid uses lg:grid-cols-8 (computed gridTemplateColumns = 8 tracks) with 83 children. Cells are visibly wider and labels (e.g. 'A01 4/5') fully readable.",
+    "1920x1000 all pages: body.scrollWidth == clientWidth (no horizontal overflow). Dashboard 4-up top row + 4-up second row, Magazzino 6-up, Auto-Order table full width, Vending 12-column grid. No regressions.",
+    "Backend smoke (public URL) via curl: /api/dashboard, /api/pivot, /api/auto-order, /api/prodotti, /api/vending all return HTTP 200 with sub-second latency."
+  ],
+  "test_report_links": ["/app/test_reports/iteration_1.json"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "UI fixes are correct and effective; badge abbreviation (SIGARETTE ELETTRONICHE→ELETTR., long MOTIVO→short) + whitespace-nowrap on data-table td produce clean, uniform 42px rows and prevent overflow at 1366.",
+    "Note (non-blocking): Vendite manuale form has default value '1' in qta and '0' in importo; spec only required Prodotti to have empty defaults, so this is intentional but worth confirming with product owner if consistency is desired.",
+    "Note (non-blocking): interactive elements largely rely on visible text/placeholder selectors; adding data-testid attributes to KPI cards, form inputs and table rows would make future regression testing more robust."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a (no auth in this app)",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All UI regressions from iteration 2 request are fixed. Screenshots captured for both 1366x800 and 1920x1000 viewports for Dashboard, Magazzino, Auto-Order, Prodotti, Vendite (manuale), and Vending. Backend endpoints continue to pass (iteration_1 covered full backend at 100%). Consider adding data-testid attributes on KPI values, form inputs, and badges to make selector-based checks less text-dependent going forward."
+}
