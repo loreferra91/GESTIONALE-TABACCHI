@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
+import { api, API } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 
@@ -23,6 +23,12 @@ export default function AutoOrder() {
     load();
   };
 
+  const downloadPdf = async () => {
+    const fornitore = window.prompt("Nome fornitore per il PDF:", "Fornitore") || "Fornitore";
+    const url = `${API}/auto-order/pdf?fornitore=${encodeURIComponent(fornitore)}`;
+    window.open(url, "_blank");
+  };
+
   const righe = data?.righe || [];
 
   return (
@@ -36,6 +42,9 @@ export default function AutoOrder() {
 
       <div className="flex gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={load} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">Ricalcola</button>
+        <button data-testid="ao-pdf" onClick={downloadPdf} disabled={!righe.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+          Esporta PDF fornitore
+        </button>
         <button data-testid="ao-conferma" onClick={conferma} disabled={!righe.length} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           Conferma tutti gli ordini
         </button>

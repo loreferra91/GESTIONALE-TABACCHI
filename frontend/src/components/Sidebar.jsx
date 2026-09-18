@@ -1,11 +1,12 @@
 import { NavLink } from "react-router-dom";
 import {
   ChartBar, Package, ListChecks, Storefront, Receipt,
-  ShoppingCart, ClockCounterClockwise, CashRegister, Gear, GridFour,
+  ShoppingCart, ClockCounterClockwise, CashRegister, Gear, GridFour, Lightning,
 } from "@phosphor-icons/react";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: ChartBar, testid: "nav-dashboard", end: true },
+  { to: "/cassa-rapida", label: "Cassa Rapida", icon: Lightning, testid: "nav-cassa-rapida", highlight: true },
   { to: "/prodotti", label: "Prodotti", icon: Package, testid: "nav-prodotti" },
   { to: "/listino", label: "Listino ADM", icon: ListChecks, testid: "nav-listino" },
   { to: "/magazzino", label: "Magazzino / Pivot", icon: GridFour, testid: "nav-magazzino" },
@@ -37,7 +38,9 @@ export default function Sidebar() {
                 `flex items-center gap-3 px-5 py-2.5 text-sm font-medium transition-colors border-l-2 ${
                   isActive
                     ? "bg-slate-800 border-brand text-white"
-                    : "border-transparent text-slate-300 hover:bg-slate-800 hover:text-white"
+                    : n.highlight
+                      ? "border-transparent text-amber-300 hover:bg-slate-800 hover:text-white"
+                      : "border-transparent text-slate-300 hover:bg-slate-800 hover:text-white"
                 }`
               }
             >

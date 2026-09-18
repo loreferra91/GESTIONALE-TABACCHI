@@ -11,6 +11,7 @@ import AutoOrder from "./pages/AutoOrder";
 import Ordini from "./pages/Ordini";
 import Cassa from "./pages/Cassa";
 import Parametri from "./pages/Parametri";
+import CassaRapida from "./pages/CassaRapida";
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
           <Route path="/auto-order" element={<AutoOrder />} />
           <Route path="/ordini" element={<Ordini />} />
           <Route path="/cassa" element={<Cassa />} />
+          <Route path="/cassa-rapida" element={<CassaRapida />} />
           <Route path="/parametri" element={<Parametri />} />
         </Routes>
       </BrowserRouter>
