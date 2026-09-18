@@ -1,0 +1,25 @@
+{
+  "summary": "Iteration_4 regression after eslint-disable-line comment additions on 5 pages (AutoOrder, Cassa, Vending, Ordini, Parametri line ~16-17). Comment-only changes; zero regression risk expected and confirmed. Backend: expanded backend_test.py to 12 tests (added test_pivot, test_parametri_list, test_auto_order_pdf; fixed prior dashboard assertion to use nested kpi.pezzi_magazzino). All 12/12 backend tests pass. Frontend: all 11 navigation targets load with zero console errors at 1366x900.",
+  "tested_scope": ["backend regression (12 endpoints incl. new pivot/parametri list/auto-order PDF)", "frontend nav smoke (11 routes, console-error free)"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "Backend GET: /api/ 200; /api/dashboard 200 (kpi.pezzi_magazzino=4410); /api/prodotti?limit=5 list<=5; /api/vending list; /api/auto-order dict with n_righe/totale; /api/pivot 200; /api/parametri 200 list; /api/auto-order/pdf 200 content-type application/pdf.",
+    "Backend PUT /api/parametri/SOGLIA_ALLERT_PCT updates and restores.",
+    "Backend POST /api/vendite/bulk inserts + decrements giacenza; /api/vendite/import-csv-vending 200 with inseriti>=1; /api/ordini/bulk 200 with caricate>=2 + giacenza increment.",
+    "Frontend: /, /prodotti, /listino, /magazzino, /vending, /vendite, /auto-order, /carico, /ordini, /cassa, /parametri all load with 0 console errors."
+  ],
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Prior iteration_3 note still stands: Parametri.jsx `parseFloat(v) !== Number(p.valore)` fires PUT with NaN if user clears field then blurs. Guard with `!Number.isNaN(v) && v !== Number(p.valore)`. Not exercised by comment-only change but remains a real edge case.",
+    "Vendite bulk-row testids still index-based (bulk-row-{i}-codice) — testids shift after delete. Cosmetic for test stability only."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a (no auth)",
+  "seed_data_creation": "Bulk POSTs inserted vendite/ordini with file_sorgente='TEST_ordini_bulk'; not cleaned up (no delete-by-source endpoint). Negligible impact.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test suite now has 12 tests including pivot, parametri list, and PDF endpoint. Dashboard assertion targets kpi.pezzi_magazzino (nested), not flat prodotti_totali. Comment-only frontend patches this round; no functional/DOM changes to re-verify beyond what iteration_3 already covered."
+}

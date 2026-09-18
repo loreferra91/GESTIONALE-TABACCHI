@@ -28,7 +28,22 @@ def test_dashboard(s):
     r = s.get(f"{BASE}/api/dashboard")
     assert r.status_code == 200
     d = r.json()
-    assert d.get("prodotti_totali", 0) > 0
+    assert "kpi" in d and isinstance(d["kpi"], dict)
+    assert d["kpi"].get("pezzi_magazzino", 0) > 0
+
+def test_pivot(s):
+    r = s.get(f"{BASE}/api/pivot")
+    assert r.status_code == 200
+
+def test_parametri_list(s):
+    r = s.get(f"{BASE}/api/parametri")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+def test_auto_order_pdf(s):
+    r = s.get(f"{BASE}/api/auto-order/pdf")
+    assert r.status_code == 200
+    assert r.headers.get("content-type", "").startswith("application/pdf")
 
 def test_prodotti_limit(s):
     r = s.get(f"{BASE}/api/prodotti", params={"limit": 5})
