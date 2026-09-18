@@ -237,14 +237,28 @@ async def root():
 
 
 # ------------------------- Prodotti -------------------------
+MAX_LIMIT = 5000
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+def _q_regex(q: str) -> Dict[str, Any]:
+    """Safe regex from user input (escaped, bounded)."""
+    return {"$regex": re.escape(q[:200]), "$options": "i"}
+
+
+def _cap(limit: int) -> int:
+    return max(1, min(int(limit or 0), MAX_LIMIT))
+
+
 @api.get("/prodotti")
 async def list_prodotti(q: Optional[str] = None, categoria: Optional[str] = None, limit: int = 500):
     filt: Dict[str, Any] = {}
     if categoria:
         filt["categoria"] = categoria
     if q:
-        filt["$or"] = [{"codice": {"$regex": q, "$options": "i"}}, {"descrizione": {"$regex": q, "$options": "i"}}]
-    docs = await db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).to_list(limit)
+        rx = _q_regex(q)
+        filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
+    docs = await db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).to_list(_cap(limit))
     return docs
 
 
@@ -275,8 +289,9 @@ async def delete_prodotto(prod_id: str):
 async def list_listino(q: Optional[str] = None, limit: int = 300):
     filt: Dict[str, Any] = {}
     if q:
-        filt["$or"] = [{"codice": {"$regex": q, "$options": "i"}}, {"descrizione": {"$regex": q, "$options": "i"}}]
-    docs = await db.listino_adm.find(filt, {"_id": 0}).sort("descrizione", 1).to_list(limit)
+        rx = _q_regex(q)
+        filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
+    docs = await db.listino_adm.find(filt, {"_id": 0}).sort("descrizione", 1).to_list(_cap(limit))
     total = await db.listino_adm.count_documents(filt)
     return {"items": docs, "total": total}
 
@@ -286,8 +301,10 @@ async def list_listino(q: Optional[str] = None, limit: int = 300):
 async def list_vendite(giorno: Optional[str] = None, limit: int = 500):
     filt: Dict[str, Any] = {}
     if giorno:
-        filt["data"] = {"$regex": f"^{giorno}"}
-    docs = await db.vendite.find(filt, {"_id": 0}).sort("data", -1).to_list(limit)
+        # data ISO stringa (2026-02-18...) — validiamo formato semplice
+        safe = re.sub(r"[^0-9\-T:.]", "", giorno)[:32]
+        filt["data"] = {"$regex": f"^{re.escape(safe)}"}
+    docs = await db.vendite.find(filt, {"_id": 0}).sort("data", -1).to_list(_cap(limit))
     return docs
 
 
@@ -355,6 +372,19 @@ async def bulk_vendite(body: BulkVenditaIn):
     return {"inseriti": inserted, "saltati": skipped, "errori": errors}
 
 
+async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> bytes:
+    """Read an UploadFile with a hard size cap; raise 413 if exceeded."""
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1024 * 64)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(413, f"File troppo grande (max {max_bytes // 1024 // 1024} MB)")
+    return bytes(buf)
+
+
 @api.post("/vendite/import-csv-vending")
 async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
     """Import CSV del distributore vending. Colonne accettate (case-insensitive):
@@ -362,7 +392,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
        Separatore auto-rilevato (, ; \\t).
     """
     import csv
-    raw = (await file.read()).decode("utf-8-sig", errors="replace")
+    raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
     # rileva delimitatore
     sample = raw[:2000]
     try:
@@ -492,7 +522,7 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
 # ------------------------- Storico ordini -------------------------
 @api.get("/ordini")
 async def list_ordini(limit: int = 1000):
-    docs = await db.storico_ordini.find({}, {"_id": 0}).sort("data", -1).to_list(limit)
+    docs = await db.storico_ordini.find({}, {"_id": 0}).sort("data", -1).to_list(_cap(limit))
     return docs
 
 
@@ -560,7 +590,7 @@ async def bulk_carico(body: BulkOrdineIn):
 # ------------------------- Cassa -------------------------
 @api.get("/cassa")
 async def list_cassa(limit: int = 500):
-    docs = await db.cassa.find({}, {"_id": 0}).sort("data", -1).to_list(limit)
+    docs = await db.cassa.find({}, {"_id": 0}).sort("data", -1).to_list(_cap(limit))
     saldo = 0.0
     all_docs = await db.cassa.find({}, {"_id": 0}).to_list(10000)
     for d in all_docs:
@@ -702,6 +732,10 @@ async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.enums import TA_RIGHT, TA_LEFT
+    from xml.sax.saxutils import escape as xml_escape
+
+    # sanifica input utente per la markup di reportlab
+    fornitore_safe = xml_escape((fornitore or "Fornitore")[:120])
 
     ao = await auto_order()
     righe = ao["righe"]
@@ -716,7 +750,7 @@ async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
     story = []
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     story.append(Paragraph("ORDINE FORNITORE — GOD SERVICES", title_s))
-    story.append(Paragraph(f"Destinatario: <b>{fornitore}</b> &nbsp;·&nbsp; Data: <b>{now}</b> &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {ao['totale']:.2f}</b>", sub_s))
+    story.append(Paragraph(f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{now}</b> &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {ao['totale']:.2f}</b>", sub_s))
 
     # Table
     header = ["CODICE", "ARTICOLO", "TIPO", "QTA", "LOTTO", "PREZZO", "TOTALE", "MOTIVO"]
@@ -883,7 +917,7 @@ async def import_excel(file: UploadFile = File(...)):
         import openpyxl
     except Exception:
         raise HTTPException(500, "openpyxl non installato")
-    content = await file.read()
+    content = await _read_capped(file)
     wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
     inserted = updated = 0
     if "RIEP_VENDITA" in wb.sheetnames:
@@ -914,10 +948,13 @@ async def import_excel(file: UploadFile = File(...)):
 # ------------------------- Register -------------------------
 app.include_router(api)
 
+_cors_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
+_cors_credentials = _cors_origins != ['*']  # wildcard + credentials è invalido; disabilita credentials se wildcard
+
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=_cors_credentials,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
