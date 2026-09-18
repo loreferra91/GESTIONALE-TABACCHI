@@ -1,0 +1,32 @@
+{
+  "summary": "iteration_6 tests the AGGIO_PCT (tobacco vendor commission) feature. Added /app/backend/tests/test_aggio.py (4 new tests) verifying: AGGIO_PCT default 0.10 seeded, dashboard/pivot KPIs include aggio_pct + margine_lordo, valore_acquistato = retail * (1 - aggio), recompute at 0.15 produces expected value and increases margine_lordo, restore to 0.10 returns baseline. All 23 backend tests PASS (19 existing regression + 4 new). Frontend verified visually: Dashboard shows 'VALORE ACQUISTATO (NETTO AGGIO 10%)', 'MARGINE LORDO STIMATO', 'VALORE GIACENZA (A COSTO)'. Magazzino shows 'Val. acquistato', '-10% aggio' hint, 'Margine lordo' card. Parametri page lists AGGIO_PCT=0.1 as editable input. Reset AGGIO_PCT=0.10 confirmed at end of aggio test.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "GET /api/parametri lists AGGIO_PCT with valore=0.10 (seeded).",
+    "GET /api/dashboard kpi contains valore_acquistato, valore_venduto, valore_giacenza, margine_lordo, aggio_pct.",
+    "Math check: valore_acquistato (146700.36) at aggio=0.10 => retail base ~163000 (matches request's 162991.80 baseline within seed drift due to prior test mutations).",
+    "PUT /api/parametri/AGGIO_PCT valore=0.15 recomputes valore_acquistato = retail * 0.85; margine_lordo increases vs baseline.",
+    "PUT /api/parametri/AGGIO_PCT valore=0.10 restores baseline (delta < 0.05).",
+    "GET /api/pivot returns kpi with consistent margine_lordo = valore_venduto - valore_acquistato and aggio_pct=0.10.",
+    "Regression: prodotti, listino, vendite (bulk + csv vending), ordini bulk, vending (83 cells), cassa via list_cassa (used by dashboard), parametri PUT SOGLIA, auto-order, auto-order/pdf, size-cap 413, regex escape, CORS all pass.",
+    "Frontend Dashboard 4-KPI grid renders with new labels including 'NETTO AGGIO 10%'.",
+    "Frontend Magazzino shows Margine lordo card + '(-10% aggio)' hint.",
+    "Frontend Parametri page lists AGGIO_PCT with editable input."
+  ],
+  "test_report_links": ["/app/backend/tests/test_aggio.py", "/app/backend/tests/backend_test.py", "/app/test_reports/pytest/iter6.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "pivot() recomputes cost basis on every /api/dashboard and /api/pivot call by scanning all prodotti (5000 doc list_to). Fine at current scale, but consider caching KPIs (short TTL) once product count grows.",
+    "cost_factor = max(0, 1 - aggio). If a user PUTs AGGIO_PCT > 1.0 or negative, cost silently clamps to 0 with no validation error — recommend validating 0 <= AGGIO_PCT < 1 on PUT /api/parametri/{nome} (currently accepts any float).",
+    "aggio_pct is returned in kpi as a float; frontend labels hard-code '10%' text ('netto aggio 10%'). If user edits AGGIO_PCT, dashboard/magazzino labels remain '10%' — labels should read from kpi.aggio_pct to stay consistent with actual value.",
+    "Iteration_5 open items still valid: listino returns object vs prodotti bare list (shape inconsistency); Parametri.jsx PUT-on-blur can send NaN if field cleared; MAX_LIMIT cap silent (no X-Truncated header)."
+  ],
+  "updated_files": ["/app/backend/tests/test_aggio.py"],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "100% (Dashboard/Magazzino/Parametri labels + AGGIO_PCT editable)"},
+  "test_credentials": "n/a (single-user app)",
+  "seed_data_creation": "Prior TEST_ vendite/ordini rows remain from earlier iterations; aggio test only toggles parameter and restores.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "backend_test.py (19 tests) + test_aggio.py (4 tests). Aggio tests derive retail base from current valore_acquistato/0.9 (drift-safe against seed changes). If validating AGGIO_PCT bounds is added on PUT, extend test_aggio.py with negative/>=1 cases."
+}

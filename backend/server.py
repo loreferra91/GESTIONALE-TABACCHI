@@ -622,11 +622,32 @@ async def list_parametri():
     return docs
 
 
+PARAM_BOUNDS = {
+    # nome: (min_incl, max_excl, descrizione)
+    "AGGIO_PCT": (0.0, 1.0, "0 ≤ AGGIO_PCT < 1"),
+    "SOGLIA_ALLERT_PCT": (0.0, 1.0, "0 ≤ SOGLIA_ALLERT_PCT < 1"),
+    "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
+    "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
+    "GIORNI_STORICO_VEND": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
+    "GIORNI_SETTIMANA": (1.0, 31.0, "1 ≤ giorni ≤ 31"),
+    "VENDITE_GIORNALIERE_MESE": (1.0, 100.0, "1 ≤ divisore ≤ 100"),
+    "FAST_VENDUTO30_MIN": (0.0, 10000.0, "0 ≤ soglia"),
+    "SLOW_VENDUTO30_MAX": (0.0, 10000.0, "0 ≤ soglia"),
+    "LOTTO_SIGARETTE": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_ELETTRONICHE": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_ACCESSORI": (1.0, 10000.0, "1 ≤ lotto"),
+}
+
+
 @api.put("/parametri/{nome}")
 async def update_parametro(nome: str, body: ParametroIn):
+    bounds = PARAM_BOUNDS.get(nome)
+    if bounds is not None:
+        lo, hi, msg = bounds
+        if not (lo <= body.valore < hi):
+            raise HTTPException(422, f"{nome} fuori range consentito ({msg}). Ricevuto: {body.valore}")
     r = await db.parametri.update_one({"nome": nome}, {"$set": {"valore": body.valore}})
     if r.matched_count == 0:
-        # create if missing
         await db.parametri.insert_one(Parametro(nome=nome, valore=body.valore).model_dump())
     doc = await db.parametri.find_one({"nome": nome}, {"_id": 0})
     return doc
