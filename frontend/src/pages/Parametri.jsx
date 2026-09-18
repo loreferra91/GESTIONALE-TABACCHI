@@ -64,7 +64,10 @@ export default function Parametri() {
                       step="0.01"
                       defaultValue={p.valore}
                       className="border rounded-md px-3 py-1 text-sm font-mono w-32 text-right"
-                      onBlur={(e) => parseFloat(e.target.value) !== Number(p.valore) && update(p.nome, e.target.value)}
+                      onBlur={(e) => {
+                        const v = parseFloat(e.target.value);
+                        if (!Number.isNaN(v) && v !== Number(p.valore)) update(p.nome, v);
+                      }}
                     />
                   </td>
                   <td></td>

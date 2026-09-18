@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration_3 regression testing for the correctness-only patches (strict equality in Parametri, meaningful catch in Vendite.lookupPrezzo, _uid stable keys in Vendite bulk preview and Carico rows, explicit eslint-disable comments). Backend regressions all pass. All targeted frontend behaviors verified: Parametri PUT fires only on real value change, Vendite bulk preview editable+trash-single+Svuota-tutto works, Carico Precompila da Auto-Order populates rows with stable identity (focus preserved across other-row edits). Zero console errors across all pages at 1366x800 and 1920x1000.",
+  "tested_scope": ["backend regression", "frontend regression (Parametri/Vendite/Carico) + console-clean nav"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "Backend: GET /api/ 200; GET /api/dashboard 200 (kpi.pezzi_magazzino=4412, kpi is nested so my test assertion on prodotti_totali was wrong — backend itself is healthy); GET /api/prodotti?limit=5 returns list; GET /api/vending returns 83 cells; GET /api/auto-order returns n_righe & totale.",
+    "Backend: PUT /api/parametri/SOGLIA_ALLERT_PCT with valore=0.35 returns updated doc; value restored after test.",
+    "Backend: POST /api/vendite/bulk with 2 rows inserts 2 vendite and decrements giacenza_negozio by 1 for each product (verified via GET).",
+    "Backend: POST /api/vendite/import-csv-vending with 2-row CSV returns delimitatore='\\,' and inseriti>=1.",
+    "Backend: POST /api/ordini/bulk with 2 rows returns caricate>=2 and increments giacenza_negozio by qty (verified via GET).",
+    "Frontend Parametri: blur on input with SAME value → 0 PUT requests fired. Blur on input with CHANGED value (45894 → 45894.11) → exactly 1 PUT request to /api/parametri/DATA_APERTURA. Strict-equality guard works.",
+    "Frontend Vendite bulk (vend-tab-bulk): pasted 3 rows → 3 preview rows; row-0 with BADCODE shows badge NON TROVATO; editing bulk-row-0-codice to 'AMMS338' updates status to OK in real-time; clicking bulk-del-1 removes exactly that row (count 3 → 2); bulk-clear-all clears both preview rows (→0) AND textarea (→ empty).",
+    "Frontend Carico: 'Precompila da Auto-Order' loaded 78 rows. Focused carico-row-0-qta, then updated carico-row-1-qta programmatically; focused element remained carico-row-0-qta → stable _uid keys preserve row identity/focus across siblings.",
+    "Frontend console: 0 errors on / (Dashboard), /magazzino, /vendite, /carico, /parametri at 1366x800 and 1920x1000."
+  ],
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Parametri.jsx L67 uses `parseFloat(e.target.value) !== Number(p.valore)` — works, but Number('') === NaN and parseFloat('') === NaN; if a user clears the field and blurs, the comparison NaN !== 0 becomes true and a PUT with NaN would be sent (JSON becomes null). Consider guarding: `!Number.isNaN(v) && v !== Number(p.valore)`.",
+    "Vendite.jsx bulk-preview `data-testid=bulk-row-{i}-codice` uses index i, not r._uid; when a row in the middle is deleted, testids of later rows shift. Not a bug for users but worth noting for test stability (backing store already keyed by _uid on <tr>).",
+    "Carico.jsx L45 uses a comma operator inside a short-circuit — readable but easy to misread; a normal `if (p) { ...updateRow(...); ...updateRow(...); }` block would be clearer. Not blocking.",
+    "Backend `is not None` at server.py:187 confirmed idiomatic — false-positive from previous review, correctly left as-is."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a (no auth)",
+  "seed_data_creation": "Tests use existing seeded prodotti; bulk POST inserts 2 vendite + 2 ordini rows tagged file_sorgente='TEST_ordini_bulk' (not cleaned up — backend has no delete-by-source endpoint; impact negligible).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All correctness patches (strict equality, catch(err), _uid stable keys, eslint-disable comments) verified via both backend regressions and DOM/network observation. Note: the dashboard endpoint returns kpi as a nested dict — {kpi:{pezzi_magazzino:4412,...}}, not a flat prodotti_totali field; adjust assertions accordingly. Focus test (Carico row identity) uses element.dispatchEvent to avoid stealing focus."
+}
