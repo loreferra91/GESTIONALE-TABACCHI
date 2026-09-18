@@ -14,7 +14,7 @@ export default function AutoOrder() {
     setData(r.data);
     setLoading(false);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const conferma = async () => {
     if (!window.confirm(`Confermi ${data.n_righe} ordini per un totale di € ${data.totale}?`)) return;

@@ -13,7 +13,7 @@ export default function Cassa() {
     const r = await api.get("/cassa");
     setData(r.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");

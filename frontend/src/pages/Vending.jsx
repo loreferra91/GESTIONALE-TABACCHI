@@ -13,7 +13,7 @@ export default function Vending() {
     const r = await api.get("/vending");
     setRows(r.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const rica = async (v) => {
     const q = window.prompt(`Ricarica colonna ${v.colonna} — capacità ${v.capacita_max}, attuale ${v.giacenza}. Quanti pezzi?`, v.proposta);

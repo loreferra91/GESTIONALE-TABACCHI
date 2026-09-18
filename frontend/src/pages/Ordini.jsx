@@ -14,7 +14,7 @@ export default function Ordini() {
     const r = await api.get("/ordini");
     setRows(r.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async () => {
     if (!form.codice || !form.quantita) return toast.error("Codice e quantità richiesti");

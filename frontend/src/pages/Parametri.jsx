@@ -13,7 +13,7 @@ export default function Parametri() {
     const r = await api.get("/parametri");
     setRows(r.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const update = async (nome, valore) => {
     await api.put(`/parametri/${nome}`, { valore: parseFloat(valore) });
