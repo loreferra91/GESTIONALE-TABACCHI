@@ -7,7 +7,7 @@ export default function Magazzino() {
   const [data, setData] = useState(null);
   const [q, setQ] = useState("");
   const [stato, setStato] = useState("");
-  useEffect(() => { api.get("/pivot").then(r => setData(r.data)); }, []);
+  useEffect(() => { api.get("/pivot").then(r => setData(r.data)); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const rows = (data?.righe || []).filter(r =>
     (!q || r.codice.toLowerCase().includes(q.toLowerCase()) || r.descrizione.toLowerCase().includes(q.toLowerCase())) &&

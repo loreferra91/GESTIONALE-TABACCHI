@@ -10,7 +10,7 @@ export default function Dashboard() {
   useEffect(() => {
     api.get("/dashboard").then((r) => setData(r.data));
     api.get("/pivot").then((r) => setPivot(r.data));
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const k = data?.kpi || {};
 

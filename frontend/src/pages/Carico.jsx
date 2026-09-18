@@ -16,7 +16,7 @@ export default function Carico() {
 
   useEffect(() => {
     api.get("/prodotti", { params: { limit: 5000 } }).then(r => setProdotti(r.data));
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const prodMap = useMemo(() => {
     const m = new Map();
@@ -29,12 +29,12 @@ export default function Carico() {
       const existing = r.find(x => x.codice === p.codice);
       if (existing) return r.map(x => x.codice === p.codice ? { ...x, quantita: (x.quantita || 0) + (p.categoria === "SIGARETTE" ? 10 : p.categoria === "SIGARETTE ELETTRONICHE" ? 5 : 1) } : x);
       const lotto = p.categoria === "SIGARETTE" ? 10 : p.categoria === "SIGARETTE ELETTRONICHE" ? 5 : 1;
-      return [...r, { codice: p.codice, descrizione: p.descrizione, quantita: lotto, prezzo: p.prezzo || 0 }];
+      return [...r, { _uid: `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, codice: p.codice, descrizione: p.descrizione, quantita: lotto, prezzo: p.prezzo || 0 }];
     });
     setQ("");
   };
 
-  const addEmpty = () => setRighe(r => [...r, { codice: "", descrizione: "", quantita: 0, prezzo: 0 }]);
+  const addEmpty = () => setRighe(r => [...r, { _uid: `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, codice: "", descrizione: "", quantita: 0, prezzo: 0 }]);
   const updateRow = (i, field, val) => setRighe(r => r.map((x, idx) => idx === i ? { ...x, [field]: val } : x));
   const removeRow = (i) => setRighe(r => r.filter((_, idx) => idx !== i));
 
@@ -47,7 +47,8 @@ export default function Carico() {
 
   const importFromAO = async () => {
     const r = await api.get("/auto-order");
-    const nuove = (r.data.righe || []).map(x => ({
+    const nuove = (r.data.righe || []).map((x, idx) => ({
+      _uid: `c-ao-${Date.now()}-${idx}`,
       codice: x.codice, descrizione: x.descrizione, quantita: x.qta_da_ordinare, prezzo: x.prezzo,
     }));
     setRighe(nuove);
@@ -163,7 +164,7 @@ export default function Carico() {
               {righe.map((r, i) => {
                 const known = r.codice && prodMap.has(r.codice.trim());
                 return (
-                  <tr key={i} className={!known && r.codice ? "bg-red-50" : ""} data-testid={`carico-row-${i}`}>
+                  <tr key={r._uid || i} className={!known && r.codice ? "bg-red-50" : ""} data-testid={`carico-row-${i}`}>
                     <td>
                       <input value={r.codice} onChange={e => updateRow(i, "codice", e.target.value)} onBlur={() => onCodiceBlur(i)} className="border rounded-md px-2 py-1 text-sm font-mono w-28" data-testid={`carico-row-${i}-codice`} />
                     </td>

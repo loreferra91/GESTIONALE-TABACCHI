@@ -24,7 +24,7 @@ export default function CassaRapida() {
   useEffect(() => {
     api.get("/prodotti", { params: { limit: 1000 } }).then(r => setProds(r.data));
     api.get("/prodotti/top", { params: { limit: 40 } }).then(r => setTop(r.data));
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const visibili = useMemo(() => {
     const base = q ? prods : (cat === "ALL" ? top : prods);

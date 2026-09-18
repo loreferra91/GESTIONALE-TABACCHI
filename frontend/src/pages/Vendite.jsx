@@ -28,7 +28,7 @@ export default function Vendite() {
       (r.data || []).forEach(p => m.set(p.codice, p));
       setProdMap(m);
     });
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = async () => {
     const r = await api.get("/vendite", { params: { giorno } });
@@ -57,7 +57,9 @@ export default function Vendite() {
       const r = await api.get("/prodotti", { params: { q: form.codice } });
       const p = (r.data || []).find(x => x.codice === form.codice);
       if (p) setForm(f => ({ ...f, descrizione: p.descrizione, importo: p.prezzo * (f.quantita || 1) }));
-    } catch {}
+    } catch (err) {
+      console.error("lookupPrezzo failed:", err);
+    }
   };
 
   const tot = rows.reduce((s, r) => s + (r.importo || 0), 0);
@@ -79,13 +81,14 @@ export default function Vendite() {
       for (const line of raw) groups.push(line.split(/\t|;|,/).map(x => x.trim()));
     }
 
-    return groups.map(parts => {
+    return groups.map((parts, idx) => {
       let data, codice, descrizione, qta, importo;
       if (parts.length >= 5) [data, codice, descrizione, qta, importo] = parts;
       else if (parts.length === 4) { [codice, descrizione, qta, importo] = parts; data = defaultData; }
       else if (parts.length === 3) { [codice, qta, importo] = parts; descrizione = ""; data = defaultData; }
       else return null;
       return {
+        _uid: `bulk-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
         data: data || defaultData,
         codice: (codice || "").trim(),
         descrizione: (descrizione || "").trim(),
@@ -256,7 +259,7 @@ export default function Vendite() {
                     const tone = r._stato === "ok" ? "ok" : r._stato === "sconosciuto" ? "error" : "warning";
                     const label = r._stato === "ok" ? "OK" : r._stato === "sconosciuto" ? "NON TROVATO" : r._stato.toUpperCase();
                     return (
-                      <tr key={i} className={rowClass} data-testid={`bulk-preview-row-${i}`}>
+                      <tr key={r._uid} className={rowClass} data-testid={`bulk-preview-row-${i}`}>
                         <td className="font-mono text-xs text-slate-400">{i + 1}</td>
                         <td className="font-mono text-xs">{r.data}</td>
                         <td>
@@ -299,7 +302,7 @@ export default function Vendite() {
             <span className="font-bold text-emerald-700">{bulkResult.inseriti}</span> inserite · <span className="text-slate-600">{bulkResult.saltati}</span> saltate
             {bulkResult.errori?.length > 0 && (
               <details className="mt-2"><summary className="text-red-600 cursor-pointer">Errori ({bulkResult.errori.length})</summary>
-                <ul className="text-xs mt-2">{bulkResult.errori.slice(0, 20).map((e, i) => <li key={i}>Riga {e.riga}: {e.errore}</li>)}</ul>
+                <ul className="text-xs mt-2">{bulkResult.errori.slice(0, 20).map((e, i) => <li key={`br-${e.riga}-${i}`}>Riga {e.riga}: {e.errore}</li>)}</ul>
               </details>
             )}
           </div>
@@ -325,7 +328,7 @@ export default function Vendite() {
             <span className="font-bold text-emerald-700">{csvResult.inseriti}</span> righe · saltate {csvResult.saltati} · delimitatore <code>{csvResult.delimitatore}</code>
             {csvResult.errori?.length > 0 && (
               <details className="mt-2"><summary className="text-red-600 cursor-pointer">Errori ({csvResult.errori.length})</summary>
-                <ul className="text-xs mt-2">{csvResult.errori.slice(0, 20).map((e, i) => <li key={i}>Riga {e.riga}: {e.errore}</li>)}</ul>
+                <ul className="text-xs mt-2">{csvResult.errori.slice(0, 20).map((e, i) => <li key={`cr-${e.riga}-${i}`}>Riga {e.riga}: {e.errore}</li>)}</ul>
               </details>
             )}
           </div>
