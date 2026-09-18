@@ -26,7 +26,10 @@ async def optional_basic_auth(request: Request, call_next):
     """Protect preview deployments when APP_USERNAME/PASSWORD are configured."""
     username = os.environ.get("APP_USERNAME")
     password = os.environ.get("APP_PASSWORD")
-    if not username or not password or request.url.path == "/api/":
+    is_health_check = request.url.path == "/api/" or (
+        request.method == "HEAD" and request.url.path == "/"
+    )
+    if not username or not password or is_health_check:
         return await call_next(request)
 
     authorization = request.headers.get("Authorization", "")
