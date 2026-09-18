@@ -1,9 +1,10 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, json, logging, uuid, io, re
+import os, json, logging, uuid, io, re, base64, secrets
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
@@ -18,6 +19,36 @@ db = client[os.environ['DB_NAME']]
 
 app = FastAPI(title="God Services Gestionale Tabacchi")
 api = APIRouter(prefix="/api")
+
+
+@app.middleware("http")
+async def optional_basic_auth(request: Request, call_next):
+    """Protect preview deployments when APP_USERNAME/PASSWORD are configured."""
+    username = os.environ.get("APP_USERNAME")
+    password = os.environ.get("APP_PASSWORD")
+    if not username or not password or request.url.path == "/api/":
+        return await call_next(request)
+
+    authorization = request.headers.get("Authorization", "")
+    try:
+        scheme, encoded = authorization.split(" ", 1)
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        supplied_username, supplied_password = decoded.split(":", 1)
+        authenticated = (
+            scheme.lower() == "basic"
+            and secrets.compare_digest(supplied_username, username)
+            and secrets.compare_digest(supplied_password, password)
+        )
+    except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+        authenticated = False
+
+    if not authenticated:
+        return PlainTextResponse(
+            "Autenticazione richiesta",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Gestionale"'},
+        )
+    return await call_next(request)
 
 
 # ------------------------- Models -------------------------
@@ -958,6 +989,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# In production the React build is copied alongside the backend. API routes
+# keep precedence; every other unknown path falls back to the SPA entry point.
+FRONTEND_BUILD_DIR = ROOT_DIR.parent / "frontend" / "build"
+if FRONTEND_BUILD_DIR.exists():
+    static_dir = FRONTEND_BUILD_DIR / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        build_root = FRONTEND_BUILD_DIR.resolve()
+        requested = (build_root / full_path).resolve()
+        try:
+            requested.relative_to(build_root)
+        except ValueError:
+            requested = build_root / "index.html"
+
+        if requested.is_file():
+            return FileResponse(requested)
+        return FileResponse(build_root / "index.html")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s - %(message)s')
 
