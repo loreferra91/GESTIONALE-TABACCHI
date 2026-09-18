@@ -149,3 +149,46 @@ def test_ordini_bulk(s):
     match = [x for x in r2.json() if x["codice"] == p1["codice"]]
     assert match
     assert match[0].get("giacenza_negozio", 0) == g1_before + 2
+
+# ---- Security regressions ----
+def test_sec002_prodotti_regex_escape(s):
+    # '.*' must be treated as literal, so no product code contains '.*' → 0 results
+    r = s.get(f"{BASE}/api/prodotti", params={"q": ".*"})
+    assert r.status_code == 200
+    assert r.json() == []
+
+def test_sec002_listino_regex_escape(s):
+    r = s.get(f"{BASE}/api/listino", params={"q": ".*"})
+    assert r.status_code == 200
+    d = r.json()
+    items = d if isinstance(d, list) else d.get("items", [])
+    assert items == []
+
+def test_sec002_vendite_giorno_regex(s):
+    r = s.get(f"{BASE}/api/vendite", params={"giorno": "2026-01-15"})
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+def test_p3_limit_cap(s):
+    r = s.get(f"{BASE}/api/prodotti", params={"limit": 99999})
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) <= 5000
+
+def test_p3_pdf_xml_injection(s):
+    r = s.get(f"{BASE}/api/auto-order/pdf", params={"fornitore": "<script>alert(1)</script>"})
+    assert r.status_code == 200
+    assert r.headers.get("content-type", "").startswith("application/pdf")
+    assert r.content[:5] == b"%PDF-"
+
+def test_sec003_upload_size_413(s):
+    # Create ~21MB payload
+    big = b"x" * (21 * 1024 * 1024)
+    files = {"file": ("big.csv", io.BytesIO(big), "text/csv")}
+    r = s.post(f"{BASE}/api/vendite/import-csv-vending", files=files, params={"pagamento": "CONTANTI"})
+    assert r.status_code == 413, f"expected 413, got {r.status_code}: {r.text[:200]}"
+    assert "troppo grande" in r.text.lower() or "too large" in r.text.lower()
+
+def test_cors_still_works(s):
+    r = s.get(f"{BASE}/api/", headers={"Origin": "https://workflow-hub-929.preview.emergentagent.com"})
+    assert r.status_code == 200

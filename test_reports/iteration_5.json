@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration_5 regression + security-fix verification after SEC-002/SEC-003/P3 hardenings. Added 7 new security-focused tests to backend_test.py (regex escape on prodotti/listino/vendite, limit cap, PDF XML injection, 20MB upload 413, CORS). Total: 19/19 backend tests PASS. Frontend: all 11 routes load with 0 console errors.",
+  "tested_scope": ["Backend regression (12 existing endpoints)", "SEC-002 regex ReDoS mitigation (prodotti, listino, vendite/giorno)", "SEC-003 20MB upload cap → 413", "P3 MAX_LIMIT=5000 cap", "P3 PDF fornitore XML-injection safety", "CORS origin still works", "Frontend nav smoke (11 routes)"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "SEC-002: GET /api/prodotti?q=.* → [] (regex escaped). GET /api/listino?q=.* → items:[] (escaped). GET /api/vendite?giorno=2026-01-15 filters correctly.",
+    "SEC-003: POST /api/vendite/import-csv-vending with 21MB body → HTTP 413 with 'troppo grande' message.",
+    "P3: GET /api/prodotti?limit=99999 → capped (≤5000, actually 228 seed).",
+    "P3: GET /api/auto-order/pdf?fornitore=<script>alert(1)</script> → 200 application/pdf, body starts %PDF- (xml_escape on fornitore works, no reportlab XML error).",
+    "CORS: GET /api/ with Origin header from prod URL → 200.",
+    "Regression: /api/dashboard, /api/pivot, /api/parametri (GET+PUT SOGLIA_ALLERT_PCT), /api/vending (83 cells), /api/auto-order, /api/vendite/bulk (+giacenza decrement), /api/vendite/import-csv-vending, /api/ordini/bulk (+giacenza increment) all pass.",
+    "Frontend routes /, /prodotti, /listino, /magazzino, /vending, /vendite, /auto-order, /carico, /ordini, /cassa, /parametri: 0 console errors."
+  ],
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Listino returns object {items,total} while prodotti returns bare list — inconsistent list-endpoint shape across the API. Consider normalizing (either always paginated or always bare list) for OpenAPI/consumer clarity.",
+    "_read_capped currently accumulates the oversize payload into memory before raising 413 (must at least consume the stream). If Starlette/uvicorn buffers requests to disk this is fine, but under memory pressure a very fast 413 abort (checking Content-Length header first) would be safer. Minor.",
+    "MAX_LIMIT=5000 cap is silent (no warning header). Consider returning X-Truncated or a truncated=true field in paginated responses so clients don't assume full result set.",
+    "Prior iteration_4 note still stands: Parametri.jsx `parseFloat(v) !== Number(p.valore)` fires PUT with NaN if user clears field then blurs. Guard with `!Number.isNaN(v) && v !== Number(p.valore)`."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% (11/11 routes)"},
+  "test_credentials": "n/a (single-user app, SEC-001 documented tradeoff)",
+  "seed_data_creation": "Bulk POSTs inserted vendite/ordini rows (file_sorgente=TEST_ordini_bulk). Existing behavior from iteration_4.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "backend_test.py now has 19 tests across 3 blocks: smoke, mutations, security. All security assertions from the request are covered by test_sec002_* / test_sec003_upload_size_413 / test_p3_limit_cap / test_p3_pdf_xml_injection / test_cors_still_works. Note listino endpoint returns dict{items,total} not list."
+}
