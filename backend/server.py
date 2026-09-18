@@ -316,6 +316,131 @@ async def del_vendita(v_id: str):
     return {"ok": True}
 
 
+class BulkVenditaIn(BaseModel):
+    canale: str = "NEGOZIO"
+    pagamento: str = "CONTANTI"
+    righe: List[Dict[str, Any]]  # {data, codice, descrizione, quantita, importo}
+
+
+@api.post("/vendite/bulk")
+async def bulk_vendite(body: BulkVenditaIn):
+    """Bulk paste da Excel: rows with data, codice, descrizione, quantita, importo."""
+    inserted = 0
+    skipped = 0
+    errors = []
+    for i, r in enumerate(body.righe):
+        try:
+            codice = str(r.get("codice") or "").strip()
+            if not codice:
+                skipped += 1
+                continue
+            qta = int(float(r.get("quantita") or 0))
+            imp = float(r.get("importo") or 0)
+            if qta <= 0:
+                skipped += 1
+                continue
+            data = str(r.get("data") or datetime.now(timezone.utc).isoformat())
+            desc = str(r.get("descrizione") or "")
+            prod = await db.prodotti.find_one({"codice": codice})
+            if prod:
+                desc = desc or prod.get("descrizione", "")
+                field = "giacenza_vending" if body.canale == "VENDING" else "giacenza_negozio"
+                vend_field = "venduti_vending" if body.canale == "VENDING" else "venduti_negozio"
+                await db.prodotti.update_one({"codice": codice}, {"$inc": {field: -qta, vend_field: qta}})
+            v = VenditaGiornaliera(data=data, codice=codice, descrizione=desc, quantita=qta, importo=imp, canale=body.canale, pagamento=body.pagamento)
+            await db.vendite.insert_one(v.model_dump())
+            inserted += 1
+        except Exception as e:
+            errors.append({"riga": i + 1, "errore": str(e)})
+    return {"inseriti": inserted, "saltati": skipped, "errori": errors}
+
+
+@api.post("/vendite/import-csv-vending")
+async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
+    """Import CSV del distributore vending. Colonne accettate (case-insensitive):
+       data, prodotto/nome prodotto, prezzo, colonna, codice/codice aams, categoria, pagamento.
+       Separatore auto-rilevato (, ; \\t).
+    """
+    import csv
+    raw = (await file.read()).decode("utf-8-sig", errors="replace")
+    # rileva delimitatore
+    sample = raw[:2000]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        delim = dialect.delimiter
+    except Exception:
+        delim = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.DictReader(io.StringIO(raw), delimiter=delim)
+    # normalizza header
+    def norm(s): return re.sub(r"\s+", " ", (s or "").strip().lower())
+    field_map = {norm(k): k for k in (reader.fieldnames or [])}
+    def pick(row, *keys):
+        for k in keys:
+            actual = field_map.get(norm(k))
+            if actual and row.get(actual) not in (None, ""):
+                return row.get(actual)
+        return None
+
+    inserted = 0
+    skipped = 0
+    errors = []
+    for i, row in enumerate(reader):
+        try:
+            codice = str(pick(row, "codice", "codice aams", "cod aams", "cod", "aams") or "").strip()
+            nome = str(pick(row, "nome prodotto", "prodotto", "descrizione", "articolo") or "").strip()
+            prezzo = pick(row, "prezzo", "importo")
+            data = pick(row, "data", "date")
+            colonna = str(pick(row, "colonna", "column") or "").strip()
+            categoria = str(pick(row, "categoria", "tipo") or "").strip()
+            pag = str(pick(row, "pagamento", "payment") or pagamento).strip() or pagamento
+
+            if not codice and not nome:
+                skipped += 1
+                continue
+            prezzo_f = float(str(prezzo).replace(",", ".")) if prezzo not in (None, "") else 0.0
+            # data: default oggi se mancante
+            data_iso = str(data) if data else datetime.now(timezone.utc).isoformat()
+            # se codice manca prova a risolvere dal nome
+            if not codice and nome:
+                p = await db.prodotti.find_one({"descrizione": {"$regex": f"^{re.escape(nome)}$", "$options": "i"}})
+                if p:
+                    codice = p["codice"]
+            if not codice:
+                # crea un placeholder
+                codice = f"CSV-{norm(nome)[:20].replace(' ', '_')}"
+
+            # ogni riga CSV = 1 pezzo venduto (formato tipico distributore)
+            v = VenditaGiornaliera(
+                data=data_iso, codice=codice, descrizione=nome, quantita=1, importo=prezzo_f,
+                canale="VENDING", pagamento=pag,
+            )
+            await db.vendite.insert_one(v.model_dump())
+
+            # aggiorna vending column giacenza se colonna presente
+            if colonna:
+                col = await db.vending.find_one({"colonna": colonna})
+                if col:
+                    new_g = max(0, (col.get("giacenza") or 0) - 1)
+                    await db.vending.update_one({"colonna": colonna}, {"$set": {"giacenza": new_g}})
+            # aggiorna prodotto
+            prod = await db.prodotti.find_one({"codice": codice})
+            if prod:
+                await db.prodotti.update_one({"codice": codice}, {"$inc": {"giacenza_vending": -1, "venduti_vending": 1}})
+            else:
+                # crea prodotto minimale
+                await db.prodotti.insert_one(Prodotto(
+                    codice=codice, descrizione=nome or codice,
+                    categoria=(categoria.upper() or "SIGARETTE") if categoria else "SIGARETTE",
+                    prezzo=prezzo_f, venduti_vending=1,
+                ).model_dump())
+            inserted += 1
+        except Exception as e:
+            errors.append({"riga": i + 2, "errore": str(e)})
+    return {"inseriti": inserted, "saltati": skipped, "errori": errors, "delimitatore": delim}
+
+
+
+
 # ------------------------- Vending -------------------------
 @api.get("/vending")
 async def list_vending():
