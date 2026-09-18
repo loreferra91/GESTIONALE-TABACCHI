@@ -62,10 +62,22 @@ export default function Vendite() {
   const pezzi = rows.reduce((s, r) => s + (r.quantita || 0), 0);
 
   const parseBulk = (text, defaultData) => {
-    // TSV/CSV from Excel: data \t codice \t descrizione \t qta \t importo (o senza data)
-    return text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(line => {
-      const parts = line.split(/\t|;|,/).map(x => x.trim());
-      // heuristica: 5 col con data | 4 col (codice, desc, qta, importo)
+    const raw = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!raw.length) return [];
+
+    // Rileva "formato verticale": ogni cella su una riga separata (Excel a volte incolla così se si copia una singola colonna alla volta o più colonne di una sola riga)
+    // Se ogni riga contiene un solo campo (no TAB/;/,) e il numero totale è multiplo di 4 o 5, raggruppiamo.
+    const singleField = raw.every(l => !/\t|;|,/.test(l));
+    const groups = [];
+    if (singleField && (raw.length % 4 === 0 || raw.length % 5 === 0)) {
+      const step = raw.length % 5 === 0 ? 5 : 4;
+      for (let i = 0; i < raw.length; i += step) groups.push(raw.slice(i, i + step));
+    } else {
+      // Formato orizzontale classico (TSV/CSV)
+      for (const line of raw) groups.push(line.split(/\t|;|,/).map(x => x.trim()));
+    }
+
+    return groups.map(parts => {
       let data, codice, descrizione, qta, importo;
       if (parts.length >= 5) [data, codice, descrizione, qta, importo] = parts;
       else if (parts.length === 4) { [codice, descrizione, qta, importo] = parts; data = defaultData; }
@@ -73,9 +85,10 @@ export default function Vendite() {
       else return null;
       return {
         data: data || defaultData,
-        codice, descrizione: descrizione || "",
-        quantita: parseInt((qta || "0").replace(/[^\d-]/g, "")) || 0,
-        importo: parseFloat((importo || "0").replace(",", ".").replace(/[^\d.-]/g, "")) || 0,
+        codice: (codice || "").trim(),
+        descrizione: (descrizione || "").trim(),
+        quantita: parseInt(String(qta || "0").replace(/[^\d-]/g, "")) || 0,
+        importo: parseFloat(String(importo || "0").replace(",", ".").replace(/[^\d.-]/g, "")) || 0,
       };
     }).filter(Boolean);
   };
@@ -171,10 +184,9 @@ export default function Vendite() {
       <Card className="p-6 mb-6">
         <h2 className="font-heading font-black text-lg mb-1">Bulk paste da Excel/CSV</h2>
         <p className="text-sm text-slate-600 mb-4">
-          Incolla righe copiate da Excel — formato colonne (TAB / <code>;</code> / <code>,</code>):<br/>
-          <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">data · codice · descrizione · qtà · importo</code>
-          &nbsp;oppure&nbsp;
-          <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">codice · descrizione · qtà · importo</code> (usa la data di default).
+          Incolla righe copiate da Excel — 3 formati supportati:<br/>
+          <span className="inline-block mt-1">1. Colonne su una riga (TAB / <code>;</code> / <code>,</code>): <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">data · codice · descrizione · qtà · importo</code> o <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">codice · descrizione · qtà · importo</code></span><br/>
+          <span className="inline-block mt-1">2. <b>Formato verticale</b> (una cella per riga, blocchi da 4): <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">codice ↵ descrizione ↵ qtà ↵ importo</code></span>
         </p>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
           <input data-testid="bulk-data" type="date" value={bulkData} onChange={e => setBulkData(e.target.value)} className="border rounded-md px-3 py-2 text-sm" />
