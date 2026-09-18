@@ -1,0 +1,150 @@
+{
+  "project_context": {
+    "app_type": "erp_dashboard",
+    "theme": "Light theme with dark accents (High-Contrast Swiss & Professional)",
+    "audience": "Italian Tobacco Shop Owners (Tabacchi)",
+    "emotional_tone": "Professional, Authoritative, Efficient, Clean, Data-Driven"
+  },
+  "typography": {
+    "font_strategy": "ARCHETYPE 4: SWISS & HIGH-CONTRAST (Corporate/Enterprise)",
+    "primary_font": {
+      "family": "Chivo",
+      "usage": "Headings, KPI Values, Brand Logo",
+      "weight": "font-black for H1/H2, font-semibold for KPI numbers",
+      "install": "Add via Google Fonts"
+    },
+    "secondary_font": {
+      "family": "IBM Plex Sans",
+      "usage": "Body text, UI labels, table headers, descriptions",
+      "weight": "font-normal to font-medium",
+      "install": "Add via Google Fonts"
+    },
+    "mono_font": {
+      "family": "IBM Plex Mono",
+      "usage": "ADM Codes, Prices, Vending Coordinates (A01..M12), Stock counts",
+      "weight": "font-medium",
+      "install": "Add via Google Fonts"
+    },
+    "forbidden_fonts": [
+      "Inter",
+      "Roboto",
+      "Open Sans",
+      "Lato"
+    ],
+    "hierarchy": {
+      "h1": "text-3xl sm:text-4xl tracking-tight text-slate-900",
+      "h2": "text-2xl sm:text-3xl tracking-tight text-slate-900",
+      "h3": "text-xl sm:text-2xl text-slate-800",
+      "kpi_value": "text-4xl sm:text-5xl font-black tracking-tighter text-slate-900",
+      "body": "text-base text-slate-600 leading-relaxed",
+      "mono_data": "text-sm font-mono tracking-tight text-slate-800",
+      "overline": "text-xs font-bold uppercase tracking-[0.2em] text-slate-500"
+    }
+  },
+  "colors": {
+    "theme_preference": "light",
+    "palette": {
+      "background": "#F8F9FA",
+      "surface": "#FFFFFF",
+      "primary_dark": "#0F172A",
+      "primary_light": "#1E293B",
+      "accent_brand": "#B8860B",
+      "border": "#E2E8F0",
+      "status": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "danger": "#DC2626",
+        "info": "#3B82F6"
+      }
+    },
+    "contrast_rules": {
+      "text": "Ensure minimum 4.5:1 ratio for normal text. Never use pure #000000 or #808080.",
+      "interactive": "Always explicitly set hover states (e.g., hover:bg-slate-800 hover:text-white). Focus states must have higher contrast.",
+      "accents": "Use Signal Red (#DC2626) exclusively for 'ESAURITO', 'RIORDINO', and negative inventory."
+    }
+  },
+  "spacing_and_layout": {
+    "strategy": "High Density Grid (For Dashboards / Analytics)",
+    "base_padding": "Generous container padding (p-6 or p-8) to prevent text collision, but tight internal widget spacing.",
+    "sidebar": "w-64 fixed on desktop, hidden on mobile with hamburger. Dark themed (bg-slate-900 text-white) to provide the requested 'dark accent'.",
+    "topbar": "h-16 sticky top-0 z-50 bg-white border-b border-slate-200. NEVER transparent.",
+    "main_content": "pt-16 pl-0 md:pl-64 min-h-screen bg-[#F8F9FA]"
+  },
+  "grids": {
+    "dashboard_kpis": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 or gap-6",
+    "vending_matrix": "grid grid-cols-[repeat(13,minmax(0,1fr))] gap-2 (Columns A to M). Use dense square cells.",
+    "tables": "w-full text-left text-sm whitespace-nowrap. Use sticky headers."
+  },
+  "components": {
+    "cards": {
+      "style": "Flat background (bg-white), 1px solid border-border, no shadow by default.",
+      "hover": "Hover state: -translate-y-[2px] transition-transform duration-200, shadow-md, border-slate-300."
+    },
+    "buttons": {
+      "primary": "bg-slate-900 text-white rounded-md px-4 py-2 hover:bg-slate-800 transition-colors",
+      "secondary": "bg-white text-slate-900 border border-slate-200 rounded-md px-4 py-2 hover:bg-slate-50 transition-colors",
+      "danger": "bg-red-600 text-white rounded-md px-4 py-2 hover:bg-red-700 transition-colors"
+    },
+    "status_badges": {
+      "ok": "bg-emerald-100 text-emerald-800 border border-emerald-200 px-2.5 py-0.5 rounded-full text-xs font-bold uppercase",
+      "warning": "bg-amber-100 text-amber-800 border border-amber-200 px-2.5 py-0.5 rounded-full text-xs font-bold uppercase",
+      "error": "bg-red-100 text-red-800 border border-red-200 px-2.5 py-0.5 rounded-full text-xs font-bold uppercase"
+    },
+    "vending_cell": {
+      "style": "aspect-square flex flex-col items-center justify-center border rounded-md relative overflow-hidden",
+      "full": "bg-emerald-50/50 border-emerald-200",
+      "empty": "bg-red-50/50 border-red-200",
+      "text": "text-xs font-mono font-bold"
+    }
+  },
+  "motion": {
+    "hover_states": "transition-all duration-200 ease-in-out on all interactive elements.",
+    "page_transitions": "Fade and slight slide-up (framer-motion: initial={opacity: 0, y: 10} animate={opacity: 1, y: 0}).",
+    "staggered_lists": "Stagger table row entrances by 0.05s for a refined feeling."
+  },
+  "accessibility": {
+    "contrast": "Strict APCA/WCAG 2 adherence. No transparent backgrounds behind text unless heavily blurred.",
+    "focus": "focus:ring-2 focus:ring-slate-900 focus:ring-offset-2",
+    "data_testids": "All interactive elements MUST have data-testid attributes."
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "style": "duotone or regular weight. Use precise, technical icons.",
+    "installation_command": "yarn add @phosphor-icons/react"
+  },
+  "image_urls": {
+    "avatars": [
+      {
+        "url": "https://images.unsplash.com/photo-1560250097-0b93528c311a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBidXNpbmVzcyUyMHBvcnRyYWl0fGVufDB8fHx8MTc4OTcxODM5MHww&ixlib=rb-4.1.0&q=85",
+        "description": "Professional male user avatar",
+        "category": "user_avatar"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBidXNpbmVzcyUyMHBvcnRyYWl0fGVufDB8fHx8MTc4OTcxODM5MHww&ixlib=rb-4.1.0&q=85",
+        "description": "Professional female user avatar",
+        "category": "user_avatar"
+      }
+    ]
+  },
+  "instructions_to_main_agent": {
+    "overview": "You are building a high-density, professional ERP/management dashboard for an Italian Tobacco Shop. The layout must feel like enterprise software (think Bloomberg Terminal or high-end fintech), not a generic consumer app.",
+    "key_areas": [
+      "Dashboard KPIs: Must clearly show purchased vs sold value, stock value, items to reorder, negative stock.",
+      "Vending Machine Grid: Create a specialized visual representation of columns A01 to M12, color-coded by stock level.",
+      "Tables: Use dense, functional Shadcn UI tables. Monospace fonts for numbers/prices/ADM codes.",
+      "Forms: Daily sales input and parameters configuration must use Shadcn forms with tight spacing."
+    ],
+    "tailwind_config": "Override standard fonts in tailwind.config.js to use Chivo for sans and IBM Plex Sans/Mono for body/data.",
+    "shadcn_customization": "Remove heavy drop shadows from Shadcn cards. Use 1px borders. Force square or slightly rounded (rounded-md max 6px) corners."
+  },
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Do not use generic centered layouts. Align content to the left for better readability in data-heavy apps.",
+    "Never apply `transition: all`. Use specific transitions (e.g., `transition-colors`, `transition-transform`).",
+    "Use 2-3x more spacing between major layout sections (e.g., gap-8 between KPI grid and main table), but keep internal component spacing dense.",
+    "Do not use AI assistant emojis (🤖, 💡, etc). Use standard @phosphor-icons/react icons.",
+    "All interactive elements MUST include a `data-testid` attribute (e.g., `data-testid='btn-reorder'`).",
+    "Ensure dark accents are used purposefully (e.g., the primary sidebar or top header can be dark Slate-900, while the rest is light #F8F9FA).",
+    "DO NOT use transparent backgrounds in headers or dropdowns. Use Solid White or Slate-900.",
+    "Always use the Sonner library for toast notifications."
+  ]
+}
