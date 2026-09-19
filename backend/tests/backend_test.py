@@ -3,17 +3,14 @@ import os
 import io
 import pytest
 import requests
+import openpyxl
 
-BASE = os.environ["REACT_APP_BACKEND_URL"].rstrip("/") if False else None
-# Read from frontend/.env explicitly
-def _get_base():
-    with open("/app/frontend/.env") as f:
-        for line in f:
-            if line.startswith("REACT_APP_BACKEND_URL="):
-                return line.split("=", 1)[1].strip().rstrip("/")
-    raise RuntimeError("REACT_APP_BACKEND_URL missing")
-
-BASE = _get_base()
+BASE = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
+if not BASE:
+    pytest.skip(
+        "integration suite requires an isolated TEST_BACKEND_URL",
+        allow_module_level=True,
+    )
 
 @pytest.fixture(scope="module")
 def s():
@@ -125,6 +122,40 @@ def test_vendite_csv_vending(s):
     d = r.json()
     assert "delimitatore" in d
     assert d.get("inseriti", 0) >= 1
+
+
+def test_import_excel_new_product_has_complete_model(s):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "RIEP_VENDITA"
+    sheet.append([])
+    sheet.append([])
+    row = [None] * 18
+    row[0] = "AUDIT-XLSX-001"
+    row[1] = "Prodotto import audit"
+    row[2] = 4
+    row[3] = 1
+    row[6] = 3
+    row[7] = 2.5
+    row[13] = 0
+    row[17] = 0
+    sheet.append(row)
+    content = io.BytesIO()
+    workbook.save(content)
+    content.seek(0)
+
+    response = s.post(
+        f"{BASE}/api/import/excel",
+        files={"file": ("audit.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["inseriti"] == 1
+
+    products = s.get(f"{BASE}/api/prodotti", params={"q": "AUDIT-XLSX-001"}).json()
+    imported = next(p for p in products if p["codice"] == "AUDIT-XLSX-001")
+    assert imported["id"]
+    assert imported["categoria"] == "ACCESSORI"
+    assert imported["created_at"]
 
 # ---- Ordini bulk (carico) ----
 def test_ordini_bulk(s):

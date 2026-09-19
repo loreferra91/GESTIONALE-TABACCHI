@@ -75,8 +75,8 @@ export default function Prodotti() {
         </div>
       </Card>
 
-      <div className="flex gap-3 mb-4">
-        <input data-testid="prod-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca codice o descrizione…" className="border rounded-md px-3 py-2 text-sm flex-1 max-w-md" />
+      <div className="flex flex-col sm:flex-row gap-3 mb-4">
+        <input data-testid="prod-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca codice o descrizione…" className="border rounded-md px-3 py-2 text-sm flex-1 sm:max-w-md" />
         <select data-testid="prod-filter-cat" value={cat} onChange={e => setCat(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
           <option value="">Tutte le categorie</option>
           <option>SIGARETTE</option>

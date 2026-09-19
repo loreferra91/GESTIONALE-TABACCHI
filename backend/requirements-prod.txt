@@ -5,4 +5,5 @@ pydantic==2.13.5
 pymongo==4.6.3
 python-dotenv==1.2.3
 python-multipart==0.0.32
+reportlab==5.0.1
 uvicorn[standard]==0.25.0

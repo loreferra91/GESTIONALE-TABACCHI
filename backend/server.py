@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request
-from fastapi.responses import PlainTextResponse, FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -300,7 +300,8 @@ async def list_prodotti(q: Optional[str] = None, categoria: Optional[str] = None
     if q:
         rx = _q_regex(q)
         filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
-    docs = await db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).to_list(_cap(limit))
+    capped_limit = _cap(limit)
+    docs = await db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).limit(capped_limit).to_list(capped_limit)
     return docs
 
 
@@ -333,7 +334,8 @@ async def list_listino(q: Optional[str] = None, limit: int = 300):
     if q:
         rx = _q_regex(q)
         filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
-    docs = await db.listino_adm.find(filt, {"_id": 0}).sort("descrizione", 1).to_list(_cap(limit))
+    capped_limit = _cap(limit)
+    docs = await db.listino_adm.find(filt, {"_id": 0}).sort("descrizione", 1).limit(capped_limit).to_list(capped_limit)
     total = await db.listino_adm.count_documents(filt)
     return {"items": docs, "total": total}
 
@@ -346,7 +348,8 @@ async def list_vendite(giorno: Optional[str] = None, limit: int = 500):
         # data ISO stringa (2026-02-18...) — validiamo formato semplice
         safe = re.sub(r"[^0-9\-T:.]", "", giorno)[:32]
         filt["data"] = {"$regex": f"^{re.escape(safe)}"}
-    docs = await db.vendite.find(filt, {"_id": 0}).sort("data", -1).to_list(_cap(limit))
+    capped_limit = _cap(limit)
+    docs = await db.vendite.find(filt, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
     return docs
 
 
@@ -549,22 +552,31 @@ async def update_vending(v_id: str, body: Dict[str, Any]):
 
 @api.post("/vending/{v_id}/ricarica")
 async def ricarica_vending(v_id: str, body: Dict[str, Any]):
-    qta = int(body.get("quantita", 0))
+    try:
+        qta = int(body.get("quantita", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "quantita non valida")
+    if qta <= 0:
+        raise HTTPException(422, "quantita deve essere maggiore di zero")
     v = await db.vending.find_one({"id": v_id})
     if not v:
         raise HTTPException(404, "not found")
-    nuovo = min(v["capacita_max"], v["giacenza"] + qta)
+    giacenza = int(v.get("giacenza", 0) or 0)
+    capacita = int(v.get("capacita_max", 0) or 0)
+    qta_caricata = min(qta, max(0, capacita - giacenza))
+    nuovo = giacenza + qta_caricata
     await db.vending.update_one({"id": v_id}, {"$set": {"giacenza": nuovo}})
     # scala dal magazzino negozio
-    if v.get("codice"):
-        await db.prodotti.update_one({"codice": v["codice"]}, {"$inc": {"giacenza_negozio": -qta, "giacenza_vending": qta}})
-    return {"ok": True, "colonna": v["colonna"], "nuova_giacenza": nuovo}
+    if v.get("codice") and qta_caricata:
+        await db.prodotti.update_one({"codice": v["codice"]}, {"$inc": {"giacenza_negozio": -qta_caricata, "giacenza_vending": qta_caricata}})
+    return {"ok": True, "colonna": v["colonna"], "nuova_giacenza": nuovo, "quantita_caricata": qta_caricata}
 
 
 # ------------------------- Storico ordini -------------------------
 @api.get("/ordini")
 async def list_ordini(limit: int = 1000):
-    docs = await db.storico_ordini.find({}, {"_id": 0}).sort("data", -1).to_list(_cap(limit))
+    capped_limit = _cap(limit)
+    docs = await db.storico_ordini.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
     return docs
 
 
@@ -632,7 +644,8 @@ async def bulk_carico(body: BulkOrdineIn):
 # ------------------------- Cassa -------------------------
 @api.get("/cassa")
 async def list_cassa(limit: int = 500):
-    docs = await db.cassa.find({}, {"_id": 0}).sort("data", -1).to_list(_cap(limit))
+    capped_limit = _cap(limit)
+    docs = await db.cassa.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
     saldo = 0.0
     all_docs = await db.cassa.find({}, {"_id": 0}).to_list(10000)
     for d in all_docs:
@@ -874,7 +887,7 @@ async def prodotti_top(limit: int = 40):
     for p in prods:
         p["venduti_totale"] = (p.get("venduti_negozio") or 0) + (p.get("venduti_vending") or 0)
     prods.sort(key=lambda x: -x["venduti_totale"])
-    return prods[:limit]
+    return prods[:_cap(limit)]
 
 
 
@@ -1005,7 +1018,16 @@ async def import_excel(file: UploadFile = File(...)):
                 "giacenza_vending": int(row[13] or 0),
                 "venduti_vending": int(row[17] or 0),
             }
-            r = await db.prodotti.update_one({"codice": str(codice).strip()}, {"$set": data_p}, upsert=True)
+            insert_defaults = Prodotto(
+                codice=data_p["codice"],
+                descrizione=data_p["descrizione"],
+            ).model_dump()
+            insert_defaults = {k: v for k, v in insert_defaults.items() if k not in data_p}
+            r = await db.prodotti.update_one(
+                {"codice": data_p["codice"]},
+                {"$set": data_p, "$setOnInsert": insert_defaults},
+                upsert=True,
+            )
             if r.upserted_id:
                 inserted += 1
             else:
@@ -1213,6 +1235,11 @@ async def import_excel_full(file: UploadFile = File(...)):
 # ------------------------- Register -------------------------
 app.include_router(api)
 
+
+@app.head("/", include_in_schema=False)
+async def head_root():
+    return Response(status_code=200)
+
 _cors_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
 _cors_credentials = _cors_origins != ['*']  # wildcard + credentials è invalido; disabilita credentials se wildcard
 
@@ -1245,6 +1272,8 @@ if FRONTEND_BUILD_DIR.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_frontend(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(404, "API endpoint not found")
         build_root = FRONTEND_BUILD_DIR.resolve()
         requested = (build_root / full_path).resolve()
 
@@ -1257,4 +1286,3 @@ if FRONTEND_BUILD_DIR.exists():
             return FileResponse(requested)
 
         return FileResponse(build_root / "index.html")
-
