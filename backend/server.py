@@ -972,6 +972,203 @@ async def import_excel(file: UploadFile = File(...)):
     return {"ok": True, "inseriti": inserted, "aggiornati": updated}
 
 
+# ------------------------- Import Excel FULL (multi-sheet sync) -------------------------
+def _cat_from_desc(desc: str, code: str) -> str:
+    d = (desc or "").upper()
+    for kw in ("ELFBAR", "LOST MARY", "VAPORESSO", "POD", "KIT", "MG/ML", "LIQUID", "ELFLIQ", "ELFA", "TEREA"):
+        if kw in d:
+            return "SIGARETTE ELETTRONICHE"
+    if str(code or "").startswith("AMMS"):
+        return "SIGARETTE"
+    return "ACCESSORI"
+
+
+async def _import_prodotti(ws) -> Dict[str, int]:
+    ins = upd = err = 0
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        try:
+            codice = row[0]
+            if not codice:
+                continue
+            codice_s = str(codice).strip()
+            desc = str(row[1] or "").strip()
+            data_p = {
+                "codice": codice_s,
+                "descrizione": desc,
+                "categoria": _cat_from_desc(desc, codice_s),
+                "acquistati": int(row[2] or 0),
+                "venduti_negozio": int(row[3] or 0),
+                "giacenza_negozio": int(row[6] or 0),
+                "prezzo": float(row[7] or 0),
+                "giacenza_vending": int(row[13] or 0),
+                "venduti_vending": int(row[17] or 0),
+            }
+            r = await db.prodotti.update_one({"codice": codice_s}, {"$set": data_p}, upsert=True)
+            ins += 1 if r.upserted_id else 0
+            upd += 1 if not r.upserted_id and r.matched_count else 0
+        except Exception:
+            err += 1
+    return {"inseriti": ins, "aggiornati": upd, "errori": err}
+
+
+async def _import_listino(ws) -> Dict[str, int]:
+    ins = upd = err = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        try:
+            if not row[0]:
+                continue
+            codice = str(row[0]).strip()
+            data_p = {
+                "codice": codice,
+                "descrizione": str(row[1] or "").strip(),
+                "prezzo": float(row[2] or 0),
+                "confezione": str(row[3] or "").strip(),
+            }
+            r = await db.listino_adm.update_one({"codice": codice}, {"$set": data_p}, upsert=True)
+            ins += 1 if r.upserted_id else 0
+            upd += 1 if not r.upserted_id and r.matched_count else 0
+        except Exception:
+            err += 1
+    return {"inseriti": ins, "aggiornati": upd, "errori": err}
+
+
+async def _import_vending(ws) -> Dict[str, int]:
+    ins = upd = err = 0
+    for row in ws.iter_rows(min_row=4, values_only=True):
+        try:
+            if not row[0]:
+                continue
+            colonna = str(row[0]).strip()
+            if not re.match(r"^[A-Z]\d+$", colonna):
+                continue
+            data_p = {
+                "colonna": colonna,
+                "codice": str(row[1] or "").strip(),
+                "descrizione": str(row[2] or "").strip(),
+                "giacenza": int(row[3]) if row[3] is not None else 0,
+                "capacita_max": int(row[4] or 5),
+                "soglia_minima": int(row[5]) if row[5] is not None else 2,
+            }
+            r = await db.vending.update_one({"colonna": colonna}, {"$set": data_p}, upsert=True)
+            ins += 1 if r.upserted_id else 0
+            upd += 1 if not r.upserted_id and r.matched_count else 0
+        except Exception:
+            err += 1
+    return {"inseriti": ins, "aggiornati": upd, "errori": err}
+
+
+async def _import_storico(ws) -> Dict[str, int]:
+    ins = 0
+    err = 0
+    # elimina intero storico e ricrea (source of truth)
+    await db.storico_ordini.delete_many({})
+    batch = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        try:
+            if not row[0]:
+                continue
+            data_v = row[0]
+            if isinstance(data_v, datetime):
+                data_v = data_v.isoformat()
+            o = OrdineStorico(
+                data=str(data_v),
+                file_sorgente=str(row[1] or ""),
+                codice=str(row[2] or "").strip(),
+                descrizione=str(row[3] or "").strip(),
+                quantita=int(row[4] or 0),
+                prezzo=float(row[5] or 0),
+            )
+            batch.append(o.model_dump())
+            if len(batch) >= 1000:
+                await db.storico_ordini.insert_many(batch)
+                ins += len(batch)
+                batch = []
+        except Exception:
+            err += 1
+    if batch:
+        await db.storico_ordini.insert_many(batch)
+        ins += len(batch)
+    return {"inseriti": ins, "aggiornati": 0, "errori": err}
+
+
+async def _import_parametri(ws) -> Dict[str, int]:
+    # aggiorna solo parametri che ESISTONO già nel DB (preserva custom come AGGIO_PCT)
+    upd = skip = err = 0
+    existing = {p["nome"] async for p in db.parametri.find({}, {"_id": 0, "nome": 1})}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        try:
+            nome = row[0]
+            if not nome:
+                continue
+            nome_s = str(nome).strip()
+            valore = row[1]
+            if valore is None:
+                continue
+            v = float(str(valore).replace(",", "."))
+            if nome_s in existing:
+                await db.parametri.update_one({"nome": nome_s}, {"$set": {"valore": v}})
+                upd += 1
+            else:
+                skip += 1
+        except Exception:
+            err += 1
+    return {"inseriti": 0, "aggiornati": upd, "saltati": skip, "errori": err}
+
+
+@api.post("/import/excel-full")
+async def import_excel_full(file: UploadFile = File(...)):
+    """Import multi-sheet: RIEP_VENDITA + LISTINO ADM + RICARICA VENDING + STORICO_ORDINI + PARAMETRI.
+    Excel = fonte di verità (upsert). Righe DB non presenti nell'Excel sono conservate.
+    Parametri custom (non presenti nel foglio PARAMETRI) sono preservati.
+    """
+    try:
+        import openpyxl
+    except Exception:
+        raise HTTPException(500, "openpyxl non installato")
+    content = await _read_capped(file)
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
+    except Exception as e:
+        raise HTTPException(422, f"File non leggibile: {e}")
+
+    fogli_trovati: List[str] = []
+    fogli_mancanti: List[str] = []
+    report: Dict[str, Any] = {}
+
+    async def _run(name: str, importer):
+        if name in wb.sheetnames:
+            fogli_trovati.append(name)
+            report[name] = await importer(wb[name])
+        else:
+            fogli_mancanti.append(name)
+
+    await _run("RIEP_VENDITA", _import_prodotti)
+    await _run("LISTINO ADM", _import_listino)
+    await _run("RICARICA VENDING", _import_vending)
+    await _run("STORICO_ORDINI", _import_storico)
+    await _run("PARAMETRI", _import_parametri)
+
+    totali = {
+        "prodotti_inseriti": report.get("RIEP_VENDITA", {}).get("inseriti", 0),
+        "prodotti_aggiornati": report.get("RIEP_VENDITA", {}).get("aggiornati", 0),
+        "listino_inseriti": report.get("LISTINO ADM", {}).get("inseriti", 0),
+        "listino_aggiornati": report.get("LISTINO ADM", {}).get("aggiornati", 0),
+        "vending_inseriti": report.get("RICARICA VENDING", {}).get("inseriti", 0),
+        "vending_aggiornati": report.get("RICARICA VENDING", {}).get("aggiornati", 0),
+        "storico_ricreato": report.get("STORICO_ORDINI", {}).get("inseriti", 0),
+        "parametri_aggiornati": report.get("PARAMETRI", {}).get("aggiornati", 0),
+        "parametri_saltati": report.get("PARAMETRI", {}).get("saltati", 0),
+    }
+    return {
+        "ok": True,
+        "file": file.filename,
+        "fogli_trovati": fogli_trovati,
+        "fogli_mancanti": fogli_mancanti,
+        "dettaglio": report,
+        "totali": totali,
+    }
+
+
 # ------------------------- Register -------------------------
 app.include_router(api)
 
