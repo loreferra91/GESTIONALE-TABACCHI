@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: gestionale-tabacchi
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /api/
+    envVars:
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        value: gestionale
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
