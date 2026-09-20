@@ -11,6 +11,27 @@ In produzione FastAPI serve sia le API sotto `/api` sia la build React. In quest
 modo il frontend e il backend condividono lo stesso dominio e basta un solo
 servizio gratuito Render.
 
+## Flusso Emergent → produzione
+
+Emergent è l'ambiente di sviluppo, GitHub è la fonte ufficiale del codice e
+Render pubblica soltanto il branch `main`:
+
+```text
+Emergent → emergent/develop → verifica e test → main → Render
+```
+
+- Le modifiche create in Emergent vanno prima salvate su `emergent/develop`.
+- `main` deve contenere solo versioni compilate e verificate.
+- Render segue `main` e avvia automaticamente il deploy dopo ogni push.
+- Non eseguire un reset o un pull forzato nel workspace Emergent quando contiene
+  file non committati: prima creare un commit sul branch di sviluppo.
+
+Per evitare che prove e importazioni modifichino i dati reali, usare due database
+distinti anche quando condividono lo stesso cluster Atlas:
+
+- Emergent: `DB_NAME=gestionale_dev`
+- Render: `DB_NAME=gestionale`
+
 ## Avvio locale
 
 Requisiti: Node.js 20, Yarn 1.22, Python 3.12 e un database MongoDB raggiungibile.
