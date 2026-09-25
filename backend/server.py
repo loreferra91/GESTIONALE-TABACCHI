@@ -6,7 +6,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
-import os, json, logging, uuid, io, re
+import os, json, logging, uuid, io, re, asyncio
 from pathlib import Path
 import base64
 import secrets
@@ -240,6 +240,17 @@ async def on_start():
         if await db.parametri.count_documents({}) == 0:
             docs = [Parametro(nome=k, valore=float(v["valore"]), descrizione=v["descrizione"]).model_dump() for k, v in DEFAULT_PARAMS.items()]
             await db.parametri.insert_many(docs)
+        # Gli import fanno upsert su queste chiavi: senza indici Atlas deve
+        # scandire le collezioni per ogni riga, anche quando usiamo bulk_write.
+        await asyncio.gather(
+            db.prodotti.create_index("codice"),
+            db.listino_adm.create_index("codice"),
+            db.vending.create_index("colonna"),
+            db.parametri.create_index("nome"),
+            db.vendite.create_index("data"),
+            db.vendite.create_index("codice"),
+            db.storico_ordini.create_index("codice"),
+        )
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
