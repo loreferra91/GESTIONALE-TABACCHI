@@ -1,0 +1,36 @@
+{
+  "summary": "iteration_7 validated the new POST /api/import/excel-full multi-sheet importer plus the revised /parametri UI. Created /app/backend/tests/test_import_excel_full.py (8 tests, all PASS): happy-path returns all 5 fogli_trovati with plausible totali (227 prodotti_aggiornati, 4104 listino_aggiornati, 84 vending_aggiornati, 594 storico_ricreato, 7 parametri_aggiornati); custom AGGIO_PCT=0.10 preserved after import; DB-only product TEST_DB_ONLY preserved (not deleted); storico full-replace count matches; size-cap 413 enforced on new endpoint; invalid xlsx returns 422 with 'File non leggibile'; dashboard KPI regression coherent (aggio_pct=0.10, valore_acquistato>0, margine_lordo present); primary GETs (/prodotti, /listino, /vending, /parametri, /pivot) all 200. Frontend Playwright: /parametri uploads gods27.xlsm via [data-testid='import-file'], [data-testid='import-report'] appears with all 8 correct ReportCard labels, success toast 'Import completato: 4415 righe aggiornate su 5 fogli' shown, no error elements. Legacy /api/import/excel not regressed (still passes existing test_import_excel_new_product_has_complete_model). AGGIO_PCT restored to 0.10 at end.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "POST /api/import/excel-full with gods27.xlsm → 200, ok=true, fogli_trovati=[RIEP_VENDITA, LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, PARAMETRI], fogli_mancanti=[].",
+    "Totali: prodotti_aggiornati=227, listino_aggiornati=4104, vending_aggiornati=84 (inserted 1 new col vs 83 baseline), storico_ricreato=594, parametri_aggiornati=7, parametri_saltati preserved custom.",
+    "AGGIO_PCT=0.10 preserved (not in Excel PARAMETRI sheet → skipped, not overwritten).",
+    "TEST_DB_ONLY product still queryable after import (DB-only rows preserved).",
+    "GET /api/ordini returns 594 rows matching storico_ricreato (full replace).",
+    "Size cap: 21MB upload → 413.",
+    "Invalid binary xlsx → 422 with 'File non leggibile'.",
+    "Regression: /api/dashboard kpi.aggio_pct=0.10, margine_lordo & valore_acquistato coherent; /prodotti, /listino, /vending, /parametri, /pivot all 200.",
+    "Frontend: file upload flow works end-to-end, 8 ReportCard tiles rendered with expected labels + values, sonner success toast visible."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_import_excel_full.py",
+    "/app/test_reports/pytest/iter7.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_import_prodotti wraps entire row in try/except and silently increments err — importer masks per-row issues (e.g. non-numeric prezzo). Consider surfacing first N error samples in the response 'dettaglio' so users can debug bad Excel rows.",
+    "_import_parametri parses valore with float(str(v).replace(',', '.')) but does not validate bounds (e.g. AGGIO_PCT in Excel could be set >=1 or <0 with no server-side clamp). Same code-review comment carried from iteration_6 still applies.",
+    "_import_storico does delete_many + insert_many WITHOUT a transaction. If the workbook parsing fails mid-loop, storico is left partially wiped. Recommend wrapping in a mongo transaction OR staging in a temp collection + rename.",
+    "backend_test.py::test_vending hard-codes 83 cells; after Excel import fixture has 84. Test is fragile — should assert >=83 or read expected count from a fixture. (Non-blocking, side-effect of running import test in same session.)",
+    "test_deploy_safety.py and test_vending_restock.py have `import backend.server as server` which fails from pytest rootdir. They are unrelated to this feature but currently error during collection. Fix by adjusting sys.path or invoke pytest from /app with proper PYTHONPATH."
+  ],
+  "updated_files": ["/app/backend/tests/test_import_excel_full.py"],
+  "success_rate": {"backend": "100% on new endpoint (8/8); overall 43/45 with 2 fragile pre-existing tests + 2 collection errors unrelated", "frontend": "100% (upload + report + toast + all 8 tiles)"},
+  "test_credentials": "n/a",
+  "seed_data_creation": "TEST_DB_ONLY product created via POST /api/prodotti during test (used to verify DB-only preservation); AGGIO_PCT restored to 0.10 at teardown.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New test module /app/backend/tests/test_import_excel_full.py (8 tests) covers /api/import/excel-full end-to-end using the fixture at /app/backend/tests/fixtures/gods27.xlsm. Note: running the happy-path test mutates state (adds 1 vending col A→84, replaces storico 594 rows) which causes backend_test.py::test_vending (hard-coded 83) and test_ordini_bulk (giacenza baseline drift) to fail if run afterwards in same session — main agent should either loosen those assertions or run tests in dedicated env.",
+  "rca of the issue": "n/a — feature works as designed."
+}
