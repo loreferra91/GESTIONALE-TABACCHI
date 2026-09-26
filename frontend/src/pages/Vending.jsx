@@ -59,7 +59,7 @@ export default function Vending() {
       <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 2xl:grid-cols-12 gap-2 mb-8">
         {allRows.map(r => (
           <button
-            key={r.id}
+            key={r.colonna}
             data-testid={`vending-cell-${r.colonna}`}
             onClick={() => rica(r)}
             className={`aspect-square flex flex-col items-center justify-center border rounded-md p-1 hover:scale-[1.03] transition-transform ${cellTone(r)}`}
@@ -95,7 +95,7 @@ export default function Vending() {
             </thead>
             <tbody>
               {rows.map(r => (
-                <tr key={r.id} data-testid={`vending-row-${r.colonna}`}>
+                <tr key={r.colonna} data-testid={`vending-row-${r.colonna}`}>
                   <td className="font-mono font-bold">{r.colonna}</td>
                   <td className="font-mono">{r.codice}</td>
                   <td className="max-w-sm truncate">{r.descrizione}</td>

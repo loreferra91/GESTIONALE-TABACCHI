@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration_8 validated: (a) POST /api/import/excel-full with gods34.xlsm returns 200 with fogli_trovati containing all 7 sheets including DB_STORICO_VEND and DB_STORICO_VENDING_EXT; totali has db_storico_vend_righe and db_storico_vending_ext_righe fields (int). (b) Auto-Order semantic change: created TEST_AO_VEND (giacenza_negozio=0, giacenza_vending=5, acquistati=10, SIGARETTE, 5.0). GET /api/auto-order returned the row with qta_da_ordinare>0, motivo='TARGET SETTIMANALE (NEGOZIO ZERO)' (contains NEGOZIO), giacenza_negozio=0, giacenza_vending=5 echoed. Deleted product for cleanup. (c) GET /api/vending/ricarica-pdf returns 200 application/pdf, body starts with %PDF-. (d) Regression: /dashboard /pivot /prodotti /listino /vending /parametri all 200. All 9 pytest tests PASSED (backend/tests/test_iter8_features.py). Frontend Playwright verified 7 pages (/vending /prodotti /magazzino /ordini /auto-order /cassa /listino): each SearchBar (vending-search, prod-search, mag-search, ord-search, ao-search, cassa-search, listino-search) is present and filterable live, each sortable Th (th-giacenza, th-prezzo, th-tot_giacenza, th-data, th-motivo, th-importo, th-prezzo) toggles direction on click. Vending page shows 'Stampa da caricare (4)' button with data-testid='vending-pdf' enabled (N>0). Auto-order page shows new 'Giac. negozio' and 'Giac. vend.' columns. AGGIO_PCT restored to 0.10.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Vending", "issue": "React console warning: 'Each child in a list should have a unique key prop'. Two lists render with key={r.id} (grid cell at L62 and table row at L98) but some vending rows may share/lack id. Consider using r.colonna (which IS guaranteed unique in the grid) as key.", "selector": "Vending grid cells / table rows", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "passed": [
+    "test_import_excel_full_7_sheets: 7 sheets found, DB_STORICO_VEND + DB_STORICO_VENDING_EXT present, totali fields db_storico_vend_righe/db_storico_vending_ext_righe are ints.",
+    "test_auto_order_uses_negozio_only: TEST_AO_VEND row present with qta_da_ordinare>0, motivo contains 'NEGOZIO', giacenza_negozio=0, giacenza_vending=5 echoed.",
+    "test_vending_ricarica_pdf: 200 application/pdf, body starts with %PDF-.",
+    "test_regression_gets: /dashboard /pivot /prodotti /listino /vending /parametri all 200.",
+    "Frontend: all 7 pages — SearchBar filters live, Th toggles sort direction, and Vending 'Stampa da caricare (N)' PDF button (data-testid='vending-pdf') visible/enabled."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iter8_features.py",
+    "/app/test_reports/pytest/iter8.xml"
+  ],
+  "action_items": [
+    "(Optional, LOW) In Vending.jsx (L62 and L98) switch key from r.id to r.colonna (or ensure every vending doc has stable unique id) to silence React duplicate-key warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py auto_order() at L810: motivo strings are inconsistent — when giac_negozio<=0 && vend_30gg>=fast_min && giac_vending==0 the code emits 'FAST MOVER: REINTEGRO' (identical string used again at L820 for a totally different situation). The two branches should have distinct motivi so operators can distinguish 'shop-empty fast-mover' from 'shop-under-threshold fast-mover'.",
+    "server.py /api/vending/ricarica-pdf (L575) does its reportlab imports inside the request handler — small latency cost per call. Move imports to module top for consistency with /api/auto-order/pdf which does the same in-handler pattern.",
+    "tableHooks.js useSortSearch: `searchFields` is included in useMemo deps but the caller usually passes a fresh array literal each render → the memo is effectively invalidated every render. Wrap searchFields in useMemo at call sites or accept a stable reference/spread the keys individually to gain real memoization.",
+    "Magazzino.jsx L61 uses key={r.codice}. If two products in DB share the same codice (as happened after prior iterations created two TEST_DB_ONLY products), React warns and rows may render incorrectly. Prefer key={r.id} (or enforce codice uniqueness at DB level with a unique index).",
+    "Repeated from iteration_7 and still open: _import_parametri no bounds check (AGGIO_PCT), _import_storico no transaction/atomic replace, per-row errors swallowed in _import_prodotti."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter8_features.py"],
+  "success_rate": {"backend": "100% (9/9 iter8 tests)", "frontend": "100% (7/7 pages verified: search + sort + vending PDF button)"},
+  "test_credentials": "n/a",
+  "seed_data_creation": "TEST_AO_VEND product created and deleted within test. Also cleaned up 2 duplicate TEST_DB_ONLY products left over from iteration_7. AGGIO_PCT restored to 0.10.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New test module /app/backend/tests/test_iter8_features.py (9 tests) uses gods34.xlsm (7-sheet fixture). The happy-path import mutates DB (storico full replace, listino/vending upsert) — be aware if running in same session as fragile pre-existing tests. Auto-order now returns rows based on giacenza_negozio (not sum) — old assertions on row counts (~24) may drift.",
+  "rca of the issue": "n/a — all requested features work as designed."
+}
