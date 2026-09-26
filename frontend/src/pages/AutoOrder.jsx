@@ -70,6 +70,7 @@ export default function AutoOrder() {
                 <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. negozio</Th>
                 <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. vend.</Th>
                 <Th sortKey="venduto_30gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Venduto 30gg</Th>
+                <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. (gg)</Th>
                 <Th sortKey="media_ordini_storico" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Media ord.</Th>
                 <Th sortKey="n_ordini_storici" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">N ord.</Th>
                 <Th sortKey="lotto_ordine" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Lotto</Th>
@@ -89,6 +90,7 @@ export default function AutoOrder() {
                   <td className={`font-mono text-right ${(r.giacenza_negozio||0) <= 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.giacenza_negozio ?? 0)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending ?? 0)}</td>
                   <td className="font-mono text-right">{formatNum(r.venduto_30gg)}</td>
+                  <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < 7 ? 'text-red-600 font-bold' : ''}`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right">{r.media_ordini_storico}</td>
                   <td className="font-mono text-right">{r.n_ordini_storici}</td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
@@ -98,7 +100,7 @@ export default function AutoOrder() {
                   <td><Badge tone={r.motivo?.includes("FAST") ? "warning" : "info"}>{r.motivo}</Badge></td>
                 </tr>
               ))}
-              {!loading && righe.length === 0 && <tr><td colSpan={13} className="text-center py-8 text-slate-400">Nessun ordine proposto — tutte le scorte sono OK.</td></tr>}
+              {!loading && righe.length === 0 && <tr><td colSpan={14} className="text-center py-8 text-slate-400">Nessun ordine proposto — tutte le scorte sono OK.</td></tr>}
             </tbody>
           </table>
         </div>

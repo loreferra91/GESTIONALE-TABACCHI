@@ -196,6 +196,8 @@ DEFAULT_PARAMS = {
     "SLOW_VENDUTO30_MAX": {"valore": 2, "descrizione": "Venduto max 30gg per SLOW MOVER"},
     "SLOW_TARGET_FACTOR": {"valore": 0.6, "descrizione": "Fattore target settimanale slow mover"},
     "FATT_SETTIMANALE": {"valore": 1.15, "descrizione": "Fattore fabbisogno settimanale"},
+    "GIORNI_COPERTURA_MIN": {"valore": 7, "descrizione": "Riordina se lo stock negozio copre meno di N giorni di vendite"},
+    "GIORNI_COPERTURA_TARGET": {"valore": 14, "descrizione": "Copertura target (giorni) dopo il riordino"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
 }
 
@@ -238,6 +240,13 @@ async def on_start():
         if await db.parametri.count_documents({}) == 0:
             docs = [Parametro(nome=k, valore=float(v["valore"]), descrizione=v["descrizione"]).model_dump() for k, v in DEFAULT_PARAMS.items()]
             await db.parametri.insert_many(docs)
+        else:
+            # aggiungi eventuali nuovi parametri di default mancanti (upgrade idempotente)
+            existing = {p["nome"] async for p in db.parametri.find({}, {"_id": 0, "nome": 1})}
+            missing = [Parametro(nome=k, valore=float(v["valore"]), descrizione=v["descrizione"]).model_dump()
+                       for k, v in DEFAULT_PARAMS.items() if k not in existing]
+            if missing:
+                await db.parametri.insert_many(missing)
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
@@ -746,6 +755,8 @@ PARAM_BOUNDS = {
     # nome: (min_incl, max_excl, descrizione)
     "AGGIO_PCT": (0.0, 1.0, "0 ≤ AGGIO_PCT < 1"),
     "SOGLIA_ALLERT_PCT": (0.0, 1.0, "0 ≤ SOGLIA_ALLERT_PCT < 1"),
+    "GIORNI_COPERTURA_MIN": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
+    "GIORNI_COPERTURA_TARGET": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
     "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
     "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
     "GIORNI_STORICO_VEND": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
@@ -781,6 +792,8 @@ async def auto_order():
     fast_min = params.get("FAST_VENDUTO30_MIN", 8)
     slow_max = params.get("SLOW_VENDUTO30_MAX", 2)
     fatt = params.get("FATT_SETTIMANALE", 1.15)
+    gg_min = params.get("GIORNI_COPERTURA_MIN", 7)       # riordina se copertura < N giorni
+    gg_target = params.get("GIORNI_COPERTURA_TARGET", 14)  # dopo il riordino copertura ≥ M giorni
 
     prodotti = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
     proposte = []
@@ -793,48 +806,76 @@ async def auto_order():
         giac_tot = giac_negozio + giac_vending
         acq = p.get("acquistati", 0) or 0
         vend_30gg = await compute_venduto_30gg(codice)
-        # storico ordini per prodotto
+        # se non ho vendite giornaliere registrate, uso lo storico ordini negozio come proxy della domanda
+        # (media pezzi/ordine ≈ vendite mensili). Meglio che assumere 0.
         storici = await db.storico_ordini.find({"codice": codice}, {"_id": 0}).to_list(1000)
         n_ord = len(storici)
         media_ord = round(sum(o.get("quantita", 0) for o in storici) / n_ord, 2) if n_ord else 0
+        # domanda giornaliera stimata
+        if vend_30gg > 0:
+            domanda_gg = vend_30gg / 30.0
+        elif media_ord > 0 and n_ord > 0:
+            # se ho storico di ordini ma nessuna vendita registrata, stima ~ 1 lotto/mese di consumo minimo
+            domanda_gg = media_ord / 30.0
+        else:
+            domanda_gg = 0
+
         lotto = lotto_for(p.get("categoria", "ACCESSORI"), params)
 
-        # % giacenza calcolata SUL SOLO NEGOZIO (il vending è separato)
+        # % giacenza calcolata SUL SOLO NEGOZIO (fallback storico)
         pct_giac = (giac_negozio / acq) if acq > 0 else (1 if giac_negozio > 0 else 0)
 
-        # fabbisogno grezzo: se sotto soglia (nel negozio)
+        # copertura in giorni (∞ se domanda 0)
+        copertura_gg = (giac_negozio / domanda_gg) if domanda_gg > 0 else float("inf")
+
         motivo = None
         qta = 0
-        if giac_negozio <= 0:
+
+        # Trigger principali di riordino:
+        #  1. negozio a zero
+        #  2. copertura sotto la soglia giorni minimi (es. < 7 giorni)
+        #  3. legacy: % giacenza sotto soglia con vendite recenti
+        trigger_zero = giac_negozio <= 0
+        trigger_copertura = domanda_gg > 0 and copertura_gg < gg_min
+        trigger_legacy = pct_giac < soglia_pct and vend_30gg > 0
+
+        if trigger_zero:
             if vend_30gg >= fast_min:
                 motivo = "FAST MOVER: NEGOZIO ESAURITO" if giac_vending > 0 else "FAST MOVER: REINTEGRO"
-                qta = max(lotto, int(round(vend_30gg * fatt / 7 * 7)))
-            elif vend_30gg <= slow_max:
-                motivo = "SLOW MOVER: 1 LOTTO (NEGOZIO ZERO)"
-                qta = lotto
+            elif vend_30gg <= slow_max and vend_30gg > 0:
+                motivo = "SLOW MOVER: NEGOZIO ZERO"
             else:
-                motivo = "TARGET SETTIMANALE (NEGOZIO ZERO)"
-                qta = lotto
-        elif pct_giac < soglia_pct and vend_30gg > 0:
+                motivo = "NEGOZIO ESAURITO"
+            # copertura target: gg_target giorni di vendite (min 1 lotto)
+            fabbisogno = int(round(domanda_gg * gg_target * fatt)) if domanda_gg > 0 else lotto
+            qta = max(lotto, fabbisogno)
+        elif trigger_copertura:
+            motivo = f"COPERTURA {copertura_gg:.1f}gg < {int(gg_min)}gg"
+            # ordina fino a copertura target giorni (netto di ciò che ho)
+            fabbisogno = int(round(domanda_gg * gg_target * fatt)) - giac_negozio
+            qta = max(lotto, fabbisogno)
+        elif trigger_legacy:
             if vend_30gg >= fast_min:
-                motivo = "FAST MOVER: REINTEGRO"
+                motivo = "FAST MOVER: SOTTO SOGLIA"
                 qta = max(lotto, int(round(vend_30gg * fatt)))
             else:
                 motivo = "TARGET SETTIMANALE"
                 qta = lotto
 
         if qta > 0:
-            # arrotonda al lotto
+            # arrotonda al lotto superiore
             qta = ((qta + lotto - 1) // lotto) * lotto
             proposte.append({
                 "codice": codice,
                 "descrizione": p.get("descrizione", ""),
                 "categoria": p.get("categoria", ""),
                 "qta_da_ordinare": qta,
-                "giacenza": giac_tot,                   # informativa: giacenza complessiva
-                "giacenza_negozio": giac_negozio,       # base per il calcolo
+                "giacenza": giac_tot,
+                "giacenza_negozio": giac_negozio,
                 "giacenza_vending": giac_vending,
                 "venduto_30gg": vend_30gg,
+                "domanda_gg": round(domanda_gg, 2),
+                "copertura_gg": round(copertura_gg, 1) if copertura_gg != float("inf") else None,
                 "media_ordini_storico": media_ord,
                 "n_ordini_storici": n_ord,
                 "lotto_ordine": lotto,
