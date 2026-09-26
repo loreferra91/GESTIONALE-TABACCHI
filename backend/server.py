@@ -198,6 +198,7 @@ DEFAULT_PARAMS = {
     "FATT_SETTIMANALE": {"valore": 1.15, "descrizione": "Fattore fabbisogno settimanale"},
     "GIORNI_COPERTURA_MIN": {"valore": 7, "descrizione": "Riordina se lo stock negozio copre meno di N giorni di vendite"},
     "GIORNI_COPERTURA_TARGET": {"valore": 14, "descrizione": "Copertura target (giorni) dopo il riordino"},
+    "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Giorni a cui si riferisce il campo 'venduti_negozio' importato dall'Excel (usato come proxy della domanda)"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
 }
 
@@ -757,6 +758,7 @@ PARAM_BOUNDS = {
     "SOGLIA_ALLERT_PCT": (0.0, 1.0, "0 ≤ SOGLIA_ALLERT_PCT < 1"),
     "GIORNI_COPERTURA_MIN": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
     "GIORNI_COPERTURA_TARGET": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
+    "PERIODO_VENDUTI_GG": (1.0, 3650.0, "1 ≤ giorni ≤ 3650"),
     "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
     "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
     "GIORNI_STORICO_VEND": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
@@ -794,47 +796,41 @@ async def auto_order():
     fatt = params.get("FATT_SETTIMANALE", 1.15)
     gg_min = params.get("GIORNI_COPERTURA_MIN", 7)       # riordina se copertura < N giorni
     gg_target = params.get("GIORNI_COPERTURA_TARGET", 14)  # dopo il riordino copertura ≥ M giorni
+    periodo_venduti = params.get("PERIODO_VENDUTI_GG", 90) or 90  # giorni cui si riferisce venduti_negozio
 
     prodotti = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
     proposte = []
     for p in prodotti:
         codice = p["codice"]
-        # NEGOZIO e VENDING sono canali separati: il negozio ordina in base al proprio stock,
-        # non a quello del distributore. La giacenza vending è tracciata a parte per la ricarica.
         giac_negozio = p.get("giacenza_negozio", 0) or 0
         giac_vending = p.get("giacenza_vending", 0) or 0
         giac_tot = giac_negozio + giac_vending
         acq = p.get("acquistati", 0) or 0
-        vend_30gg = await compute_venduto_30gg(codice)
-        # se non ho vendite giornaliere registrate, uso lo storico ordini negozio come proxy della domanda
-        # (media pezzi/ordine ≈ vendite mensili). Meglio che assumere 0.
+        vend_30gg_app = await compute_venduto_30gg(codice)
+        # storico ordini per prodotto (fallback e info)
         storici = await db.storico_ordini.find({"codice": codice}, {"_id": 0}).to_list(1000)
         n_ord = len(storici)
         media_ord = round(sum(o.get("quantita", 0) for o in storici) / n_ord, 2) if n_ord else 0
-        # domanda giornaliera stimata
-        if vend_30gg > 0:
-            domanda_gg = vend_30gg / 30.0
-        elif media_ord > 0 and n_ord > 0:
-            # se ho storico di ordini ma nessuna vendita registrata, stima ~ 1 lotto/mese di consumo minimo
-            domanda_gg = media_ord / 30.0
-        else:
-            domanda_gg = 0
 
+        # Domanda giornaliera stimata — usa la migliore tra:
+        #  1. vend_30gg_app / 30 (se l'app ha ≥ 5 pezzi tracciati)
+        #  2. venduti_negozio / PERIODO_VENDUTI_GG (proxy dall'Excel importato)
+        #  3. media_ord / 30 (fallback storico ordini)
+        vend_neg_excel = p.get("venduti_negozio", 0) or 0
+        domanda_app = vend_30gg_app / 30.0 if vend_30gg_app >= 5 else 0
+        domanda_excel = vend_neg_excel / float(periodo_venduti) if vend_neg_excel > 0 else 0
+        domanda_ord = media_ord / 30.0 if n_ord > 0 else 0
+        domanda_gg = max(domanda_app, domanda_excel, domanda_ord)
+
+        # Per compatibilità: vend_30gg mostrato = quello con cui abbiamo lavorato
+        vend_30gg = int(round(domanda_gg * 30))
         lotto = lotto_for(p.get("categoria", "ACCESSORI"), params)
 
-        # % giacenza calcolata SUL SOLO NEGOZIO (fallback storico)
         pct_giac = (giac_negozio / acq) if acq > 0 else (1 if giac_negozio > 0 else 0)
-
-        # copertura in giorni (∞ se domanda 0)
         copertura_gg = (giac_negozio / domanda_gg) if domanda_gg > 0 else float("inf")
 
         motivo = None
         qta = 0
-
-        # Trigger principali di riordino:
-        #  1. negozio a zero
-        #  2. copertura sotto la soglia giorni minimi (es. < 7 giorni)
-        #  3. legacy: % giacenza sotto soglia con vendite recenti
         trigger_zero = giac_negozio <= 0
         trigger_copertura = domanda_gg > 0 and copertura_gg < gg_min
         trigger_legacy = pct_giac < soglia_pct and vend_30gg > 0
@@ -842,16 +838,14 @@ async def auto_order():
         if trigger_zero:
             if vend_30gg >= fast_min:
                 motivo = "FAST MOVER: NEGOZIO ESAURITO" if giac_vending > 0 else "FAST MOVER: REINTEGRO"
-            elif vend_30gg <= slow_max and vend_30gg > 0:
+            elif 0 < vend_30gg <= slow_max:
                 motivo = "SLOW MOVER: NEGOZIO ZERO"
             else:
                 motivo = "NEGOZIO ESAURITO"
-            # copertura target: gg_target giorni di vendite (min 1 lotto)
             fabbisogno = int(round(domanda_gg * gg_target * fatt)) if domanda_gg > 0 else lotto
             qta = max(lotto, fabbisogno)
         elif trigger_copertura:
             motivo = f"COPERTURA {copertura_gg:.1f}gg < {int(gg_min)}gg"
-            # ordina fino a copertura target giorni (netto di ciò che ho)
             fabbisogno = int(round(domanda_gg * gg_target * fatt)) - giac_negozio
             qta = max(lotto, fabbisogno)
         elif trigger_legacy:
