@@ -1,0 +1,19 @@
+{
+  "summary": "Testato bug fix Auto-Order 'copertura giorni'. 8/8 backend pytest passed; frontend UI mostra colonna 'Cop. (gg)' ordinabile con evidenza rossa per copertura<7. n_righe salito da 25 (baseline iter8) a 30 grazie al nuovo trigger di copertura. Motivi COPERTURA X.Xgg < 7gg confermati.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iter9_copertura.py", "/app/test_reports/pytest/iter9.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py sta crescendo (1465 righe) — considerare split in moduli (routers/parametri.py, routers/auto_order.py) nelle prossime iterazioni.",
+    "In auto_order() trigger_legacy (pct_giac<0.35) è ora ridondante col trigger_copertura in molti casi; documentare o rimuovere per semplicità.",
+    "Il campo copertura_gg=None viene mostrato come '∞' nel frontend — OK. Ma ordinare per Cop. (gg) mette i None in fondo/inizio in modo inconsistente a seconda dell'implementazione di useSortSearch; verificare comportamento con dati misti."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter9_copertura.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "Creati/eliminati TEST_COV1 (prodotto + 5 vendite), TEST_ZERO, TEST_ESAUR durante i test. Cleanup automatico via fixtures. Verificato nessun residuo dopo run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Baseline iter9: auto-order ritorna 30 righe con la fixture attuale (era 25 in iter8). Nuovi parametri GIORNI_COPERTURA_MIN=7, GIORNI_COPERTURA_TARGET=14 con bounds [1,365]. test_iter9_copertura.py copre: schema parametri, PUT valid/invalid, schema righe auto-order, main bug fix (prodotto low-coverage appare), edge case zero vendite (non trigger), edge case negozio esaurito.",
+  "rca of the issue": "Fix aggiunge trigger di copertura in giorni: se giacenza_negozio / (vend_30gg/30) < GIORNI_COPERTURA_MIN, prodotto proposto per riordino con target = domanda_gg * GIORNI_COPERTURA_TARGET * FATT_SETTIMANALE. Ciò intercetta i casi in cui il vecchio trigger legacy (pct_giac < 35%) escludeva prodotti con giacenza percentualmente 'alta' ma con vendite elevate (es. giac=3, acq=5, pct=60%, ma vend=20/mese → copertura 4.5gg)."
+}
