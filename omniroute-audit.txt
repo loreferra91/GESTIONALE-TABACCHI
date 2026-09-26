@@ -1,0 +1,51 @@
+__BEGIN__
+## main
+?? omniroute-audit.txt
+?? package-lock.json
+origin	https://github.com/loreferra91/GESTIONALE-TABACCHI.git (fetch)
+origin	https://github.com/loreferra91/GESTIONALE-TABACCHI.git (push)
+b76c8f85e556a27f48f9a1dc0ab65c754f70802e 2026-09-25T08:18:30+00:00 ## Sincronizzazione Excel multi-foglio — Completata Nel pannello **Parametri** carichi un file `.xlsm/.xlsx` e la web app: - Legge automaticamente 5 fogli: **RIEP_VENDITA** (prodotti + giacenze), **LISTINO ADM** (4104 articoli ufficiali), **RICARICA VENDING** (colonne A01..), **STORICO_ORDINI**, **PARAMETRI** - Excel = fonte di verità (upsert): righe presenti aggiornate, nuove inserite - **Righe solo nel DB conservate** (es. prodotti creati da Carico Merce) - **Parametri custom preservati** (AGGIO_PCT & co. non vengono toccati se non nel foglio Excel) - **Report post-import** con 8 KPI card: prodotti nuovi/aggiornati, listino nuovi/aggiornati, vending nuove/aggiornate, storico, parametri + eventuali fogli mancanti/errori
+__FILES__
+./.dockerignore
+./.emergent/emergent.yml
+./.gitignore
+./.ruff_cache/.gitignore
+./.ruff_cache/CACHEDIR.TAG
+./Dockerfile
+./README.md
+./backend/.env
+./backend/.env.example
+./backend/pytest.ini
+./backend/requirements-prod.txt
+./backend/requirements.txt
+./backend/server.py
+./design_guidelines.json
+./frontend/.env
+./frontend/.env.example
+./frontend/.gitignore
+./frontend/README.md
+./frontend/components.json
+./frontend/craco.config.js
+./frontend/jsconfig.json
+./frontend/package.json
+./frontend/postcss.config.js
+./frontend/tailwind.config.js
+./frontend/yarn.lock
+./memory/.gitkeep
+./memory/PRD.md
+./memory/test_credentials.md
+./omniroute-audit.txt
+./package-lock.json
+./render.yaml
+./test_reports/.gitkeep
+./test_reports/iteration_1.json
+./test_reports/iteration_2.json
+./test_reports/iteration_3.json
+./test_reports/iteration_4.json
+./test_reports/iteration_5.json
+./test_reports/iteration_6.json
+./test_reports/iteration_7.json
+./test_result.md
+./tests/__init__.py
+./yarn.lock
+__END__

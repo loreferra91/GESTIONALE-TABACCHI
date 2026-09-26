@@ -2,12 +2,18 @@ import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { api } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur } from "../components/UI";
+import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
 export default function Cassa() {
   const [data, setData] = useState({ movimenti: [], saldo: 0 });
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, tipo: "ENTRATA", importo: 0, descrizione: "", operatore: "" });
+
+  const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(data.movimenti || [], {
+    initial: "data", dir: "desc",
+    searchFields: ["tipo", "descrizione", "operatore"],
+  });
 
   const load = async () => {
     const r = await api.get("/cassa");
@@ -48,12 +54,24 @@ export default function Cassa() {
         </div>
       </Card>
 
+      <div className="flex items-center gap-3 mb-4">
+        <SearchBar data-testid="cassa-search" value={query} onChange={setQuery} placeholder="Cerca tipo, descrizione o operatore…" className="flex-1 max-w-md" />
+        <span className="text-sm text-slate-500">{rows.length} movimenti</span>
+      </div>
+
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="data-table w-full">
-            <thead><tr><th>Data</th><th>Tipo</th><th>Descrizione</th><th>Operatore</th><th className="text-right">Importo</th><th></th></tr></thead>
+            <thead><tr>
+              <Th sortKey="data" currentKey={sortKey} dir={sortDir} onClick={toggle}>Data</Th>
+              <Th sortKey="tipo" currentKey={sortKey} dir={sortDir} onClick={toggle}>Tipo</Th>
+              <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
+              <Th sortKey="operatore" currentKey={sortKey} dir={sortDir} onClick={toggle}>Operatore</Th>
+              <Th sortKey="importo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Importo</Th>
+              <th></th>
+            </tr></thead>
             <tbody>
-              {data.movimenti.map(r => (
+              {rows.map(r => (
                 <tr key={r.id} data-testid={`cassa-row-${r.id}`}>
                   <td className="font-mono text-xs">{(r.data || "").slice(0, 10)}</td>
                   <td><Badge tone={r.tipo === "USCITA" ? "error" : "ok"}>{r.tipo}</Badge></td>
@@ -65,7 +83,7 @@ export default function Cassa() {
                   <td className="text-right"><button onClick={() => del(r.id)} className="text-red-600 text-xs">✕</button></td>
                 </tr>
               ))}
-              {data.movimenti.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nessun movimento</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nessun movimento</td></tr>}
             </tbody>
           </table>
         </div>

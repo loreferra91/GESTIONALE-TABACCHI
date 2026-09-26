@@ -2,17 +2,22 @@ import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { api } from "../lib/api";
 import { Card, formatEur, formatNum } from "../components/UI";
+import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
 export default function Ordini() {
-  const [rows, setRows] = useState([]);
-  const [q, setQ] = useState("");
+  const [allRows, setAllRows] = useState([]);
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 10, prezzo: 0 });
 
+  const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRows, {
+    initial: "data", dir: "desc",
+    searchFields: ["codice", "descrizione", "file_sorgente"],
+  });
+
   const load = async () => {
     const r = await api.get("/ordini");
-    setRows(r.data);
+    setAllRows(r.data);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -30,12 +35,11 @@ export default function Ordini() {
     load();
   };
 
-  const filtered = rows.filter(r => !q || r.codice.toLowerCase().includes(q.toLowerCase()) || (r.descrizione || "").toLowerCase().includes(q.toLowerCase()));
-  const totQ = filtered.reduce((s, r) => s + (r.quantita || 0), 0);
-  const totV = filtered.reduce((s, r) => s + (r.quantita || 0) * (r.prezzo || 0), 0);
+  const totQ = rows.reduce((s, r) => s + (r.quantita || 0), 0);
+  const totV = rows.reduce((s, r) => s + (r.quantita || 0) * (r.prezzo || 0), 0);
 
   return (
-    <Layout title="Storico ordini" subtitle={`${rows.length} righe totali`}>
+    <Layout title="Storico ordini" subtitle={`${allRows.length} righe totali`}>
       <Card className="p-4 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
           <input data-testid="ord-data" type="date" value={form.data} onChange={e => setForm({...form, data: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
@@ -49,19 +53,28 @@ export default function Ordini() {
         </div>
       </Card>
 
-      <div className="flex items-center justify-between mb-4">
-        <input data-testid="ord-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca…" className="border rounded-md px-3 py-2 text-sm max-w-md" />
-        <div className="text-sm text-slate-600">Totale filtrato: <span className="font-heading font-black text-lg text-slate-900 ml-2">{formatEur(totV)}</span> · {formatNum(totQ)} pz</div>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <SearchBar data-testid="ord-search" value={query} onChange={setQuery} placeholder="Cerca codice, descrizione o sorgente…" className="flex-1 max-w-md" />
+        <div className="text-sm text-slate-600 whitespace-nowrap">Totale filtrato: <span className="font-heading font-black text-lg text-slate-900 ml-2">{formatEur(totV)}</span> · {formatNum(totQ)} pz</div>
       </div>
 
       <Card className="overflow-hidden">
         <div className="overflow-x-auto max-h-[70vh]">
           <table className="data-table w-full">
             <thead>
-              <tr><th>Data</th><th>Codice</th><th>Descrizione</th><th className="text-right">Qta</th><th className="text-right">Prezzo</th><th className="text-right">Totale</th><th>Sorgente</th><th></th></tr>
+              <tr>
+                <Th sortKey="data" currentKey={sortKey} dir={sortDir} onClick={toggle}>Data</Th>
+                <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
+                <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
+                <Th sortKey="quantita" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Qta</Th>
+                <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
+                <th className="text-right">Totale</th>
+                <Th sortKey="file_sorgente" currentKey={sortKey} dir={sortDir} onClick={toggle}>Sorgente</Th>
+                <th></th>
+              </tr>
             </thead>
             <tbody>
-              {filtered.map(r => (
+              {rows.map(r => (
                 <tr key={r.id} data-testid={`ord-row-${r.id}`}>
                   <td className="font-mono text-xs">{(r.data || "").slice(0, 10)}</td>
                   <td className="font-mono">{r.codice}</td>

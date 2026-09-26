@@ -2,20 +2,26 @@ import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { api } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
+import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
 export default function Prodotti() {
-  const [rows, setRows] = useState([]);
-  const [q, setQ] = useState("");
+  const [allRows, setAllRows] = useState([]);
   const [cat, setCat] = useState("");
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" });
 
+  const filtered = cat ? allRows.filter(r => r.categoria === cat) : allRows;
+  const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(filtered, {
+    initial: "codice", dir: "asc",
+    searchFields: ["codice", "descrizione", "categoria"],
+  });
+
   const load = async () => {
     setLoading(true);
-    const r = await api.get("/prodotti", { params: { q, categoria: cat, limit: 1000 } });
-    setRows(r.data);
+    const r = await api.get("/prodotti", { params: { limit: 5000 } });
+    setAllRows(r.data);
     setLoading(false);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
@@ -76,14 +82,14 @@ export default function Prodotti() {
       </Card>
 
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
-        <input data-testid="prod-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca codice o descrizione…" className="border rounded-md px-3 py-2 text-sm flex-1 sm:max-w-md" />
+        <SearchBar data-testid="prod-search" value={query} onChange={setQuery} placeholder="Cerca codice, descrizione o categoria…" className="flex-1 sm:max-w-md" />
         <select data-testid="prod-filter-cat" value={cat} onChange={e => setCat(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
           <option value="">Tutte le categorie</option>
           <option>SIGARETTE</option>
           <option>SIGARETTE ELETTRONICHE</option>
           <option>ACCESSORI</option>
         </select>
-        <button data-testid="prod-search-btn" onClick={load} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors">Filtra</button>
+        <span className="text-sm text-slate-500 self-center">{rows.length} risultati</span>
       </div>
 
       <Card className="overflow-hidden">
@@ -91,10 +97,12 @@ export default function Prodotti() {
           <table className="data-table w-full">
             <thead>
               <tr>
-                <th>Codice</th><th>Descrizione</th><th>Categoria</th>
-                <th className="text-right">Prezzo</th>
-                <th className="text-right">Giac. negozio</th>
-                <th className="text-right">Giac. vending</th>
+                <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
+                <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
+                <Th sortKey="categoria" currentKey={sortKey} dir={sortDir} onClick={toggle}>Categoria</Th>
+                <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
+                <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. negozio</Th>
+                <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. vending</Th>
                 <th className="text-right">Venduti</th>
                 <th></th>
               </tr>

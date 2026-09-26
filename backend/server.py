@@ -572,6 +572,72 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
     return {"ok": True, "colonna": v["colonna"], "nuova_giacenza": nuovo, "quantita_caricata": qta_caricata}
 
 
+@api.get("/vending/ricarica-pdf")
+async def vending_ricarica_pdf():
+    """Genera un PDF con SOLO le colonne da caricare (esito DA CARICARE)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    rows = await list_vending()
+    da_caricare = [r for r in rows if r["esito"] == "DA CARICARE"]
+    da_caricare.sort(key=lambda r: r["colonna"])
+    tot_pezzi = sum(r.get("proposta", 0) for r in da_caricare)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
+    styles = getSampleStyleSheet()
+    title_s = ParagraphStyle('t', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=2)
+    sub_s = ParagraphStyle('s', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#64748B'), spaceAfter=12)
+
+    story = [Paragraph("RICARICA VENDING — DA CARICARE", title_s)]
+    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")
+    story.append(Paragraph(f"Data: <b>{now}</b> &nbsp;·&nbsp; Colonne da caricare: <b>{len(da_caricare)}</b> &nbsp;·&nbsp; Pezzi totali: <b>{tot_pezzi}</b>", sub_s))
+
+    if not da_caricare:
+        story.append(Paragraph("Nessuna colonna necessita ricarica.", styles['Normal']))
+    else:
+        data = [["COLONNA", "CODICE", "ARTICOLO", "GIACENZA", "CAPACITÀ", "SOGLIA", "DA CARICARE"]]
+        for r in da_caricare:
+            data.append([
+                r["colonna"],
+                r.get("codice", ""),
+                (r.get("descrizione") or "")[:45],
+                str(r.get("giacenza", 0)),
+                str(r.get("capacita_max", 0)),
+                str(r.get("soglia_minima", 0)),
+                str(r.get("proposta", 0)),
+            ])
+        data.append(["", "", "", "", "", "TOTALE", str(tot_pezzi)])
+        tbl = Table(data, colWidths=[20*mm, 25*mm, 65*mm, 22*mm, 22*mm, 15*mm, 22*mm], repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), 8),
+            ('ALIGN', (0,0), (-1,0), 'LEFT'),
+            ('ALIGN', (3,1), (-1,-1), 'RIGHT'),
+            ('FONTNAME', (0,1), (-1,-2), 'Helvetica'),
+            ('FONTSIZE', (0,1), (-1,-1), 9),
+            ('ROWBACKGROUNDS', (0,1), (-1,-2), [colors.white, colors.HexColor('#F8FAFC')]),
+            ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#F1F5F9')),
+            ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+            ('TOPPADDING', (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ]))
+        story.append(tbl)
+
+    doc.build(story)
+    buf.seek(0)
+    fname = f"ricarica_vending_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
+    return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+
 # ------------------------- Storico ordini -------------------------
 @api.get("/ordini")
 async def list_ordini(limit: int = 1000):
@@ -720,7 +786,11 @@ async def auto_order():
     proposte = []
     for p in prodotti:
         codice = p["codice"]
-        giac_tot = (p.get("giacenza_negozio", 0) or 0) + (p.get("giacenza_vending", 0) or 0)
+        # NEGOZIO e VENDING sono canali separati: il negozio ordina in base al proprio stock,
+        # non a quello del distributore. La giacenza vending è tracciata a parte per la ricarica.
+        giac_negozio = p.get("giacenza_negozio", 0) or 0
+        giac_vending = p.get("giacenza_vending", 0) or 0
+        giac_tot = giac_negozio + giac_vending
         acq = p.get("acquistati", 0) or 0
         vend_30gg = await compute_venduto_30gg(codice)
         # storico ordini per prodotto
@@ -729,20 +799,21 @@ async def auto_order():
         media_ord = round(sum(o.get("quantita", 0) for o in storici) / n_ord, 2) if n_ord else 0
         lotto = lotto_for(p.get("categoria", "ACCESSORI"), params)
 
-        pct_giac = (giac_tot / acq) if acq > 0 else (1 if giac_tot > 0 else 0)
+        # % giacenza calcolata SUL SOLO NEGOZIO (il vending è separato)
+        pct_giac = (giac_negozio / acq) if acq > 0 else (1 if giac_negozio > 0 else 0)
 
-        # fabbisogno grezzo: se sotto soglia
+        # fabbisogno grezzo: se sotto soglia (nel negozio)
         motivo = None
         qta = 0
-        if giac_tot <= 0:
+        if giac_negozio <= 0:
             if vend_30gg >= fast_min:
-                motivo = "FAST MOVER: REINTEGRO"
+                motivo = "FAST MOVER: NEGOZIO ESAURITO" if giac_vending > 0 else "FAST MOVER: REINTEGRO"
                 qta = max(lotto, int(round(vend_30gg * fatt / 7 * 7)))
             elif vend_30gg <= slow_max:
-                motivo = "SLOW MOVER: 1 LOTTO (STOCK ZERO)"
+                motivo = "SLOW MOVER: 1 LOTTO (NEGOZIO ZERO)"
                 qta = lotto
             else:
-                motivo = "TARGET SETTIMANALE"
+                motivo = "TARGET SETTIMANALE (NEGOZIO ZERO)"
                 qta = lotto
         elif pct_giac < soglia_pct and vend_30gg > 0:
             if vend_30gg >= fast_min:
@@ -760,7 +831,9 @@ async def auto_order():
                 "descrizione": p.get("descrizione", ""),
                 "categoria": p.get("categoria", ""),
                 "qta_da_ordinare": qta,
-                "giacenza": giac_tot,
+                "giacenza": giac_tot,                   # informativa: giacenza complessiva
+                "giacenza_negozio": giac_negozio,       # base per il calcolo
+                "giacenza_vending": giac_vending,
                 "venduto_30gg": vend_30gg,
                 "media_ordini_storico": media_ord,
                 "n_ordini_storici": n_ord,
@@ -1178,6 +1251,64 @@ async def _import_parametri(ws) -> Dict[str, int]:
     return {"inseriti": 0, "aggiornati": upd, "saltati": skip, "errori": err}
 
 
+async def _import_db_storico_vend(ws) -> Dict[str, int]:
+    """DB_STORICO_VEND: vendite storiche giornaliere. Full replace (fonte di verità)."""
+    ins = err = 0
+    await db.db_storico_vend.delete_many({})
+    batch = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        try:
+            if not row or not row[0]:
+                continue
+            data_v = row[0]
+            if isinstance(data_v, datetime):
+                data_v = data_v.isoformat()
+            batch.append({
+                "id": str(uuid.uuid4()),
+                "data": str(data_v),
+                "codice": str(row[1] or "").strip() if len(row) > 1 else "",
+                "descrizione": str(row[2] or "").strip() if len(row) > 2 else "",
+                "quantita": int(row[3] or 0) if len(row) > 3 else 0,
+                "importo": float(row[4] or 0) if len(row) > 4 else 0,
+                "categoria": str(row[5] or "").strip() if len(row) > 5 else "",
+            })
+            if len(batch) >= 1000:
+                await db.db_storico_vend.insert_many(batch)
+                ins += len(batch)
+                batch = []
+        except Exception:
+            err += 1
+    if batch:
+        await db.db_storico_vend.insert_many(batch)
+        ins += len(batch)
+    return {"inseriti": ins, "aggiornati": 0, "errori": err}
+
+
+async def _import_db_storico_vending_ext(ws) -> Dict[str, int]:
+    """DB_STORICO_VENDING_EXT: storico dettagliato vendite vending. Full replace."""
+    ins = err = 0
+    await db.db_storico_vending_ext.delete_many({})
+    batch = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        try:
+            if not row or all(c in (None, "") for c in row):
+                continue
+            batch.append({
+                "id": str(uuid.uuid4()),
+                "raw": [str(c) if c is not None else "" for c in row[:18]],
+            })
+            if len(batch) >= 1000:
+                await db.db_storico_vending_ext.insert_many(batch)
+                ins += len(batch)
+                batch = []
+        except Exception:
+            err += 1
+    if batch:
+        await db.db_storico_vending_ext.insert_many(batch)
+        ins += len(batch)
+    return {"inseriti": ins, "aggiornati": 0, "errori": err}
+
+
 @api.post("/import/excel-full")
 async def import_excel_full(file: UploadFile = File(...)):
     """Import multi-sheet: RIEP_VENDITA + LISTINO ADM + RICARICA VENDING + STORICO_ORDINI + PARAMETRI.
@@ -1210,6 +1341,8 @@ async def import_excel_full(file: UploadFile = File(...)):
     await _run("RICARICA VENDING", _import_vending)
     await _run("STORICO_ORDINI", _import_storico)
     await _run("PARAMETRI", _import_parametri)
+    await _run("DB_STORICO_VEND", _import_db_storico_vend)
+    await _run("DB_STORICO_VENDING_EXT", _import_db_storico_vending_ext)
 
     totali = {
         "prodotti_inseriti": report.get("RIEP_VENDITA", {}).get("inseriti", 0),
@@ -1221,6 +1354,8 @@ async def import_excel_full(file: UploadFile = File(...)):
         "storico_ricreato": report.get("STORICO_ORDINI", {}).get("inseriti", 0),
         "parametri_aggiornati": report.get("PARAMETRI", {}).get("aggiornati", 0),
         "parametri_saltati": report.get("PARAMETRI", {}).get("saltati", 0),
+        "db_storico_vend_righe": report.get("DB_STORICO_VEND", {}).get("inseriti", 0),
+        "db_storico_vending_ext_righe": report.get("DB_STORICO_VENDING_EXT", {}).get("inseriti", 0),
     }
     return {
         "ok": True,

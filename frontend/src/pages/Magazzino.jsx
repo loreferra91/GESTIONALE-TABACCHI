@@ -2,17 +2,18 @@ import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { api } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
+import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 
 export default function Magazzino() {
   const [data, setData] = useState(null);
-  const [q, setQ] = useState("");
   const [stato, setStato] = useState("");
   useEffect(() => { api.get("/pivot").then(r => setData(r.data)); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const rows = (data?.righe || []).filter(r =>
-    (!q || r.codice.toLowerCase().includes(q.toLowerCase()) || r.descrizione.toLowerCase().includes(q.toLowerCase())) &&
-    (!stato || r.stato === stato)
-  );
+  const filtered = (data?.righe || []).filter(r => !stato || r.stato === stato);
+  const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(filtered, {
+    initial: "tot_giacenza", dir: "desc",
+    searchFields: ["codice", "descrizione", "categoria", "stato"],
+  });
 
   const k = data?.kpi || {};
 
@@ -28,11 +29,12 @@ export default function Magazzino() {
       </div>
 
       <div className="flex gap-3 mb-4">
-        <input data-testid="mag-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca…" className="border rounded-md px-3 py-2 text-sm flex-1 max-w-md" />
+        <SearchBar data-testid="mag-search" value={query} onChange={setQuery} placeholder="Cerca codice, descrizione, categoria o stato…" className="flex-1 max-w-md" />
         <select data-testid="mag-filter-stato" value={stato} onChange={e => setStato(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
           <option value="">Tutti gli stati</option>
           <option>OK</option><option>ESAURITO</option><option>FERMO</option><option>LENTO</option>
         </select>
+        <span className="text-sm text-slate-500 self-center">{rows.length} risultati</span>
       </div>
 
       <Card className="overflow-hidden">
@@ -40,17 +42,18 @@ export default function Magazzino() {
           <table className="data-table w-full">
             <thead>
               <tr>
-                <th>Codice</th><th>Descrizione</th>
-                <th className="text-right">Acq.</th>
-                <th className="text-right">Vend. Neg.</th>
-                <th className="text-right">Vend. Vend.</th>
-                <th className="text-right">Giac. Neg.</th>
-                <th className="text-right">Giac. Vend.</th>
-                <th className="text-right">Giac. Tot.</th>
-                <th className="text-right">Prezzo</th>
-                <th className="text-right">Val. Giac.</th>
-                <th className="text-right">Mesi smalt.</th>
-                <th>Stato</th>
+                <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
+                <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
+                <Th sortKey="acq" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Acq.</Th>
+                <Th sortKey="vend_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. Neg.</Th>
+                <Th sortKey="vend_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. Vend.</Th>
+                <Th sortKey="giac_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. Neg.</Th>
+                <Th sortKey="giac_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. Vend.</Th>
+                <Th sortKey="giac_totale" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. Tot.</Th>
+                <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
+                <Th sortKey="tot_giacenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Val. Giac.</Th>
+                <Th sortKey="mesi_smaltimento" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Mesi smalt.</Th>
+                <Th sortKey="stato" currentKey={sortKey} dir={sortDir} onClick={toggle}>Stato</Th>
               </tr>
             </thead>
             <tbody>

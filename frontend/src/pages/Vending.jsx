@@ -1,19 +1,24 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
+import { api, API } from "../lib/api";
 import { Card, Badge, KpiCard } from "../components/UI";
+import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { Printer } from "@phosphor-icons/react";
 
 export default function Vending() {
-  const [rows, setRows] = useState([]);
-  const [sel, setSel] = useState(null);
-  const [qta, setQta] = useState(0);
+  const [allRows, setAllRows] = useState([]);
 
   const load = async () => {
     const r = await api.get("/vending");
-    setRows(r.data);
+    setAllRows(r.data);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRows, {
+    initial: "colonna", dir: "asc",
+    searchFields: ["colonna", "codice", "descrizione", "esito"],
+  });
 
   const rica = async (v) => {
     const q = window.prompt(`Ricarica colonna ${v.colonna} — capacità ${v.capacita_max}, attuale ${v.giacenza}. Quanti pezzi?`, v.proposta);
@@ -23,9 +28,13 @@ export default function Vending() {
     load();
   };
 
-  const daCaricare = rows.filter(r => r.esito === "DA CARICARE").length;
-  const piene = rows.filter(r => r.esito === "PIENO").length;
-  const totProposta = rows.reduce((s, r) => s + (r.proposta || 0), 0);
+  const daCaricare = allRows.filter(r => r.esito === "DA CARICARE").length;
+  const piene = allRows.filter(r => r.esito === "PIENO").length;
+  const totProposta = allRows.reduce((s, r) => s + (r.proposta || 0), 0);
+
+  const stampaPdf = () => {
+    window.open(`${API}/vending/ricarica-pdf`, "_blank");
+  };
 
   const cellTone = (r) => {
     if (r.esito === "DA CARICARE") return "bg-red-50 border-red-200";
@@ -35,16 +44,20 @@ export default function Vending() {
   };
 
   return (
-    <Layout title="Distributore Vending" subtitle={`${rows.length} colonne mappate`}>
+    <Layout title="Distributore Vending" subtitle={`${allRows.length} colonne mappate`} actions={
+      <button data-testid="vending-pdf" onClick={stampaPdf} disabled={!daCaricare} className="flex items-center gap-2 bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <Printer size={16} weight="bold" /> Stampa da caricare ({daCaricare})
+      </button>
+    }>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Colonne totali" value={rows.length} />
+        <KpiCard label="Colonne totali" value={allRows.length} />
         <KpiCard label="Da caricare" value={daCaricare} tone={daCaricare ? "danger" : "default"} />
         <KpiCard label="Piene" value={piene} tone="success" />
         <KpiCard label="Pezzi da caricare" value={totProposta} />
       </div>
 
       <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 2xl:grid-cols-12 gap-2 mb-8">
-        {rows.map(r => (
+        {allRows.map(r => (
           <button
             key={r.id}
             data-testid={`vending-cell-${r.colonna}`}
@@ -59,17 +72,24 @@ export default function Vending() {
         ))}
       </div>
 
+      <div className="flex gap-3 mb-4">
+        <SearchBar data-testid="vending-search" value={query} onChange={setQuery} placeholder="Cerca colonna, codice o descrizione…" className="flex-1 max-w-md" />
+        <span className="text-sm text-slate-500 self-center">{rows.length} risultati</span>
+      </div>
+
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="data-table w-full">
             <thead>
               <tr>
-                <th>Colonna</th><th>Codice</th><th>Descrizione</th>
-                <th className="text-right">Giacenza</th>
-                <th className="text-right">Capacità</th>
-                <th className="text-right">Soglia</th>
-                <th className="text-right">Proposta</th>
-                <th>Stato</th>
+                <Th sortKey="colonna" currentKey={sortKey} dir={sortDir} onClick={toggle}>Colonna</Th>
+                <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
+                <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
+                <Th sortKey="giacenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giacenza</Th>
+                <Th sortKey="capacita_max" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Capacità</Th>
+                <Th sortKey="soglia_minima" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Soglia</Th>
+                <Th sortKey="proposta" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Proposta</Th>
+                <Th sortKey="esito" currentKey={sortKey} dir={sortDir} onClick={toggle}>Stato</Th>
                 <th></th>
               </tr>
             </thead>
