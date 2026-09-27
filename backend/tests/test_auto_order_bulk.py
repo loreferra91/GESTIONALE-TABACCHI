@@ -6,6 +6,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 import backend.server as server
+from fastapi.testclient import TestClient
 
 
 class FakeCursor:
@@ -96,3 +97,36 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     assert p1["venduto_30gg"] == 12
     assert p1["n_ordini_storici"] == 2
     assert p1["media_ordini_storico"] == 9
+
+
+def test_auto_order_pdf_filters_selected_category(monkeypatch):
+    async def fake_auto_order():
+        base = {
+            "descrizione": "Articolo test",
+            "qta_da_ordinare": 10,
+            "lotto_ordine": 10,
+            "prezzo": 5,
+            "totale": 50,
+            "motivo": "TEST",
+        }
+        return {
+            "righe": [
+                {**base, "codice": "SIG1", "categoria": "SIGARETTE"},
+                {**base, "codice": "ACC1", "categoria": "ACCESSORI"},
+            ],
+            "totale": 100,
+            "n_righe": 2,
+            "parametri": {},
+        }
+
+    monkeypatch.setattr(server, "auto_order", fake_auto_order)
+    response = TestClient(server.app).get(
+        "/api/auto-order/pdf",
+        params={"fornitore": "Test", "categoria": "SIGARETTE"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["x-auto-order-category"] == "SIGARETTE"
+    assert response.headers["x-auto-order-rows"] == "1"
+    assert "ordine_sigarette_" in response.headers["content-disposition"]

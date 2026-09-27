@@ -956,7 +956,10 @@ async def conferma_auto_order():
 
 # ------------------------- Auto-Order PDF -------------------------
 @api.get("/auto-order/pdf")
-async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
+async def auto_order_pdf(
+    fornitore: Optional[str] = "Fornitore",
+    categoria: Optional[str] = None,
+):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -967,9 +970,14 @@ async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
 
     # sanifica input utente per la markup di reportlab
     fornitore_safe = xml_escape((fornitore or "Fornitore")[:120])
+    categoria_filtro = (categoria or "").strip()[:120]
+    categoria_safe = xml_escape(categoria_filtro)
 
     ao = await auto_order()
     righe = ao["righe"]
+    if categoria_filtro:
+        righe = [r for r in righe if r.get("categoria") == categoria_filtro]
+    totale = round(sum(r.get("totale", 0) or 0 for r in righe), 2)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
@@ -981,7 +989,8 @@ async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
     story = []
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     story.append(Paragraph("ORDINE FORNITORE — GOD SERVICES", title_s))
-    story.append(Paragraph(f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{now}</b> &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {ao['totale']:.2f}</b>", sub_s))
+    filtro_pdf = f" &nbsp;·&nbsp; Selezione: <b>{categoria_safe}</b>" if categoria_filtro else ""
+    story.append(Paragraph(f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{now}</b>{filtro_pdf} &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {totale:.2f}</b>", sub_s))
 
     # Table
     header = ["CODICE", "ARTICOLO", "TIPO", "QTA", "LOTTO", "PREZZO", "TOTALE", "MOTIVO"]
@@ -997,7 +1006,7 @@ async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
             f"€ {r['totale']:.2f}",
             (r["motivo"] or "")[:22],
         ])
-    data.append(["", "", "", "", "", "TOTALE", f"€ {ao['totale']:.2f}", ""])
+    data.append(["", "", "", "", "", "TOTALE", f"€ {totale:.2f}", ""])
 
     col_widths = [22*mm, 60*mm, 12*mm, 12*mm, 12*mm, 18*mm, 20*mm, 30*mm]
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
@@ -1031,8 +1040,18 @@ async def auto_order_pdf(fornitore: Optional[str] = "Fornitore"):
 
     doc.build(story)
     buf.seek(0)
-    fname = f"ordine_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
-    return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={fname}"})
+    categoria_slug = re.sub(r"[^a-z0-9]+", "_", categoria_filtro.lower()).strip("_")
+    suffisso = f"_{categoria_slug}" if categoria_slug else ""
+    fname = f"ordine{suffisso}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={fname}",
+            "X-Auto-Order-Category": categoria_filtro or "TUTTE",
+            "X-Auto-Order-Rows": str(len(righe)),
+        },
+    )
 
 
 # ------------------------- Prodotti più venduti (per POS) -------------------------

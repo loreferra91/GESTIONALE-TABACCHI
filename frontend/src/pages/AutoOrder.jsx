@@ -9,8 +9,11 @@ export default function AutoOrder() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [categoria, setCategoria] = useState("");
   const allRighe = data?.righe || [];
-  const { rows: righe, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRighe, {
+  const righeCategoria = categoria ? allRighe.filter(r => r.categoria === categoria) : allRighe;
+  const totaleCategoria = righeCategoria.reduce((totale, r) => totale + (r.totale || 0), 0);
+  const { rows: righe, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(righeCategoria, {
     initial: "totale", dir: "desc",
     searchFields: ["codice", "descrizione", "categoria", "motivo"],
   });
@@ -43,25 +46,27 @@ export default function AutoOrder() {
 
   const downloadPdf = async () => {
     const fornitore = window.prompt("Nome fornitore per il PDF:", "Fornitore") || "Fornitore";
-    const url = `${API}/auto-order/pdf?fornitore=${encodeURIComponent(fornitore)}`;
+    const params = new URLSearchParams({ fornitore });
+    if (categoria) params.set("categoria", categoria);
+    const url = `${API}/auto-order/pdf?${params.toString()}`;
     window.open(url, "_blank");
   };
 
   return (
     <Layout title="Auto-Order" subtitle="proposta ordini automatica basata su soglie">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Righe proposte" value={formatNum(data?.n_righe || 0)} />
-        <KpiCard label="Totale ordine" value={formatEur(data?.totale || 0)} tone="success" />
+        <KpiCard label={categoria ? "Righe selezionate" : "Righe proposte"} value={formatNum(righeCategoria.length)} />
+        <KpiCard label={categoria ? "Totale selezione" : "Totale ordine"} value={formatEur(totaleCategoria)} tone="success" />
         <KpiCard label="Soglia allert" value={`${((data?.parametri?.SOGLIA_ALLERT_PCT || 0) * 100).toFixed(0)}%`} />
         <KpiCard label="Finestra storico" value={`${data?.parametri?.GIORNI_STORICO_VEND || 30}gg`} />
       </div>
 
       <div className="flex gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={load} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={downloadPdf} disabled={!allRighe.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
-          Esporta PDF fornitore
+        <button data-testid="ao-pdf" onClick={downloadPdf} disabled={!righeCategoria.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+          Esporta PDF {categoria ? "selezione" : "fornitore"}
         </button>
-        <button data-testid="ao-conferma" onClick={conferma} disabled={!allRighe.length} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={conferma} disabled={!allRighe.length || Boolean(categoria)} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           Conferma tutti gli ordini
         </button>
       </div>
@@ -73,9 +78,18 @@ export default function AutoOrder() {
         </div>
       )}
 
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">
         <SearchBar data-testid="ao-search" value={query} onChange={setQuery} placeholder="Cerca codice, articolo, tipo o motivo…" className="flex-1 max-w-md" />
-        <span className="text-sm text-slate-500">{righe.length} risultati</span>
+        <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Articoli da visualizzare e stampare
+          <select data-testid="ao-filter-cat" value={categoria} onChange={e => setCategoria(e.target.value)} className="min-w-56 border border-slate-300 bg-white text-slate-900 rounded-md px-3 py-2 text-sm font-normal normal-case tracking-normal">
+            <option value="">Tutte le categorie</option>
+            <option value="SIGARETTE">Solo sigarette</option>
+            <option value="SIGARETTE ELETTRONICHE">Solo sigarette elettroniche</option>
+            <option value="ACCESSORI">Solo accessori</option>
+          </select>
+        </label>
+        <span className="text-sm text-slate-500 self-center sm:pb-2">{righe.length} risultati</span>
       </div>
 
       <Card className="overflow-hidden">
@@ -119,7 +133,7 @@ export default function AutoOrder() {
                   <td><Badge tone={r.motivo?.includes("FAST") ? "warning" : "info"}>{r.motivo}</Badge></td>
                 </tr>
               ))}
-              {!loading && !error && righe.length === 0 && <tr><td colSpan={14} className="text-center py-8 text-slate-400">Nessun ordine proposto — tutte le scorte sono OK.</td></tr>}
+              {!loading && !error && righe.length === 0 && <tr><td colSpan={14} className="text-center py-8 text-slate-400">{categoria ? "Nessun ordine proposto per la categoria selezionata." : "Nessun ordine proposto — tutte le scorte sono OK."}</td></tr>}
             </tbody>
           </table>
         </div>
