@@ -8,6 +8,7 @@ import { toast } from "sonner";
 export default function AutoOrder() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const allRighe = data?.righe || [];
   const { rows: righe, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRighe, {
     initial: "totale", dir: "desc",
@@ -16,9 +17,20 @@ export default function AutoOrder() {
 
   const load = async () => {
     setLoading(true);
-    const r = await api.get("/auto-order");
-    setData(r.data);
-    setLoading(false);
+    setError("");
+    try {
+      const r = await api.get("/auto-order", { timeout: 20000 });
+      setData(r.data);
+    } catch (err) {
+      const timedOut = err.code === "ECONNABORTED";
+      const message = timedOut
+        ? "Il calcolo sta richiedendo troppo tempo. Riprova tra qualche secondo."
+        : "Impossibile calcolare gli ordini. Controlla la connessione e riprova.";
+      setError(message);
+      toast.error(message);
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -45,7 +57,7 @@ export default function AutoOrder() {
       </div>
 
       <div className="flex gap-3 mb-4">
-        <button data-testid="ao-refresh" onClick={load} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">Ricalcola</button>
+        <button data-testid="ao-refresh" onClick={load} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
         <button data-testid="ao-pdf" onClick={downloadPdf} disabled={!allRighe.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF fornitore
         </button>
@@ -53,6 +65,13 @@ export default function AutoOrder() {
           Conferma tutti gli ordini
         </button>
       </div>
+
+      {error && (
+        <div data-testid="ao-error" role="alert" className="mb-4 flex items-center justify-between gap-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <span>{error}</span>
+          <button onClick={load} disabled={loading} className="font-semibold underline disabled:opacity-40">Riprova</button>
+        </div>
+      )}
 
       <div className="flex items-center gap-3 mb-4">
         <SearchBar data-testid="ao-search" value={query} onChange={setQuery} placeholder="Cerca codice, articolo, tipo o motivo…" className="flex-1 max-w-md" />
@@ -81,7 +100,7 @@ export default function AutoOrder() {
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={13} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
+              {loading && !data && <tr><td colSpan={14} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
               {righe.map(r => (
                 <tr key={r.codice} data-testid={`ao-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
@@ -100,7 +119,7 @@ export default function AutoOrder() {
                   <td><Badge tone={r.motivo?.includes("FAST") ? "warning" : "info"}>{r.motivo}</Badge></td>
                 </tr>
               ))}
-              {!loading && righe.length === 0 && <tr><td colSpan={14} className="text-center py-8 text-slate-400">Nessun ordine proposto — tutte le scorte sono OK.</td></tr>}
+              {!loading && !error && righe.length === 0 && <tr><td colSpan={14} className="text-center py-8 text-slate-400">Nessun ordine proposto — tutte le scorte sono OK.</td></tr>}
             </tbody>
           </table>
         </div>

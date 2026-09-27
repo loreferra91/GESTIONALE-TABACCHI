@@ -259,6 +259,7 @@ async def on_start():
             db.parametri.create_index("nome"),
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
+            db.vendite.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
         )
     except Exception as e:
@@ -802,7 +803,40 @@ async def update_parametro(nome: str, body: ParametroIn):
 # ------------------------- Auto-Order -------------------------
 @api.get("/auto-order")
 async def auto_order():
-    params = await get_params()
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    vendite_pipeline = [
+        {"$match": {"data": {"$gte": since}}},
+        {"$group": {"_id": "$codice", "tot": {"$sum": "$quantita"}}},
+    ]
+    storico_pipeline = [
+        {
+            "$group": {
+                "_id": "$codice",
+                "n_ord": {"$sum": 1},
+                "tot_quantita": {"$sum": "$quantita"},
+            }
+        }
+    ]
+
+    # Le quattro letture sono indipendenti: eseguirle insieme evita una query
+    # vendite + una query storico per ogni prodotto (problema N+1).
+    params, prodotti, vendite_30gg, storico_ordini = await asyncio.gather(
+        get_params(),
+        db.prodotti.find({}, {"_id": 0}).to_list(5000),
+        db.vendite.aggregate(vendite_pipeline).to_list(5000),
+        db.storico_ordini.aggregate(storico_pipeline).to_list(5000),
+    )
+    vendite_per_codice = {
+        r["_id"]: int(r.get("tot", 0) or 0)
+        for r in vendite_30gg
+        if r.get("_id") is not None
+    }
+    storico_per_codice = {
+        r["_id"]: r
+        for r in storico_ordini
+        if r.get("_id") is not None
+    }
+
     soglia_pct = params.get("SOGLIA_ALLERT_PCT", 0.35)
     fast_min = params.get("FAST_VENDUTO30_MIN", 8)
     slow_max = params.get("SLOW_VENDUTO30_MAX", 2)
@@ -811,7 +845,6 @@ async def auto_order():
     gg_target = params.get("GIORNI_COPERTURA_TARGET", 14)  # dopo il riordino copertura ≥ M giorni
     periodo_venduti = params.get("PERIODO_VENDUTI_GG", 90) or 90  # giorni cui si riferisce venduti_negozio
 
-    prodotti = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
     proposte = []
     for p in prodotti:
         codice = p["codice"]
@@ -819,11 +852,12 @@ async def auto_order():
         giac_vending = p.get("giacenza_vending", 0) or 0
         giac_tot = giac_negozio + giac_vending
         acq = p.get("acquistati", 0) or 0
-        vend_30gg_app = await compute_venduto_30gg(codice)
-        # storico ordini per prodotto (fallback e info)
-        storici = await db.storico_ordini.find({"codice": codice}, {"_id": 0}).to_list(1000)
-        n_ord = len(storici)
-        media_ord = round(sum(o.get("quantita", 0) for o in storici) / n_ord, 2) if n_ord else 0
+        vend_30gg_app = vendite_per_codice.get(codice, 0)
+        # Storico già aggregato per tutti i prodotti in un'unica query.
+        storico = storico_per_codice.get(codice, {})
+        n_ord = int(storico.get("n_ord", 0) or 0)
+        tot_quantita = storico.get("tot_quantita", 0) or 0
+        media_ord = round(tot_quantita / n_ord, 2) if n_ord else 0
 
         # Domanda giornaliera stimata — usa la migliore tra:
         #  1. vend_30gg_app / 30 (se l'app ha ≥ 5 pezzi tracciati)
