@@ -4,7 +4,9 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, json, logging, uuid, io, re
+from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
+import os, json, logging, uuid, io, re, asyncio
 from pathlib import Path
 import base64
 import secrets
@@ -248,6 +250,17 @@ async def on_start():
                        for k, v in DEFAULT_PARAMS.items() if k not in existing]
             if missing:
                 await db.parametri.insert_many(missing)
+        # Gli import fanno upsert su queste chiavi: senza indici Atlas deve
+        # scandire le collezioni per ogni riga, anche quando usiamo bulk_write.
+        await asyncio.gather(
+            db.prodotti.create_index("codice"),
+            db.listino_adm.create_index("codice"),
+            db.vending.create_index("colonna"),
+            db.parametri.create_index("nome"),
+            db.vendite.create_index("data"),
+            db.vendite.create_index("codice"),
+            db.storico_ordini.create_index("codice"),
+        )
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
@@ -1154,8 +1167,26 @@ def _cat_from_desc(desc: str, code: str) -> str:
     return "ACCESSORI"
 
 
+async def _bulk_upsert(collection, operations, batch_size: int = 1000) -> Dict[str, int]:
+    """Esegue gli upsert in batch per evitare un round-trip Atlas per ogni riga."""
+    inserted = updated = errors = 0
+    for start in range(0, len(operations), batch_size):
+        batch = operations[start:start + batch_size]
+        try:
+            result = await collection.bulk_write(batch, ordered=False)
+            inserted += result.upserted_count
+            updated += result.matched_count
+        except BulkWriteError as exc:
+            details = exc.details or {}
+            inserted += details.get("nUpserted", 0)
+            updated += details.get("nMatched", 0)
+            errors += len(details.get("writeErrors", [])) or len(batch)
+    return {"inseriti": inserted, "aggiornati": updated, "errori": errors}
+
+
 async def _import_prodotti(ws) -> Dict[str, int]:
-    ins = upd = err = 0
+    operations = []
+    err = 0
     for row in ws.iter_rows(min_row=3, values_only=True):
         try:
             codice = row[0]
@@ -1174,16 +1205,17 @@ async def _import_prodotti(ws) -> Dict[str, int]:
                 "giacenza_vending": int(row[13] or 0),
                 "venduti_vending": int(row[17] or 0),
             }
-            r = await db.prodotti.update_one({"codice": codice_s}, {"$set": data_p}, upsert=True)
-            ins += 1 if r.upserted_id else 0
-            upd += 1 if not r.upserted_id and r.matched_count else 0
+            operations.append(UpdateOne({"codice": codice_s}, {"$set": data_p}, upsert=True))
         except Exception:
             err += 1
-    return {"inseriti": ins, "aggiornati": upd, "errori": err}
+    result = await _bulk_upsert(db.prodotti, operations)
+    result["errori"] += err
+    return result
 
 
 async def _import_listino(ws) -> Dict[str, int]:
-    ins = upd = err = 0
+    operations = []
+    err = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
         try:
             if not row[0]:
@@ -1195,16 +1227,17 @@ async def _import_listino(ws) -> Dict[str, int]:
                 "prezzo": float(row[2] or 0),
                 "confezione": str(row[3] or "").strip(),
             }
-            r = await db.listino_adm.update_one({"codice": codice}, {"$set": data_p}, upsert=True)
-            ins += 1 if r.upserted_id else 0
-            upd += 1 if not r.upserted_id and r.matched_count else 0
+            operations.append(UpdateOne({"codice": codice}, {"$set": data_p}, upsert=True))
         except Exception:
             err += 1
-    return {"inseriti": ins, "aggiornati": upd, "errori": err}
+    result = await _bulk_upsert(db.listino_adm, operations)
+    result["errori"] += err
+    return result
 
 
 async def _import_vending(ws) -> Dict[str, int]:
-    ins = upd = err = 0
+    operations = []
+    err = 0
     for row in ws.iter_rows(min_row=4, values_only=True):
         try:
             if not row[0]:
@@ -1220,12 +1253,12 @@ async def _import_vending(ws) -> Dict[str, int]:
                 "capacita_max": int(row[4] or 5),
                 "soglia_minima": int(row[5]) if row[5] is not None else 2,
             }
-            r = await db.vending.update_one({"colonna": colonna}, {"$set": data_p}, upsert=True)
-            ins += 1 if r.upserted_id else 0
-            upd += 1 if not r.upserted_id and r.matched_count else 0
+            operations.append(UpdateOne({"colonna": colonna}, {"$set": data_p}, upsert=True))
         except Exception:
             err += 1
-    return {"inseriti": ins, "aggiornati": upd, "errori": err}
+    result = await _bulk_upsert(db.vending, operations)
+    result["errori"] += err
+    return result
 
 
 async def _import_storico(ws) -> Dict[str, int]:
@@ -1264,7 +1297,8 @@ async def _import_storico(ws) -> Dict[str, int]:
 
 async def _import_parametri(ws) -> Dict[str, int]:
     # aggiorna solo parametri che ESISTONO già nel DB (preserva custom come AGGIO_PCT)
-    upd = skip = err = 0
+    operations = []
+    skip = err = 0
     existing = {p["nome"] async for p in db.parametri.find({}, {"_id": 0, "nome": 1})}
     for row in ws.iter_rows(min_row=2, values_only=True):
         try:
@@ -1277,13 +1311,15 @@ async def _import_parametri(ws) -> Dict[str, int]:
                 continue
             v = float(str(valore).replace(",", "."))
             if nome_s in existing:
-                await db.parametri.update_one({"nome": nome_s}, {"$set": {"valore": v}})
-                upd += 1
+                operations.append(UpdateOne({"nome": nome_s}, {"$set": {"valore": v}}))
             else:
                 skip += 1
         except Exception:
             err += 1
-    return {"inseriti": 0, "aggiornati": upd, "saltati": skip, "errori": err}
+    result = await _bulk_upsert(db.parametri, operations)
+    result["saltati"] = skip
+    result["errori"] += err
+    return result
 
 
 async def _import_db_storico_vend(ws) -> Dict[str, int]:

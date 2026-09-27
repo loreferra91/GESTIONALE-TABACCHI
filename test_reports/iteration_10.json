@@ -1,0 +1,25 @@
+{
+  "summary": "Iter10: Validato bug fix venduti_negozio proxy. Backend 11/11 pytest PASS. Frontend /auto-order mostra 147 righe, AMMS395 filtrata correttamente (COPERTURA 2.2gg < 7gg, qta 180, giac_negozio=28). Tutte le route regressione (/dashboard, /prodotti, /vending, /listino, /magazzino, /parametri, /ordini, /cassa) rispondono 200. Ripristinato PERIODO_VENDUTI_GG=90.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/prodotti", "issues": ["React console warning: 'Each child in a list should have a unique key prop' nel render Prodotti. Non blocca funzionalità ma da fixare."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter10_venduti_proxy.py", "/app/test_reports/pytest/iter10_results.xml"],
+  "action_items": ["(Minor) Aggiungere key prop unica nella lista renderizzata dal componente Prodotti per rimuovere il warning React."],
+  "critical_code_review_comments": [
+    "auto_order() ora corretto: max(domanda_app, domanda_excel, domanda_ord) è la scelta giusta. Attenzione: 'domanda_app' richiede >=5 pezzi tracciati (soglia hardcoded L820) — sarebbe più pulito esporlo come parametro.",
+    "server.py oltre 1459 righe: considerare split in moduli (routers per prodotti, vendite, auto-order, parametri).",
+    "compute_venduto_30gg viene chiamato dentro loop su tutti i prodotti (5000): possibile N+1 su db.vendite. Considerare aggregation pipeline unica per performance su dataset grande."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter10_venduti_proxy.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "Nessuna persistente. Test creano/eliminano TEST_APP_TRACKED e TEST_NEG_ESAURITO con cleanup.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iter10 conferma la fix: AMMS395 (28, 1162) e AMMS396 (37, 443) ora presenti in auto-order con motivo COPERTURA. n_righe passa da 30 (iter9) a 147. PERIODO_VENDUTI_GG=90 default, bounds [1,3650] enforced. Effetto PERIODO=180 riduce domanda_gg di AMMS395 da ~12.9 a ~6.4. Regressione NEGOZIO ESAURITO ok. Regressione in-app tracking ok (tracked_days piccolo → vendite in-app dominano).",
+  "rca of the issue": "Root cause: db.vendite quasi vuoto (utente importa da Excel senza registrare vendite giornaliere). Fix: uso 'venduti_negozio' Excel come proxy demand, diviso per PERIODO_VENDUTI_GG configurabile (default 90). domanda_gg = max(app/30, excel/PERIODO, storico/30). Verificato: AMMS395 con venduti_negozio=1162 → 1162/90=12.9 pz/gg, copertura 28/12.9=2.2gg < 7gg → riordino attivato."
+}
