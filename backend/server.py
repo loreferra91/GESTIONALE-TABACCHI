@@ -201,6 +201,12 @@ DEFAULT_PARAMS = {
     "GIORNI_COPERTURA_MIN": {"valore": 7, "descrizione": "Riordina se lo stock negozio copre meno di N giorni di vendite"},
     "GIORNI_COPERTURA_TARGET": {"valore": 14, "descrizione": "Copertura target (giorni) dopo il riordino"},
     "AUTO_ORDER_FINESTRA_GG": {"valore": 10, "descrizione": "Giorni recenti usati da Auto-Order per calcolare la domanda reale"},
+    "AUTO_ORDER_FINESTRA_BREVE_GG": {"valore": 10, "descrizione": "Finestra breve Auto-Order (giorni)"},
+    "AUTO_ORDER_FINESTRA_LUNGA_GG": {"valore": 30, "descrizione": "Finestra lunga Auto-Order (giorni)"},
+    "AUTO_ORDER_PESO_BREVE": {"valore": 0.70, "descrizione": "Peso della domanda recente; il resto pesa sulla finestra lunga"},
+    "AUTO_ORDER_MIN_VENDUTO_BREVE": {"valore": 2, "descrizione": "Vendite minime nella finestra breve per il riordino automatico"},
+    "AUTO_ORDER_MIN_VENDUTO_LUNGO": {"valore": 4, "descrizione": "Vendite minime nella finestra lunga per il riordino automatico"},
+    "AUTO_ORDER_FATTORE_SICUREZZA": {"valore": 1.15, "descrizione": "Margine di sicurezza applicato alla scorta obiettivo"},
     "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Periodo informativo del totale venduto importato (non usato da Auto-Order)"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
 }
@@ -793,6 +799,12 @@ PARAM_BOUNDS = {
     "GIORNI_COPERTURA_MIN": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
     "GIORNI_COPERTURA_TARGET": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
     "AUTO_ORDER_FINESTRA_GG": (3.0, 31.0, "3 ≤ giorni ≤ 30"),
+    "AUTO_ORDER_FINESTRA_BREVE_GG": (3.0, 31.0, "3 ≤ giorni ≤ 30"),
+    "AUTO_ORDER_FINESTRA_LUNGA_GG": (7.0, 91.0, "7 ≤ giorni ≤ 90"),
+    "AUTO_ORDER_PESO_BREVE": (0.0, 1.01, "0 ≤ peso ≤ 1"),
+    "AUTO_ORDER_MIN_VENDUTO_BREVE": (0.0, 10000.0, "0 ≤ soglia"),
+    "AUTO_ORDER_MIN_VENDUTO_LUNGO": (0.0, 10000.0, "0 ≤ soglia"),
+    "AUTO_ORDER_FATTORE_SICUREZZA": (1.0, 5.0, "1 ≤ fattore < 5"),
     "PERIODO_VENDUTI_GG": (1.0, 3650.0, "1 ≤ giorni ≤ 3650"),
     "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
     "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
@@ -825,7 +837,12 @@ async def update_parametro(nome: str, body: ParametroIn):
 @api.get("/auto-order")
 async def auto_order():
     params = await get_params()
-    finestra_gg = max(3, min(30, int(params.get("AUTO_ORDER_FINESTRA_GG", 10) or 10)))
+    finestra_breve = max(3, min(30, int(params.get("AUTO_ORDER_FINESTRA_BREVE_GG", 10) or 10)))
+    finestra_lunga = max(finestra_breve, min(90, int(params.get("AUTO_ORDER_FINESTRA_LUNGA_GG", 30) or 30)))
+    peso_breve = max(0.0, min(1.0, float(params.get("AUTO_ORDER_PESO_BREVE", 0.70) or 0.70)))
+    peso_lungo = 1.0 - peso_breve
+    min_venduto_breve = max(0, int(params.get("AUTO_ORDER_MIN_VENDUTO_BREVE", 2) or 2))
+    min_venduto_lungo = max(0, int(params.get("AUTO_ORDER_MIN_VENDUTO_LUNGO", 4) or 4))
 
     # La finestra segue l'ultima giornata realmente disponibile nei dati. Un file
     # importato qualche giorno dopo la chiusura contabile non deve produrre zero
@@ -849,12 +866,17 @@ async def auto_order():
     available_dates = [d for d in (parsed_date(latest_app), parsed_date(latest_imported)) if d]
     reference_date = max(available_dates, key=lambda d: d.date()) if available_dates else datetime.now(timezone.utc)
     reference_day = reference_date.date()
-    first_day = reference_day - timedelta(days=finestra_gg - 1)
-    since = datetime.combine(first_day, datetime.min.time()).isoformat()
-    vendite_recenti_pipeline = [
-        {"$match": {"data": {"$gte": since}}},
-        {"$group": {"_id": "$codice", "tot": {"$sum": "$quantita"}}},
-    ]
+
+    def sales_pipeline(days: int) -> List[Dict[str, Any]]:
+        first_day = reference_day - timedelta(days=days - 1)
+        since = datetime.combine(first_day, datetime.min.time()).isoformat()
+        return [
+            {"$match": {"data": {"$gte": since}}},
+            {"$group": {"_id": "$codice", "tot": {"$sum": "$quantita"}}},
+        ]
+
+    pipeline_breve = sales_pipeline(finestra_breve)
+    pipeline_lunga = sales_pipeline(finestra_lunga)
     storico_pipeline = [
         {
             "$group": {
@@ -866,55 +888,63 @@ async def auto_order():
     ]
 
     # Le letture sono indipendenti e aggregate: nessuna query per-prodotto.
-    prodotti, vendite_app, vendite_importate, storico_ordini = await asyncio.gather(
+    (
+        prodotti,
+        vendite_app_breve,
+        vendite_app_lunga,
+        vendite_importate_breve,
+        vendite_importate_lunga,
+        storico_ordini,
+    ) = await asyncio.gather(
         db.prodotti.find({}, {"_id": 0}).to_list(5000),
-        db.vendite.aggregate(vendite_recenti_pipeline).to_list(5000),
-        db.db_storico_vend.aggregate(vendite_recenti_pipeline).to_list(5000),
+        db.vendite.aggregate(pipeline_breve).to_list(5000),
+        db.vendite.aggregate(pipeline_lunga).to_list(5000),
+        db.db_storico_vend.aggregate(pipeline_breve).to_list(5000),
+        db.db_storico_vend.aggregate(pipeline_lunga).to_list(5000),
         db.storico_ordini.aggregate(storico_pipeline).to_list(5000),
     )
-    vendite_app_per_codice = {
-        r["_id"]: int(r.get("tot", 0) or 0)
-        for r in vendite_app
-        if r.get("_id") is not None
-    }
-    vendite_importate_per_codice = {
-        r["_id"]: int(r.get("tot", 0) or 0)
-        for r in vendite_importate
-        if r.get("_id") is not None
-    }
+
+    def totals(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+        return {r["_id"]: int(r.get("tot", 0) or 0) for r in rows if r.get("_id") is not None}
+
+    vendite_app_breve_per_codice = totals(vendite_app_breve)
+    vendite_app_lunga_per_codice = totals(vendite_app_lunga)
+    vendite_importate_breve_per_codice = totals(vendite_importate_breve)
+    vendite_importate_lunga_per_codice = totals(vendite_importate_lunga)
     storico_per_codice = {
         r["_id"]: r
         for r in storico_ordini
         if r.get("_id") is not None
     }
 
-    fatt = params.get("FATT_SETTIMANALE", 1.15)
-    gg_min = params.get("GIORNI_COPERTURA_MIN", 7)       # riordina se copertura < N giorni
-    gg_target = params.get("GIORNI_COPERTURA_TARGET", 14)  # dopo il riordino copertura ≥ M giorni
+    fatt = max(1.0, float(params.get("AUTO_ORDER_FATTORE_SICUREZZA", 1.15) or 1.15))
+    gg_min = max(1.0, float(params.get("GIORNI_COPERTURA_MIN", 7) or 7))
+    gg_target = max(gg_min, float(params.get("GIORNI_COPERTURA_TARGET", 14) or 14))
 
     proposte = []
+    esclusi = []
     for p in prodotti:
         codice = p["codice"]
-        giac_negozio = p.get("giacenza_negozio", 0) or 0
-        giac_vending = p.get("giacenza_vending", 0) or 0
+        giac_negozio = int(p.get("giacenza_negozio", 0) or 0)
+        giac_vending = int(p.get("giacenza_vending", 0) or 0)
+        venduti_vending = int(p.get("venduti_vending", 0) or 0)
         giac_tot = giac_negozio + giac_vending
-        # Regola operativa richiesta: la giacenza negozio include la quota
-        # destinata alla vending; il magazzino realmente libero è la differenza.
-        magazzino_reale = max(0, giac_negozio - giac_vending)
+        # RIMANENZE nel foglio è acquisti - vendite negozio. Per ottenere i pezzi
+        # fisicamente liberi vanno sottratti venduti e giacenza della vending.
+        magazzino_reale_lordo = giac_negozio - venduti_vending - giac_vending
+        magazzino_reale = max(0, magazzino_reale_lordo)
+        anomalia = magazzino_reale_lordo < 0
 
         # DB_STORICO_VEND è la fonte giornaliera importata; le vendite registrate
         # nell'app sono il fallback. Non si sommano per evitare doppi conteggi.
-        if codice in vendite_importate_per_codice:
-            venduto_periodo = vendite_importate_per_codice[codice]
+        if codice in vendite_importate_lunga_per_codice:
+            venduto_breve = vendite_importate_breve_per_codice.get(codice, 0)
+            venduto_lungo = vendite_importate_lunga_per_codice.get(codice, 0)
             fonte_domanda = "DB_STORICO_VEND"
         else:
-            venduto_periodo = vendite_app_per_codice.get(codice, 0)
+            venduto_breve = vendite_app_breve_per_codice.get(codice, 0)
+            venduto_lungo = vendite_app_lunga_per_codice.get(codice, 0)
             fonte_domanda = "VENDITE_APP"
-
-        # Nessun movimento recente = nessun riordino automatico. In questo modo
-        # gli articoli quasi fermi non entrano nella lista solo perché hanno poca scorta.
-        if venduto_periodo <= 0:
-            continue
 
         # Storico già aggregato per tutti i prodotti in un'unica query.
         storico = storico_per_codice.get(codice, {})
@@ -922,57 +952,96 @@ async def auto_order():
         tot_quantita = storico.get("tot_quantita", 0) or 0
         media_ord = round(tot_quantita / n_ord, 2) if n_ord else 0
 
-        domanda_gg = venduto_periodo / float(finestra_gg)
-        # Campo storico mantenuto per compatibilità con client e test precedenti.
-        vend_30gg = int(round(domanda_gg * 30))
+        domanda_breve_gg = venduto_breve / float(finestra_breve)
+        domanda_lunga_gg = venduto_lungo / float(finestra_lunga)
+        domanda_gg = (domanda_breve_gg * peso_breve) + (domanda_lunga_gg * peso_lungo)
         lotto = lotto_for(p.get("categoria", "ACCESSORI"), params)
-        copertura_gg = magazzino_reale / domanda_gg
+        copertura_gg = magazzino_reale / domanda_gg if domanda_gg > 0 else None
+        movimento_sufficiente = venduto_breve >= min_venduto_breve or venduto_lungo >= min_venduto_lungo
+        target_scorta = math.ceil(domanda_gg * gg_target * fatt) if domanda_gg > 0 else 0
+        fabbisogno_grezzo = max(0, target_scorta - magazzino_reale)
 
-        motivo = None
+        stato = "NESSUN ORDINE"
+        motivo = "NESSUNA VENDITA RECENTE"
         qta = 0
-        if magazzino_reale <= 0:
-            motivo = f"MAGAZZINO REALE ESAURITO · VENDUTO {finestra_gg}GG: {venduto_periodo}"
-        elif copertura_gg < gg_min:
-            motivo = f"COPERTURA {copertura_gg:.1f}gg < {int(gg_min)}gg"
-
-        if motivo:
-            fabbisogno_target = math.ceil(domanda_gg * gg_target * fatt)
-            qta = max(lotto, fabbisogno_target - magazzino_reale)
-
-        if qta > 0:
-            # arrotonda al lotto superiore
+        if not movimento_sufficiente:
+            if anomalia:
+                stato = "ANOMALIA"
+                motivo = f"STOCK LORDO NEGATIVO ({magazzino_reale_lordo}) · VERIFICARE I DATI"
+            elif magazzino_reale == 0 and venduto_lungo > 0:
+                stato = "CONTROLLO MANUALE"
+                motivo = f"SCORTA ZERO MA MOVIMENTO BASSO ({venduto_breve}/{venduto_lungo} in {finestra_breve}/{finestra_lunga}gg)"
+            elif venduto_lungo > 0:
+                motivo = f"MOVIMENTO BASSO ({venduto_breve}/{venduto_lungo} in {finestra_breve}/{finestra_lunga}gg)"
+        elif copertura_gg is not None and copertura_gg < gg_min:
+            stato = "ORDINA ORA"
+            motivo = f"COPERTURA {copertura_gg:.2f}gg < {int(gg_min)}gg"
+            qta = max(lotto, fabbisogno_grezzo)
             qta = ((qta + lotto - 1) // lotto) * lotto
-            proposte.append({
-                "codice": codice,
-                "descrizione": p.get("descrizione", ""),
-                "categoria": p.get("categoria", ""),
-                "qta_da_ordinare": qta,
-                "giacenza": giac_tot,
-                "giacenza_negozio": giac_negozio,
-                "giacenza_vending": giac_vending,
-                "magazzino_reale": magazzino_reale,
-                "venduto_periodo": venduto_periodo,
-                "finestra_domanda_gg": finestra_gg,
-                "fonte_domanda": fonte_domanda,
-                "venduto_30gg": vend_30gg,
-                "domanda_gg": round(domanda_gg, 2),
-                "copertura_gg": round(copertura_gg, 1) if copertura_gg != float("inf") else None,
-                "media_ordini_storico": media_ord,
-                "n_ordini_storici": n_ord,
-                "lotto_ordine": lotto,
-                "motivo": motivo,
-                "prezzo": p.get("prezzo", 0),
-                "totale": round(qta * (p.get("prezzo") or 0), 2),
-            })
+        elif copertura_gg is not None and copertura_gg < gg_target:
+            stato = "MONITORA"
+            motivo = f"COPERTURA {copertura_gg:.2f}gg TRA {int(gg_min)} E {int(gg_target)}gg"
+        elif copertura_gg is not None:
+            motivo = f"COPERTURA SUFFICIENTE ({copertura_gg:.2f}gg)"
+
+        row = {
+            "codice": codice,
+            "descrizione": p.get("descrizione", ""),
+            "categoria": p.get("categoria", ""),
+            "stato": stato,
+            "anomalia": anomalia,
+            "qta_da_ordinare": qta,
+            "giacenza": giac_tot,
+            "giacenza_negozio": giac_negozio,
+            "venduti_vending": venduti_vending,
+            "giacenza_vending": giac_vending,
+            "magazzino_reale_lordo": magazzino_reale_lordo,
+            "magazzino_reale": magazzino_reale,
+            "venduto_periodo": venduto_breve,
+            "finestra_domanda_gg": finestra_breve,
+            "venduto_10gg": venduto_breve,
+            "venduto_30gg": venduto_lungo,
+            "fonte_domanda": fonte_domanda,
+            "domanda_gg_10": round(domanda_breve_gg, 3),
+            "domanda_gg_30": round(domanda_lunga_gg, 3),
+            "domanda_gg": round(domanda_gg, 3),
+            "copertura_gg": round(copertura_gg, 2) if copertura_gg is not None else None,
+            "target_scorta": target_scorta,
+            "fabbisogno_grezzo": fabbisogno_grezzo,
+            "media_ordini_storico": media_ord,
+            "n_ordini_storici": n_ord,
+            "lotto_ordine": lotto,
+            "motivo": motivo,
+            "prezzo": p.get("prezzo", 0),
+            "totale": round(qta * (p.get("prezzo") or 0), 2),
+        }
+        if stato == "ORDINA ORA":
+            proposte.append(row)
+        else:
+            esclusi.append(row)
 
     proposte.sort(key=lambda x: (-x["totale"], x["codice"]))
+    ordine_stati = {"ANOMALIA": 0, "CONTROLLO MANUALE": 1, "MONITORA": 2, "NESSUN ORDINE": 3}
+    esclusi.sort(key=lambda x: (ordine_stati.get(x["stato"], 9), x["descrizione"], x["codice"]))
     tot = round(sum(x["totale"] for x in proposte), 2)
+    riepilogo_stati = {"ORDINA ORA": len(proposte)}
+    for row in esclusi:
+        riepilogo_stati[row["stato"]] = riepilogo_stati.get(row["stato"], 0) + 1
+    n_anomalie_stock = sum(1 for row in [*proposte, *esclusi] if row["anomalia"])
     return {
         "righe": proposte,
+        "esclusi": esclusi,
         "totale": tot,
         "n_righe": len(proposte),
+        "n_anomalie_stock": n_anomalie_stock,
+        "riepilogo_stati": riepilogo_stati,
         "parametri": params,
-        "finestra_domanda_gg": finestra_gg,
+        "finestra_domanda_gg": finestra_breve,
+        "finestra_breve_gg": finestra_breve,
+        "finestra_lunga_gg": finestra_lunga,
+        "peso_breve": peso_breve,
+        "peso_lungo": peso_lungo,
+        "fattore_sicurezza": fatt,
         "data_riferimento_domanda": reference_day.isoformat(),
         "giorni_ritardo_dati": max(0, (datetime.now(timezone.utc).date() - reference_day).days),
     }
@@ -1012,8 +1081,7 @@ async def auto_order_pdf(
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.enums import TA_RIGHT, TA_LEFT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
     from xml.sax.saxutils import escape as xml_escape
 
     # sanifica input utente per la markup di reportlab
@@ -1032,7 +1100,7 @@ async def auto_order_pdf(
     styles = getSampleStyleSheet()
     title_s = ParagraphStyle('t', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=2)
     sub_s = ParagraphStyle('s', parent=styles['Normal'], fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#64748B'), spaceAfter=12)
-    right_s = ParagraphStyle('r', parent=styles['Normal'], fontName='Helvetica', fontSize=9, alignment=TA_RIGHT, textColor=colors.HexColor('#334155'))
+    cell_s = ParagraphStyle('cell', parent=styles['Normal'], fontName='Helvetica', fontSize=7, leading=8, textColor=colors.HexColor('#0F172A'))
 
     story = []
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y")
@@ -1041,22 +1109,23 @@ async def auto_order_pdf(
     story.append(Paragraph(f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{now}</b>{filtro_pdf} &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {totale:.2f}</b>", sub_s))
 
     # Table
-    header = ["CODICE", "ARTICOLO", "TIPO", "QTA", "LOTTO", "PREZZO", "TOTALE", "MOTIVO"]
+    header = ["CODICE", "ARTICOLO", "TIPO", "MAG.", "V10/30", "COP.", "QTA", "TOTALE", "MOTIVO"]
     data = [header]
     for r in righe:
         data.append([
             r["codice"],
-            (r["descrizione"] or "")[:45],
+            Paragraph(xml_escape(r["descrizione"] or ""), cell_s),
             (r["categoria"] or "")[:3],
+            str(r.get("magazzino_reale_lordo", r.get("magazzino_reale", 0))),
+            f"{r.get('venduto_10gg', r.get('venduto_periodo', 0))}/{r.get('venduto_30gg', 0)}",
+            "-" if r.get("copertura_gg") is None else f"{r['copertura_gg']:.2f}",
             str(r["qta_da_ordinare"]),
-            str(r["lotto_ordine"]),
-            f"€ {r['prezzo']:.2f}",
             f"€ {r['totale']:.2f}",
-            (r["motivo"] or "")[:22],
+            Paragraph(xml_escape(r["motivo"] or ""), cell_s),
         ])
-    data.append(["", "", "", "", "", "TOTALE", f"€ {totale:.2f}", ""])
+    data.append(["", "", "", "", "", "", "TOTALE", f"€ {totale:.2f}", ""])
 
-    col_widths = [22*mm, 60*mm, 12*mm, 12*mm, 12*mm, 18*mm, 20*mm, 30*mm]
+    col_widths = [19*mm, 49*mm, 10*mm, 12*mm, 16*mm, 12*mm, 12*mm, 20*mm, 30*mm]
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0F172A')),
@@ -1064,7 +1133,7 @@ async def auto_order_pdf(
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,0), 8),
         ('ALIGN', (0,0), (-1,0), 'LEFT'),
-        ('ALIGN', (3,1), (6,-1), 'RIGHT'),
+        ('ALIGN', (3,1), (7,-1), 'RIGHT'),
         ('FONTNAME', (0,1), (-1,-2), 'Helvetica'),
         ('FONTSIZE', (0,1), (-1,-1), 8),
         ('TEXTCOLOR', (0,1), (-1,-1), colors.HexColor('#0F172A')),
@@ -1080,17 +1149,25 @@ async def auto_order_pdf(
         ('BOTTOMPADDING', (0,0), (-1,-1), 4),
     ]))
     story.append(tbl)
-    story.append(Spacer(1, 20))
-    story.append(Paragraph(
-        "Calcolo Auto-Order: {finestra} giorni disponibili fino al {riferimento}; magazzino reale = giacenza negozio - giacenza vending; copertura minima {copertura} giorni.".format(
-            finestra=int(ao.get("finestra_domanda_gg", 10)),
+    footer = Paragraph(
+        "Calcolo Auto-Order: domanda ponderata {peso_breve:.0f}% ultimi {breve}gg + {peso_lungo:.0f}% ultimi {lungo}gg fino al {riferimento}; magazzino reale = rimanenze negozio - venduti vending - giacenza vending; ordine sotto {copertura}gg verso target {target}gg con sicurezza x{fattore:.2f}. Il PDF contiene solo ORDINA ORA.".format(
+            peso_breve=float(ao.get("peso_breve", 0.70)) * 100,
+            peso_lungo=float(ao.get("peso_lungo", 0.30)) * 100,
+            breve=int(ao.get("finestra_breve_gg", 10)),
+            lungo=int(ao.get("finestra_lunga_gg", 30)),
             riferimento=datetime.fromisoformat(ao["data_riferimento_domanda"]).strftime("%d/%m/%Y"),
             copertura=int(ao["parametri"].get("GIORNI_COPERTURA_MIN", 7)),
+            target=int(ao["parametri"].get("GIORNI_COPERTURA_TARGET", 14)),
+            fattore=float(ao.get("fattore_sicurezza", 1.15)),
         ),
         sub_s,
-    ))
+    )
 
-    doc.build(story)
+    def draw_footer(canvas, document):
+        width, height = footer.wrap(document.width, 14*mm)
+        footer.drawOn(canvas, document.leftMargin, 4*mm)
+
+    doc.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
     buf.seek(0)
     categoria_slug = re.sub(r"[^a-z0-9]+", "_", categoria_filtro.lower()).strip("_")
     suffisso = f"_{categoria_slug}" if categoria_slug else ""
