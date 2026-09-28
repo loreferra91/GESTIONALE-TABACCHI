@@ -21,14 +21,19 @@ export default function Vending() {
   });
 
   const rica = async (v) => {
-    const q = window.prompt(`Ricarica colonna ${v.colonna} — capacità ${v.capacita_max}, attuale ${v.giacenza}. Quanti pezzi?`, v.proposta);
+    const q = window.prompt(`Ricarica colonna ${v.colonna} — vending ${v.giacenza}/${v.capacita_max}, disponibili in magazzino ${v.giacenza_magazzino}. Quanti pezzi?`, v.proposta);
     if (!q) return;
-    await api.post(`/vending/${v.id}/ricarica`, { quantita: parseInt(q, 10) });
-    toast.success(`Colonna ${v.colonna} ricaricata`);
-    load();
+    try {
+      const response = await api.post(`/vending/${v.id}/ricarica`, { quantita: parseInt(q, 10) });
+      toast.success(`Colonna ${v.colonna}: caricati ${response.data.quantita_caricata} pezzi`);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Impossibile ricaricare la colonna");
+    }
   };
 
-  const daCaricare = allRows.filter(r => r.esito === "DA CARICARE").length;
+  const daCaricare = allRows.filter(r => (r.proposta || 0) > 0).length;
+  const senzaStock = allRows.filter(r => r.esito === "MAGAZZINO ESAURITO").length;
   const piene = allRows.filter(r => r.esito === "PIENO").length;
   const totProposta = allRows.reduce((s, r) => s + (r.proposta || 0), 0);
 
@@ -37,7 +42,8 @@ export default function Vending() {
   };
 
   const cellTone = (r) => {
-    if (r.esito === "DA CARICARE") return "bg-red-50 border-red-200";
+    if (r.esito === "DA CARICARE" || r.esito === "DA CARICARE PARZIALE") return "bg-red-50 border-red-200";
+    if (r.esito === "MAGAZZINO ESAURITO") return "bg-amber-50 border-amber-300";
     if (r.esito === "PIENO") return "bg-emerald-50 border-emerald-200";
     if (r.esito === "OLTRE CAPACITA") return "bg-amber-50 border-amber-200";
     return "bg-slate-50 border-slate-200";
@@ -49,9 +55,10 @@ export default function Vending() {
         <Printer size={16} weight="bold" /> Stampa da caricare ({daCaricare})
       </button>
     }>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <KpiCard label="Colonne totali" value={allRows.length} />
         <KpiCard label="Da caricare" value={daCaricare} tone={daCaricare ? "danger" : "default"} />
+        <KpiCard label="Magazzino esaurito" value={senzaStock} tone={senzaStock ? "warning" : "default"} />
         <KpiCard label="Piene" value={piene} tone="success" />
         <KpiCard label="Pezzi da caricare" value={totProposta} />
       </div>
@@ -62,8 +69,9 @@ export default function Vending() {
             key={r.colonna}
             data-testid={`vending-cell-${r.colonna}`}
             onClick={() => rica(r)}
-            className={`aspect-square flex flex-col items-center justify-center border rounded-md p-1 hover:scale-[1.03] transition-transform ${cellTone(r)}`}
-            title={`${r.codice} · ${r.descrizione}\n${r.giacenza}/${r.capacita_max} · soglia ${r.soglia_minima}`}
+            disabled={!r.proposta}
+            className={`aspect-square flex flex-col items-center justify-center border rounded-md p-1 transition-transform enabled:hover:scale-[1.03] disabled:cursor-default ${cellTone(r)}`}
+            title={`${r.codice} · ${r.descrizione}\nVending ${r.giacenza}/${r.capacita_max} · magazzino ${r.giacenza_magazzino}`}
           >
             <div className="font-mono font-bold text-xs">{r.colonna}</div>
             <div className="font-mono text-[10px] mt-1">{r.giacenza}/{r.capacita_max}</div>
@@ -86,6 +94,7 @@ export default function Vending() {
                 <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
                 <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
                 <Th sortKey="giacenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giacenza</Th>
+                <Th sortKey="giacenza_magazzino" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Magazzino</Th>
                 <Th sortKey="capacita_max" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Capacità</Th>
                 <Th sortKey="soglia_minima" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Soglia</Th>
                 <Th sortKey="proposta" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Proposta</Th>
@@ -100,10 +109,11 @@ export default function Vending() {
                   <td className="font-mono">{r.codice}</td>
                   <td className="max-w-sm truncate">{r.descrizione}</td>
                   <td className="font-mono text-right">{r.giacenza}</td>
+                  <td className={`font-mono text-right ${r.giacenza_magazzino <= 0 ? "text-red-600 font-bold" : ""}`}>{r.giacenza_magazzino}</td>
                   <td className="font-mono text-right">{r.capacita_max}</td>
                   <td className="font-mono text-right">{r.soglia_minima}</td>
                   <td className="font-mono text-right font-semibold">{r.proposta || "—"}</td>
-                  <td><Badge tone={r.esito === "PIENO" ? "ok" : r.esito === "DA CARICARE" ? "error" : "warning"}>{r.esito}</Badge></td>
+                  <td><Badge tone={r.esito === "PIENO" ? "ok" : r.esito.startsWith("DA CARICARE") ? "error" : "warning"}>{r.esito}</Badge></td>
                   <td className="text-right">
                     {r.proposta > 0 && (
                       <button data-testid={`vending-rica-${r.colonna}`} onClick={() => rica(r)} className="bg-slate-900 text-white rounded-md px-3 py-1 text-xs hover:bg-slate-800 transition-colors">Ricarica</button>

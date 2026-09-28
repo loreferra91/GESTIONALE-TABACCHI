@@ -543,21 +543,38 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
 # ------------------------- Vending -------------------------
 @api.get("/vending")
 async def list_vending():
-    docs = await db.vending.find({}, {"_id": 0}).sort("colonna", 1).to_list(500)
+    docs, prodotti = await asyncio.gather(
+        db.vending.find({}, {"_id": 0}).sort("colonna", 1).to_list(500),
+        db.prodotti.find({}, {"_id": 0, "codice": 1, "giacenza_negozio": 1}).to_list(5000),
+    )
+    disponibilita_per_codice = {
+        p.get("codice"): max(0, int(p.get("giacenza_negozio", 0) or 0))
+        for p in prodotti
+        if p.get("codice")
+    }
     # arricchisci con esito/proposta
     out = []
     for d in docs:
         cap = d.get("capacita_max", 5) or 5
         giac = d.get("giacenza", 0) or 0
         soglia = d.get("soglia_minima", 2) or 2
-        proposta = max(0, cap - giac) if giac < soglia else 0
+        fabbisogno = max(0, cap - giac) if giac < soglia else 0
+        disponibile = disponibilita_per_codice.get(d.get("codice"), 0)
+        proposta = min(fabbisogno, disponibile)
         # esito
         if giac >= cap:
             esito = "PIENO" if giac == cap else "OLTRE CAPACITA"
         elif giac < soglia:
-            esito = "DA CARICARE"
+            if disponibile <= 0:
+                esito = "MAGAZZINO ESAURITO"
+            elif proposta < fabbisogno:
+                esito = "DA CARICARE PARZIALE"
+            else:
+                esito = "DA CARICARE"
         else:
             esito = "OK"
+        d["giacenza_magazzino"] = disponibile
+        d["fabbisogno"] = fabbisogno
         d["proposta"] = proposta
         d["esito"] = esito
         out.append(d)
@@ -587,13 +604,24 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
         raise HTTPException(404, "not found")
     giacenza = int(v.get("giacenza", 0) or 0)
     capacita = int(v.get("capacita_max", 0) or 0)
-    qta_caricata = min(qta, max(0, capacita - giacenza))
+    codice = v.get("codice")
+    prodotto = await db.prodotti.find_one({"codice": codice}) if codice else None
+    disponibile = max(0, int((prodotto or {}).get("giacenza_negozio", 0) or 0))
+    if disponibile <= 0:
+        raise HTTPException(409, "Magazzino negozio esaurito: impossibile ricaricare la vending")
+    qta_caricata = min(qta, max(0, capacita - giacenza), disponibile)
     nuovo = giacenza + qta_caricata
     await db.vending.update_one({"id": v_id}, {"$set": {"giacenza": nuovo}})
     # scala dal magazzino negozio
-    if v.get("codice") and qta_caricata:
-        await db.prodotti.update_one({"codice": v["codice"]}, {"$inc": {"giacenza_negozio": -qta_caricata, "giacenza_vending": qta_caricata}})
-    return {"ok": True, "colonna": v["colonna"], "nuova_giacenza": nuovo, "quantita_caricata": qta_caricata}
+    if codice and qta_caricata:
+        await db.prodotti.update_one({"codice": codice}, {"$inc": {"giacenza_negozio": -qta_caricata, "giacenza_vending": qta_caricata}})
+    return {
+        "ok": True,
+        "colonna": v["colonna"],
+        "nuova_giacenza": nuovo,
+        "quantita_caricata": qta_caricata,
+        "giacenza_magazzino_residua": disponibile - qta_caricata,
+    }
 
 
 @api.get("/vending/ricarica-pdf")
@@ -606,7 +634,7 @@ async def vending_ricarica_pdf():
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
     rows = await list_vending()
-    da_caricare = [r for r in rows if r["esito"] == "DA CARICARE"]
+    da_caricare = [r for r in rows if r.get("proposta", 0) > 0]
     da_caricare.sort(key=lambda r: r["colonna"])
     tot_pezzi = sum(r.get("proposta", 0) for r in da_caricare)
 
@@ -623,19 +651,19 @@ async def vending_ricarica_pdf():
     if not da_caricare:
         story.append(Paragraph("Nessuna colonna necessita ricarica.", styles['Normal']))
     else:
-        data = [["COLONNA", "CODICE", "ARTICOLO", "GIACENZA", "CAPACITÀ", "SOGLIA", "DA CARICARE"]]
+        data = [["COLONNA", "CODICE", "ARTICOLO", "VENDING", "MAGAZZINO", "CAPACITÀ", "DA CARICARE"]]
         for r in da_caricare:
             data.append([
                 r["colonna"],
                 r.get("codice", ""),
                 (r.get("descrizione") or "")[:45],
                 str(r.get("giacenza", 0)),
+                str(r.get("giacenza_magazzino", 0)),
                 str(r.get("capacita_max", 0)),
-                str(r.get("soglia_minima", 0)),
                 str(r.get("proposta", 0)),
             ])
         data.append(["", "", "", "", "", "TOTALE", str(tot_pezzi)])
-        tbl = Table(data, colWidths=[20*mm, 25*mm, 65*mm, 22*mm, 22*mm, 15*mm, 22*mm], repeatRows=1)
+        tbl = Table(data, colWidths=[20*mm, 25*mm, 60*mm, 20*mm, 22*mm, 20*mm, 23*mm], repeatRows=1)
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0F172A')),
             ('TEXTCOLOR', (0,0), (-1,0), colors.white),
@@ -851,6 +879,7 @@ async def auto_order():
         giac_negozio = p.get("giacenza_negozio", 0) or 0
         giac_vending = p.get("giacenza_vending", 0) or 0
         giac_tot = giac_negozio + giac_vending
+        giac_disponibile = max(0, giac_tot)
         acq = p.get("acquistati", 0) or 0
         vend_30gg_app = vendite_per_codice.get(codice, 0)
         # Storico già aggregato per tutti i prodotti in un'unica query.
@@ -873,27 +902,29 @@ async def auto_order():
         vend_30gg = int(round(domanda_gg * 30))
         lotto = lotto_for(p.get("categoria", "ACCESSORI"), params)
 
-        pct_giac = (giac_negozio / acq) if acq > 0 else (1 if giac_negozio > 0 else 0)
-        copertura_gg = (giac_negozio / domanda_gg) if domanda_gg > 0 else float("inf")
+        # L'ordine al fornitore considera tutta la scorta posseduta: il vending
+        # è una destinazione separata, ma contiene merce proveniente dal negozio.
+        pct_giac = (giac_disponibile / acq) if acq > 0 else (1 if giac_disponibile > 0 else 0)
+        copertura_gg = (giac_disponibile / domanda_gg) if domanda_gg > 0 else float("inf")
 
         motivo = None
         qta = 0
-        trigger_zero = giac_negozio <= 0
+        trigger_zero = giac_disponibile <= 0
         trigger_copertura = domanda_gg > 0 and copertura_gg < gg_min
         trigger_legacy = pct_giac < soglia_pct and vend_30gg > 0
 
         if trigger_zero:
             if vend_30gg >= fast_min:
-                motivo = "FAST MOVER: NEGOZIO ESAURITO" if giac_vending > 0 else "FAST MOVER: REINTEGRO"
+                motivo = "FAST MOVER: SCORTA ESAURITA"
             elif 0 < vend_30gg <= slow_max:
-                motivo = "SLOW MOVER: NEGOZIO ZERO"
+                motivo = "SLOW MOVER: SCORTA ZERO"
             else:
-                motivo = "NEGOZIO ESAURITO"
+                motivo = "SCORTA COMPLESSIVA ESAURITA"
             fabbisogno = int(round(domanda_gg * gg_target * fatt)) if domanda_gg > 0 else lotto
             qta = max(lotto, fabbisogno)
         elif trigger_copertura:
             motivo = f"COPERTURA {copertura_gg:.1f}gg < {int(gg_min)}gg"
-            fabbisogno = int(round(domanda_gg * gg_target * fatt)) - giac_negozio
+            fabbisogno = int(round(domanda_gg * gg_target * fatt)) - giac_disponibile
             qta = max(lotto, fabbisogno)
         elif trigger_legacy:
             if vend_30gg >= fast_min:

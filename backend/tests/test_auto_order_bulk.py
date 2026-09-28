@@ -61,6 +61,16 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
             "giacenza_vending": 0,
             "venduti_negozio": 0,
         },
+        {
+            "codice": "P3",
+            "descrizione": "Disponibile solo nella vending",
+            "categoria": "ACCESSORI",
+            "prezzo": 1,
+            "acquistati": 20,
+            "giacenza_negozio": 0,
+            "giacenza_vending": 20,
+            "venduti_negozio": 0,
+        },
     ])
     sales = FakeAggregateCollection([{"_id": "P1", "tot": 12}])
     orders = FakeAggregateCollection([{"_id": "P1", "n_ord": 2, "tot_quantita": 18}])
@@ -97,6 +107,7 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     assert p1["venduto_30gg"] == 12
     assert p1["n_ordini_storici"] == 2
     assert p1["media_ordini_storico"] == 9
+    assert not any(row["codice"] == "P3" for row in result["righe"])
 
 
 def test_auto_order_pdf_filters_selected_category(monkeypatch):
