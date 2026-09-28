@@ -30,13 +30,19 @@ class FakeProducts:
 
 
 class FakeAggregateCollection:
-    def __init__(self, documents):
+    def __init__(self, documents, latest_date="2026-09-19T00:00:00"):
         self.documents = documents
         self.pipelines = []
+        self.latest_date = latest_date
+        self.find_one_calls = 0
 
     def aggregate(self, pipeline):
         self.pipelines.append(pipeline)
         return FakeCursor(self.documents)
+
+    async def find_one(self, *_args, **_kwargs):
+        self.find_one_calls += 1
+        return {"data": self.latest_date} if self.latest_date else None
 
 
 def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkeypatch):
@@ -117,10 +123,13 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     result = asyncio.run(server.auto_order())
 
     assert products.find_calls == 1
+    assert sales.find_one_calls == 1
+    assert imported_sales.find_one_calls == 1
     assert len(sales.pipelines) == 1
     assert len(imported_sales.pipelines) == 1
     assert len(orders.pipelines) == 1
     assert sales.pipelines[0][0]["$match"]["data"]["$gte"]
+    assert sales.pipelines[0][0]["$match"]["data"]["$gte"].startswith("2026-09-10")
     assert sales.pipelines[0][1]["$group"]["_id"] == "$codice"
     assert orders.pipelines[0][0]["$group"]["_id"] == "$codice"
 
@@ -136,6 +145,7 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     assert p4["fonte_domanda"] == "DB_STORICO_VEND"
     assert p4["magazzino_reale"] == 2
     assert p4["copertura_gg"] == 4
+    assert result["data_riferimento_domanda"] == "2026-09-19"
 
 
 def test_auto_order_pdf_filters_selected_category(monkeypatch):
@@ -153,10 +163,12 @@ def test_auto_order_pdf_filters_selected_category(monkeypatch):
                 {**base, "codice": "SIG1", "categoria": "SIGARETTE"},
                 {**base, "codice": "ACC1", "categoria": "ACCESSORI"},
             ],
-            "totale": 100,
-            "n_righe": 2,
-            "parametri": {},
-        }
+                "totale": 100,
+                "n_righe": 2,
+                "parametri": {},
+                "finestra_domanda_gg": 10,
+                "data_riferimento_domanda": "2026-09-19",
+            }
 
     monkeypatch.setattr(server, "auto_order", fake_auto_order)
     response = TestClient(server.app).get(

@@ -6,7 +6,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
-import os, json, logging, uuid, io, re, asyncio, math
+import os, json, logging, uuid, io, re, asyncio, math, unicodedata
 from pathlib import Path
 import base64
 import secrets
@@ -826,7 +826,31 @@ async def update_parametro(nome: str, body: ParametroIn):
 async def auto_order():
     params = await get_params()
     finestra_gg = max(3, min(30, int(params.get("AUTO_ORDER_FINESTRA_GG", 10) or 10)))
-    since = (datetime.now(timezone.utc) - timedelta(days=finestra_gg)).isoformat()
+
+    # La finestra segue l'ultima giornata realmente disponibile nei dati. Un file
+    # importato qualche giorno dopo la chiusura contabile non deve produrre zero
+    # riordini solo perché il calendario del computer è più avanti.
+    latest_app, latest_imported = await asyncio.gather(
+        db.vendite.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+    )
+
+    def parsed_date(document: Optional[Dict[str, Any]]) -> Optional[datetime]:
+        raw = (document or {}).get("data")
+        if not raw:
+            return None
+        if isinstance(raw, datetime):
+            return raw
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    available_dates = [d for d in (parsed_date(latest_app), parsed_date(latest_imported)) if d]
+    reference_date = max(available_dates, key=lambda d: d.date()) if available_dates else datetime.now(timezone.utc)
+    reference_day = reference_date.date()
+    first_day = reference_day - timedelta(days=finestra_gg - 1)
+    since = datetime.combine(first_day, datetime.min.time()).isoformat()
     vendite_recenti_pipeline = [
         {"$match": {"data": {"$gte": since}}},
         {"$group": {"_id": "$codice", "tot": {"$sum": "$quantita"}}},
@@ -949,6 +973,8 @@ async def auto_order():
         "n_righe": len(proposte),
         "parametri": params,
         "finestra_domanda_gg": finestra_gg,
+        "data_riferimento_domanda": reference_day.isoformat(),
+        "giorni_ritardo_dati": max(0, (datetime.now(timezone.utc).date() - reference_day).days),
     }
 
 
@@ -1056,8 +1082,9 @@ async def auto_order_pdf(
     story.append(tbl)
     story.append(Spacer(1, 20))
     story.append(Paragraph(
-        "Calcolo Auto-Order: vendite degli ultimi {finestra} giorni; magazzino reale = giacenza negozio - giacenza vending; copertura minima {copertura} giorni.".format(
+        "Calcolo Auto-Order: {finestra} giorni disponibili fino al {riferimento}; magazzino reale = giacenza negozio - giacenza vending; copertura minima {copertura} giorni.".format(
             finestra=int(ao.get("finestra_domanda_gg", 10)),
+            riferimento=datetime.fromisoformat(ao["data_riferimento_domanda"]).strftime("%d/%m/%Y"),
             copertura=int(ao["parametri"].get("GIORNI_COPERTURA_MIN", 7)),
         ),
         sub_s,
@@ -1402,35 +1429,92 @@ async def _import_parametri(ws) -> Dict[str, int]:
 
 async def _import_db_storico_vend(ws) -> Dict[str, int]:
     """DB_STORICO_VEND: vendite storiche giornaliere. Full replace (fonte di verità)."""
-    ins = err = 0
-    await db.db_storico_vend.delete_many({})
-    batch = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    def header_key(value: Any) -> str:
+        text = unicodedata.normalize("NFKD", str(value or ""))
+        return re.sub(r"[^a-z0-9]", "", text.encode("ascii", "ignore").decode().lower())
+
+    aliases = {
+        "data": {"data", "giorno"},
+        "codice": {"codice", "cod", "code"},
+        "descrizione": {"descrizione", "descr", "prodotto"},
+        "quantita": {"qta", "quantita", "pezzi"},
+        "importo": {"importo", "totale", "valore"},
+        "categoria": {"categoria", "cat"},
+    }
+    columns: Dict[str, int] = {}
+    header_row = 0
+    for row_number, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True),
+        start=1,
+    ):
+        candidate: Dict[str, int] = {}
+        for index, value in enumerate(row):
+            key = header_key(value)
+            for field, names in aliases.items():
+                if key in names and field not in candidate:
+                    candidate[field] = index
+        if {"data", "codice", "quantita"}.issubset(candidate):
+            columns = candidate
+            header_row = row_number
+            break
+
+    if not columns:
+        raise HTTPException(
+            422,
+            "DB_STORICO_VEND: intestazioni Data, Codice e Quantità non riconosciute; storico precedente conservato",
+        )
+
+    def value_at(row: tuple, field: str, default: Any = None) -> Any:
+        index = columns.get(field)
+        return row[index] if index is not None and index < len(row) else default
+
+    def iso_date(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        text = str(value or "").strip()
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
+            try:
+                return datetime.strptime(text, fmt).isoformat()
+            except ValueError:
+                pass
+        return text
+
+    def product_code(value: Any) -> str:
+        # Alcuni codici numerici nel file Excel ereditano erroneamente un formato
+        # data (es. 10 diventa 10/01/1900): recuperiamo il seriale originale.
+        if isinstance(value, datetime) and value.year < 1950:
+            from openpyxl.utils.datetime import to_excel
+            return str(int(to_excel(value)))
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value or "").strip()
+
+    err = 0
+    documents = []
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
         try:
-            if not row or not row[0]:
+            data_v = value_at(row, "data")
+            codice = product_code(value_at(row, "codice"))
+            if not data_v or not codice:
                 continue
-            data_v = row[0]
-            if isinstance(data_v, datetime):
-                data_v = data_v.isoformat()
-            batch.append({
+            documents.append({
                 "id": str(uuid.uuid4()),
-                "data": str(data_v),
-                "codice": str(row[1] or "").strip() if len(row) > 1 else "",
-                "descrizione": str(row[2] or "").strip() if len(row) > 2 else "",
-                "quantita": int(row[3] or 0) if len(row) > 3 else 0,
-                "importo": float(row[4] or 0) if len(row) > 4 else 0,
-                "categoria": str(row[5] or "").strip() if len(row) > 5 else "",
+                "data": iso_date(data_v),
+                "codice": codice,
+                "descrizione": str(value_at(row, "descrizione", "") or "").strip(),
+                "quantita": int(value_at(row, "quantita", 0) or 0),
+                "importo": float(value_at(row, "importo", 0) or 0),
+                "categoria": str(value_at(row, "categoria", "") or "").strip(),
             })
-            if len(batch) >= 1000:
-                await db.db_storico_vend.insert_many(batch)
-                ins += len(batch)
-                batch = []
         except Exception:
             err += 1
-    if batch:
-        await db.db_storico_vend.insert_many(batch)
-        ins += len(batch)
-    return {"inseriti": ins, "aggiornati": 0, "errori": err}
+
+    # Il full replace avviene soltanto dopo aver riconosciuto e letto il foglio:
+    # un cambio di layout non può più cancellare uno storico valido.
+    await db.db_storico_vend.delete_many({})
+    for start in range(0, len(documents), 1000):
+        await db.db_storico_vend.insert_many(documents[start:start + 1000])
+    return {"inseriti": len(documents), "aggiornati": 0, "errori": err}
 
 
 async def _import_db_storico_vending_ext(ws) -> Dict[str, int]:

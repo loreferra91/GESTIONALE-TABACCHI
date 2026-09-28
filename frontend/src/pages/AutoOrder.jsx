@@ -14,6 +14,9 @@ export default function AutoOrder() {
   const righeCategoria = categoria ? allRighe.filter(r => r.categoria === categoria) : allRighe;
   const totaleCategoria = righeCategoria.reduce((totale, r) => totale + (r.totale || 0), 0);
   const coperturaMin = data?.parametri?.GIORNI_COPERTURA_MIN || 7;
+  const dataRiferimento = data?.data_riferimento_domanda
+    ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
+    : null;
   const { rows: righe, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(righeCategoria, {
     initial: "totale", dir: "desc",
     searchFields: ["codice", "descrizione", "categoria", "motivo"],
@@ -79,9 +82,10 @@ export default function AutoOrder() {
         </div>
       )}
 
-      <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-        Mostra solo articoli venduti negli ultimi <b>{data?.finestra_domanda_gg || 10} giorni</b> con copertura insufficiente.
+      <div data-testid="ao-calculation-note" className={`mb-4 rounded-md border px-4 py-3 text-sm ${data?.giorni_ritardo_dati > 2 ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+        Mostra solo articoli venduti nei <b>{data?.finestra_domanda_gg || 10} giorni disponibili</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null} con copertura insufficiente.
         Il magazzino reale è calcolato come <b>giacenza negozio − giacenza vending</b>.
+        {data?.giorni_ritardo_dati > 2 ? <span className="block mt-1 font-semibold">Attenzione: l'ultima vendita importata risale a {data.giorni_ritardo_dati} giorni fa. Importa il file Excel aggiornato per un ordine più preciso.</span> : null}
       </div>
 
       <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">

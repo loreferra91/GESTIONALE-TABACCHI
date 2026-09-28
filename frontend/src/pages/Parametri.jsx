@@ -69,7 +69,7 @@ export default function Parametri() {
             <h2 className="font-heading font-black text-lg mb-1">Sincronizzazione da Excel</h2>
             <p className="text-sm text-slate-600 mb-3">
               Carica un file <code>.xlsm/.xlsx</code>: la web app legge automaticamente i fogli
-              <b> RIEP_VENDITA, LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, PARAMETRI</b> e allinea il DB con l'Excel (Excel = fonte di verità).
+              <b> RIEP_VENDITA, LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, DB_STORICO_VEND, PARAMETRI</b> e allinea il DB con l'Excel (Excel = fonte di verità).
               <br/><span className="text-xs text-slate-500">Le righe presenti nel DB ma NON nell'Excel vengono conservate. I parametri custom (es. AGGIO_PCT) sono preservati.</span>
             </p>
             <div className="flex items-center gap-3">
@@ -101,6 +101,7 @@ export default function Parametri() {
               <ReportCard label="Vending nuove col." value={T.vending_inseriti} tone="ok" />
               <ReportCard label="Vending aggiornate" value={T.vending_aggiornati} tone="info" />
               <ReportCard label="Storico ordini" value={T.storico_ricreato} tone="info" />
+              <ReportCard label="Vendite storiche" value={T.db_storico_vend_righe} tone="info" />
               <ReportCard label="Parametri aggiornati" value={T.parametri_aggiornati} tone="info" />
             </div>
 
