@@ -63,7 +63,7 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
         },
         {
             "codice": "P3",
-            "descrizione": "Disponibile solo nella vending",
+            "descrizione": "Articolo fermo con storico annuale",
             "categoria": "ACCESSORI",
             "prezzo": 1,
             "acquistati": 20,
@@ -71,8 +71,22 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
             "giacenza_vending": 20,
             "venduti_negozio": 0,
         },
+        {
+            "codice": "P4",
+            "descrizione": "Scorta reale bassa",
+            "categoria": "ACCESSORI",
+            "prezzo": 1,
+            "acquistati": 20,
+            "giacenza_negozio": 7,
+            "giacenza_vending": 5,
+            "venduti_negozio": 100,
+        },
     ])
-    sales = FakeAggregateCollection([{"_id": "P1", "tot": 12}])
+    sales = FakeAggregateCollection([
+        {"_id": "P1", "tot": 12},
+        {"_id": "P4", "tot": 99},
+    ])
+    imported_sales = FakeAggregateCollection([{"_id": "P4", "tot": 5}])
     orders = FakeAggregateCollection([{"_id": "P1", "n_ord": 2, "tot_quantita": 18}])
 
     async def fake_get_params():
@@ -83,6 +97,7 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
             "FATT_SETTIMANALE": 1.15,
             "GIORNI_COPERTURA_MIN": 7,
             "GIORNI_COPERTURA_TARGET": 14,
+            "AUTO_ORDER_FINESTRA_GG": 10,
             "PERIODO_VENDUTI_GG": 90,
             "LOTTO_ACCESSORI": 1,
         }
@@ -91,23 +106,36 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     monkeypatch.setattr(
         server,
         "db",
-        SimpleNamespace(prodotti=products, vendite=sales, storico_ordini=orders),
+        SimpleNamespace(
+            prodotti=products,
+            vendite=sales,
+            db_storico_vend=imported_sales,
+            storico_ordini=orders,
+        ),
     )
 
     result = asyncio.run(server.auto_order())
 
     assert products.find_calls == 1
     assert len(sales.pipelines) == 1
+    assert len(imported_sales.pipelines) == 1
     assert len(orders.pipelines) == 1
     assert sales.pipelines[0][0]["$match"]["data"]["$gte"]
     assert sales.pipelines[0][1]["$group"]["_id"] == "$codice"
     assert orders.pipelines[0][0]["$group"]["_id"] == "$codice"
 
     p1 = next(row for row in result["righe"] if row["codice"] == "P1")
-    assert p1["venduto_30gg"] == 12
+    assert p1["venduto_periodo"] == 12
+    assert p1["finestra_domanda_gg"] == 10
     assert p1["n_ordini_storici"] == 2
     assert p1["media_ordini_storico"] == 9
     assert not any(row["codice"] == "P3" for row in result["righe"])
+
+    p4 = next(row for row in result["righe"] if row["codice"] == "P4")
+    assert p4["venduto_periodo"] == 5
+    assert p4["fonte_domanda"] == "DB_STORICO_VEND"
+    assert p4["magazzino_reale"] == 2
+    assert p4["copertura_gg"] == 4
 
 
 def test_auto_order_pdf_filters_selected_category(monkeypatch):

@@ -13,6 +13,7 @@ export default function AutoOrder() {
   const allRighe = data?.righe || [];
   const righeCategoria = categoria ? allRighe.filter(r => r.categoria === categoria) : allRighe;
   const totaleCategoria = righeCategoria.reduce((totale, r) => totale + (r.totale || 0), 0);
+  const coperturaMin = data?.parametri?.GIORNI_COPERTURA_MIN || 7;
   const { rows: righe, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(righeCategoria, {
     initial: "totale", dir: "desc",
     searchFields: ["codice", "descrizione", "categoria", "motivo"],
@@ -53,12 +54,12 @@ export default function AutoOrder() {
   };
 
   return (
-    <Layout title="Auto-Order" subtitle="proposta ordini automatica basata su soglie">
+    <Layout title="Auto-Order" subtitle="fabbisogno reale basato sulle vendite recenti">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <KpiCard label={categoria ? "Righe selezionate" : "Righe proposte"} value={formatNum(righeCategoria.length)} />
         <KpiCard label={categoria ? "Totale selezione" : "Totale ordine"} value={formatEur(totaleCategoria)} tone="success" />
-        <KpiCard label="Soglia allert" value={`${((data?.parametri?.SOGLIA_ALLERT_PCT || 0) * 100).toFixed(0)}%`} />
-        <KpiCard label="Finestra storico" value={`${data?.parametri?.GIORNI_STORICO_VEND || 30}gg`} />
+        <KpiCard label="Copertura minima" value={`${coperturaMin}gg`} />
+        <KpiCard label="Vendite considerate" value={`${data?.finestra_domanda_gg || 10}gg`} />
       </div>
 
       <div className="flex gap-3 mb-4">
@@ -77,6 +78,11 @@ export default function AutoOrder() {
           <button onClick={load} disabled={loading} className="font-semibold underline disabled:opacity-40">Riprova</button>
         </div>
       )}
+
+      <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+        Mostra solo articoli venduti negli ultimi <b>{data?.finestra_domanda_gg || 10} giorni</b> con copertura insufficiente.
+        Il magazzino reale è calcolato come <b>giacenza negozio − giacenza vending</b>.
+      </div>
 
       <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">
         <SearchBar data-testid="ao-search" value={query} onChange={setQuery} placeholder="Cerca codice, articolo, tipo o motivo…" className="flex-1 max-w-md" />
@@ -100,12 +106,11 @@ export default function AutoOrder() {
                 <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
                 <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Articolo</Th>
                 <Th sortKey="categoria" currentKey={sortKey} dir={sortDir} onClick={toggle}>Tipo</Th>
-                <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Magazzino</Th>
+                <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. negozio</Th>
                 <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. vend.</Th>
-                <Th sortKey="venduto_30gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Venduto 30gg</Th>
+                <Th sortKey="magazzino_reale" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Mag. reale</Th>
+                <Th sortKey="venduto_periodo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Venduto {data?.finestra_domanda_gg || 10}gg</Th>
                 <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. (gg)</Th>
-                <Th sortKey="media_ordini_storico" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Media ord.</Th>
-                <Th sortKey="n_ordini_storici" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">N ord.</Th>
                 <Th sortKey="lotto_ordine" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Lotto</Th>
                 <Th sortKey="qta_da_ordinare" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Qta da ordinare</Th>
                 <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
@@ -114,7 +119,7 @@ export default function AutoOrder() {
               </tr>
             </thead>
             <tbody>
-              {loading && !data && <tr><td colSpan={14} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
+              {loading && !data && <tr><td colSpan={13} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
               {righe.map(r => (
                 <tr key={r.codice} data-testid={`ao-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
@@ -122,10 +127,9 @@ export default function AutoOrder() {
                   <td><Badge tone="info">{r.categoria}</Badge></td>
                   <td className={`font-mono text-right ${(r.giacenza_negozio||0) <= 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.giacenza_negozio ?? 0)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending ?? 0)}</td>
-                  <td className="font-mono text-right">{formatNum(r.venduto_30gg)}</td>
-                  <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < 7 ? 'text-red-600 font-bold' : ''}`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
-                  <td className="font-mono text-right">{r.media_ordini_storico}</td>
-                  <td className="font-mono text-right">{r.n_ordini_storici}</td>
+                  <td className={`font-mono text-right ${(r.magazzino_reale||0) <= 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.magazzino_reale ?? 0)}</td>
+                  <td className="font-mono text-right">{formatNum(r.venduto_periodo)}</td>
+                  <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
                   <td className="font-mono text-right font-bold">{r.qta_da_ordinare}</td>
                   <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
@@ -133,7 +137,7 @@ export default function AutoOrder() {
                   <td><Badge tone={r.motivo?.includes("FAST") ? "warning" : "info"}>{r.motivo}</Badge></td>
                 </tr>
               ))}
-              {!loading && !error && righe.length === 0 && <tr><td colSpan={14} className="text-center py-8 text-slate-400">{categoria ? "Nessun ordine proposto per la categoria selezionata." : "Nessun ordine proposto — tutte le scorte sono OK."}</td></tr>}
+              {!loading && !error && righe.length === 0 && <tr><td colSpan={13} className="text-center py-8 text-slate-400">{categoria ? "Nessun ordine necessario per la categoria selezionata." : "Nessun ordine necessario in base alle vendite recenti."}</td></tr>}
             </tbody>
           </table>
         </div>

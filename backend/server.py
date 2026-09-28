@@ -6,7 +6,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
-import os, json, logging, uuid, io, re, asyncio
+import os, json, logging, uuid, io, re, asyncio, math
 from pathlib import Path
 import base64
 import secrets
@@ -200,7 +200,8 @@ DEFAULT_PARAMS = {
     "FATT_SETTIMANALE": {"valore": 1.15, "descrizione": "Fattore fabbisogno settimanale"},
     "GIORNI_COPERTURA_MIN": {"valore": 7, "descrizione": "Riordina se lo stock negozio copre meno di N giorni di vendite"},
     "GIORNI_COPERTURA_TARGET": {"valore": 14, "descrizione": "Copertura target (giorni) dopo il riordino"},
-    "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Giorni a cui si riferisce il campo 'venduti_negozio' importato dall'Excel (usato come proxy della domanda)"},
+    "AUTO_ORDER_FINESTRA_GG": {"valore": 10, "descrizione": "Giorni recenti usati da Auto-Order per calcolare la domanda reale"},
+    "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Periodo informativo del totale venduto importato (non usato da Auto-Order)"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
 }
 
@@ -260,6 +261,7 @@ async def on_start():
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
             db.vendite.create_index([("data", 1), ("codice", 1)]),
+            db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
         )
     except Exception as e:
@@ -276,16 +278,6 @@ def strip_id(d):
 async def get_params() -> Dict[str, float]:
     docs = await db.parametri.find({}, {"_id": 0}).to_list(1000)
     return {d["nome"]: float(d["valore"]) for d in docs}
-
-
-async def compute_venduto_30gg(codice: str) -> int:
-    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    pipeline = [
-        {"$match": {"codice": codice, "data": {"$gte": since}}},
-        {"$group": {"_id": None, "tot": {"$sum": "$quantita"}}},
-    ]
-    res = await db.vendite.aggregate(pipeline).to_list(1)
-    return int(res[0]["tot"]) if res else 0
 
 
 def lotto_for(categoria: str, params: Dict[str, float]) -> int:
@@ -800,6 +792,7 @@ PARAM_BOUNDS = {
     "SOGLIA_ALLERT_PCT": (0.0, 1.0, "0 ≤ SOGLIA_ALLERT_PCT < 1"),
     "GIORNI_COPERTURA_MIN": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
     "GIORNI_COPERTURA_TARGET": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
+    "AUTO_ORDER_FINESTRA_GG": (3.0, 31.0, "3 ≤ giorni ≤ 30"),
     "PERIODO_VENDUTI_GG": (1.0, 3650.0, "1 ≤ giorni ≤ 3650"),
     "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
     "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
@@ -831,8 +824,10 @@ async def update_parametro(nome: str, body: ParametroIn):
 # ------------------------- Auto-Order -------------------------
 @api.get("/auto-order")
 async def auto_order():
-    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    vendite_pipeline = [
+    params = await get_params()
+    finestra_gg = max(3, min(30, int(params.get("AUTO_ORDER_FINESTRA_GG", 10) or 10)))
+    since = (datetime.now(timezone.utc) - timedelta(days=finestra_gg)).isoformat()
+    vendite_recenti_pipeline = [
         {"$match": {"data": {"$gte": since}}},
         {"$group": {"_id": "$codice", "tot": {"$sum": "$quantita"}}},
     ]
@@ -846,17 +841,21 @@ async def auto_order():
         }
     ]
 
-    # Le quattro letture sono indipendenti: eseguirle insieme evita una query
-    # vendite + una query storico per ogni prodotto (problema N+1).
-    params, prodotti, vendite_30gg, storico_ordini = await asyncio.gather(
-        get_params(),
+    # Le letture sono indipendenti e aggregate: nessuna query per-prodotto.
+    prodotti, vendite_app, vendite_importate, storico_ordini = await asyncio.gather(
         db.prodotti.find({}, {"_id": 0}).to_list(5000),
-        db.vendite.aggregate(vendite_pipeline).to_list(5000),
+        db.vendite.aggregate(vendite_recenti_pipeline).to_list(5000),
+        db.db_storico_vend.aggregate(vendite_recenti_pipeline).to_list(5000),
         db.storico_ordini.aggregate(storico_pipeline).to_list(5000),
     )
-    vendite_per_codice = {
+    vendite_app_per_codice = {
         r["_id"]: int(r.get("tot", 0) or 0)
-        for r in vendite_30gg
+        for r in vendite_app
+        if r.get("_id") is not None
+    }
+    vendite_importate_per_codice = {
+        r["_id"]: int(r.get("tot", 0) or 0)
+        for r in vendite_importate
         if r.get("_id") is not None
     }
     storico_per_codice = {
@@ -865,13 +864,9 @@ async def auto_order():
         if r.get("_id") is not None
     }
 
-    soglia_pct = params.get("SOGLIA_ALLERT_PCT", 0.35)
-    fast_min = params.get("FAST_VENDUTO30_MIN", 8)
-    slow_max = params.get("SLOW_VENDUTO30_MAX", 2)
     fatt = params.get("FATT_SETTIMANALE", 1.15)
     gg_min = params.get("GIORNI_COPERTURA_MIN", 7)       # riordina se copertura < N giorni
     gg_target = params.get("GIORNI_COPERTURA_TARGET", 14)  # dopo il riordino copertura ≥ M giorni
-    periodo_venduti = params.get("PERIODO_VENDUTI_GG", 90) or 90  # giorni cui si riferisce venduti_negozio
 
     proposte = []
     for p in prodotti:
@@ -879,60 +874,46 @@ async def auto_order():
         giac_negozio = p.get("giacenza_negozio", 0) or 0
         giac_vending = p.get("giacenza_vending", 0) or 0
         giac_tot = giac_negozio + giac_vending
-        giac_disponibile = max(0, giac_tot)
-        acq = p.get("acquistati", 0) or 0
-        vend_30gg_app = vendite_per_codice.get(codice, 0)
+        # Regola operativa richiesta: la giacenza negozio include la quota
+        # destinata alla vending; il magazzino realmente libero è la differenza.
+        magazzino_reale = max(0, giac_negozio - giac_vending)
+
+        # DB_STORICO_VEND è la fonte giornaliera importata; le vendite registrate
+        # nell'app sono il fallback. Non si sommano per evitare doppi conteggi.
+        if codice in vendite_importate_per_codice:
+            venduto_periodo = vendite_importate_per_codice[codice]
+            fonte_domanda = "DB_STORICO_VEND"
+        else:
+            venduto_periodo = vendite_app_per_codice.get(codice, 0)
+            fonte_domanda = "VENDITE_APP"
+
+        # Nessun movimento recente = nessun riordino automatico. In questo modo
+        # gli articoli quasi fermi non entrano nella lista solo perché hanno poca scorta.
+        if venduto_periodo <= 0:
+            continue
+
         # Storico già aggregato per tutti i prodotti in un'unica query.
         storico = storico_per_codice.get(codice, {})
         n_ord = int(storico.get("n_ord", 0) or 0)
         tot_quantita = storico.get("tot_quantita", 0) or 0
         media_ord = round(tot_quantita / n_ord, 2) if n_ord else 0
 
-        # Domanda giornaliera stimata — usa la migliore tra:
-        #  1. vend_30gg_app / 30 (se l'app ha ≥ 5 pezzi tracciati)
-        #  2. venduti_negozio / PERIODO_VENDUTI_GG (proxy dall'Excel importato)
-        #  3. media_ord / 30 (fallback storico ordini)
-        vend_neg_excel = p.get("venduti_negozio", 0) or 0
-        domanda_app = vend_30gg_app / 30.0 if vend_30gg_app >= 5 else 0
-        domanda_excel = vend_neg_excel / float(periodo_venduti) if vend_neg_excel > 0 else 0
-        domanda_ord = media_ord / 30.0 if n_ord > 0 else 0
-        domanda_gg = max(domanda_app, domanda_excel, domanda_ord)
-
-        # Per compatibilità: vend_30gg mostrato = quello con cui abbiamo lavorato
+        domanda_gg = venduto_periodo / float(finestra_gg)
+        # Campo storico mantenuto per compatibilità con client e test precedenti.
         vend_30gg = int(round(domanda_gg * 30))
         lotto = lotto_for(p.get("categoria", "ACCESSORI"), params)
-
-        # L'ordine al fornitore considera tutta la scorta posseduta: il vending
-        # è una destinazione separata, ma contiene merce proveniente dal negozio.
-        pct_giac = (giac_disponibile / acq) if acq > 0 else (1 if giac_disponibile > 0 else 0)
-        copertura_gg = (giac_disponibile / domanda_gg) if domanda_gg > 0 else float("inf")
+        copertura_gg = magazzino_reale / domanda_gg
 
         motivo = None
         qta = 0
-        trigger_zero = giac_disponibile <= 0
-        trigger_copertura = domanda_gg > 0 and copertura_gg < gg_min
-        trigger_legacy = pct_giac < soglia_pct and vend_30gg > 0
-
-        if trigger_zero:
-            if vend_30gg >= fast_min:
-                motivo = "FAST MOVER: SCORTA ESAURITA"
-            elif 0 < vend_30gg <= slow_max:
-                motivo = "SLOW MOVER: SCORTA ZERO"
-            else:
-                motivo = "SCORTA COMPLESSIVA ESAURITA"
-            fabbisogno = int(round(domanda_gg * gg_target * fatt)) if domanda_gg > 0 else lotto
-            qta = max(lotto, fabbisogno)
-        elif trigger_copertura:
+        if magazzino_reale <= 0:
+            motivo = f"MAGAZZINO REALE ESAURITO · VENDUTO {finestra_gg}GG: {venduto_periodo}"
+        elif copertura_gg < gg_min:
             motivo = f"COPERTURA {copertura_gg:.1f}gg < {int(gg_min)}gg"
-            fabbisogno = int(round(domanda_gg * gg_target * fatt)) - giac_disponibile
-            qta = max(lotto, fabbisogno)
-        elif trigger_legacy:
-            if vend_30gg >= fast_min:
-                motivo = "FAST MOVER: SOTTO SOGLIA"
-                qta = max(lotto, int(round(vend_30gg * fatt)))
-            else:
-                motivo = "TARGET SETTIMANALE"
-                qta = lotto
+
+        if motivo:
+            fabbisogno_target = math.ceil(domanda_gg * gg_target * fatt)
+            qta = max(lotto, fabbisogno_target - magazzino_reale)
 
         if qta > 0:
             # arrotonda al lotto superiore
@@ -945,6 +926,10 @@ async def auto_order():
                 "giacenza": giac_tot,
                 "giacenza_negozio": giac_negozio,
                 "giacenza_vending": giac_vending,
+                "magazzino_reale": magazzino_reale,
+                "venduto_periodo": venduto_periodo,
+                "finestra_domanda_gg": finestra_gg,
+                "fonte_domanda": fonte_domanda,
                 "venduto_30gg": vend_30gg,
                 "domanda_gg": round(domanda_gg, 2),
                 "copertura_gg": round(copertura_gg, 1) if copertura_gg != float("inf") else None,
@@ -958,7 +943,13 @@ async def auto_order():
 
     proposte.sort(key=lambda x: (-x["totale"], x["codice"]))
     tot = round(sum(x["totale"] for x in proposte), 2)
-    return {"righe": proposte, "totale": tot, "n_righe": len(proposte), "parametri": params}
+    return {
+        "righe": proposte,
+        "totale": tot,
+        "n_righe": len(proposte),
+        "parametri": params,
+        "finestra_domanda_gg": finestra_gg,
+    }
 
 
 @api.post("/auto-order/conferma")
@@ -1019,7 +1010,7 @@ async def auto_order_pdf(
 
     story = []
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y")
-    story.append(Paragraph("ORDINE FORNITORE — GOD SERVICES", title_s))
+    story.append(Paragraph("ORDINE FORNITORE - GOD SERVICES", title_s))
     filtro_pdf = f" &nbsp;·&nbsp; Selezione: <b>{categoria_safe}</b>" if categoria_filtro else ""
     story.append(Paragraph(f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{now}</b>{filtro_pdf} &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {totale:.2f}</b>", sub_s))
 
@@ -1064,10 +1055,13 @@ async def auto_order_pdf(
     ]))
     story.append(tbl)
     story.append(Spacer(1, 20))
-    story.append(Paragraph("Documento generato automaticamente dal Gestionale God Services · Parametri: SOGLIA {sp}%, finestra {gg}gg".format(
-        sp=int((ao['parametri'].get('SOGLIA_ALLERT_PCT', 0.35))*100),
-        gg=int(ao['parametri'].get('GIORNI_STORICO_VEND', 30))
-    ), sub_s))
+    story.append(Paragraph(
+        "Calcolo Auto-Order: vendite degli ultimi {finestra} giorni; magazzino reale = giacenza negozio - giacenza vending; copertura minima {copertura} giorni.".format(
+            finestra=int(ao.get("finestra_domanda_gg", 10)),
+            copertura=int(ao["parametri"].get("GIORNI_COPERTURA_MIN", 7)),
+        ),
+        sub_s,
+    ))
 
     doc.build(story)
     buf.seek(0)
