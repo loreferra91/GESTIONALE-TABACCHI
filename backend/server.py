@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import UpdateOne
+from pymongo import UpdateMany, UpdateOne
 from pymongo.errors import BulkWriteError, DuplicateKeyError
 import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib
 from contextlib import asynccontextmanager
@@ -563,8 +563,13 @@ async def adm_sync():
 
     total_rows = inserted = updated = product_updates = 0
     detail = []
-    for category in categories:
-        rows = await asyncio.to_thread(parse_adm_pdf_sync, category)
+    rows_by_category = await asyncio.gather(*(
+        asyncio.to_thread(parse_adm_pdf_sync, category)
+        for category in categories
+    ))
+    all_rows = []
+    for category, rows in zip(categories, rows_by_category):
+        all_rows.extend(rows)
         total_rows += len(rows)
         operations = []
         for item in rows:
@@ -589,19 +594,22 @@ async def adm_sync():
         updated += result.get("aggiornati", 0)
         detail.append({**category, "righe": len(rows), **result})
 
-        for item in rows:
-            update = await db.prodotti.update_many(
-                {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
-                {"$set": {
-                    "categoria": item["categoria_adm"],
-                    "categoria_adm": item["categoria_adm"],
-                    "adm_codice": item["adm_codice"],
-                    "adm_descrizione": item["descrizione"],
-                    "adm_prezzo": item["prezzo"],
-                    "adm_aggiornato_il": item.get("adm_aggiornato_il"),
-                }},
-            )
-            product_updates += update.modified_count
+    product_operations = [
+        UpdateMany(
+            {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
+            {"$set": {
+                "categoria": item["categoria_adm"],
+                "categoria_adm": item["categoria_adm"],
+                "adm_codice": item["adm_codice"],
+                "adm_descrizione": item["descrizione"],
+                "adm_prezzo": item["prezzo"],
+                "adm_aggiornato_il": item.get("adm_aggiornato_il"),
+            }},
+        )
+        for item in all_rows
+    ]
+    product_result = await _bulk_update(db.prodotti, product_operations)
+    product_updates = product_result["modificati"]
 
     await db.prodotti.update_many(
         {"$or": [{"categoria_adm": {"$exists": False}}, {"categoria_adm": ""}, {"categoria_adm": None}]},
@@ -1927,6 +1935,23 @@ async def _bulk_upsert(collection, operations, batch_size: int = 1000) -> Dict[s
             updated += details.get("nMatched", 0)
             errors += len(details.get("writeErrors", [])) or len(batch)
     return {"inseriti": inserted, "aggiornati": updated, "errori": errors}
+
+
+async def _bulk_update(collection, operations, batch_size: int = 1000) -> Dict[str, int]:
+    """Esegue aggiornamenti multipli in batch evitando un round-trip per riga."""
+    matched = modified = errors = 0
+    for start in range(0, len(operations), batch_size):
+        batch = operations[start:start + batch_size]
+        try:
+            result = await collection.bulk_write(batch, ordered=False)
+            matched += result.matched_count
+            modified += result.modified_count
+        except BulkWriteError as exc:
+            details = exc.details or {}
+            matched += details.get("nMatched", 0)
+            modified += details.get("nModified", 0)
+            errors += len(details.get("writeErrors", [])) or len(batch)
+    return {"trovati": matched, "modificati": modified, "errori": errors}
 
 
 async def _import_prodotti(ws) -> Dict[str, int]:

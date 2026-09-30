@@ -40,7 +40,7 @@ export default function Listino() {
   const syncAdm = async () => {
     setSyncing(true);
     try {
-      const r = await api.post("/adm/sync", {}, { timeout: 180000 });
+      const r = await api.post("/adm/sync", {}, { timeout: 600000 });
       toast.success(`ADM sincronizzato: ${formatNum(r.data.righe)} righe, ${formatNum(r.data.prodotti_aggiornati)} prodotti collegati`);
       await load();
       await loadAdmStatus();
