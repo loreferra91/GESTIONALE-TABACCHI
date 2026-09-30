@@ -6,7 +6,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateMany, UpdateOne
 from pymongo.errors import BulkWriteError, DuplicateKeyError
-import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib
+import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib, gc, tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 import base64
@@ -515,36 +515,72 @@ def parse_adm_pdf_sync(category: Dict[str, Any]) -> List[Dict[str, Any]]:
     import requests
     import pdfplumber
 
-    content = requests.get(category["url"], timeout=90).content
     rows: List[Dict[str, Any]] = []
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            for table in page.extract_tables() or []:
-                if not table:
-                    continue
-                for row in table[1:]:
-                    if not row or len(row) < 4:
-                        continue
-                    code = adm_numeric_code(row[0])
-                    if not code or not code.isdigit():
-                        continue
-                    descrizione = " ".join(str(row[1] or "").replace("\n", " ").split())
-                    confezione = " ".join(str(row[2] or "").replace("\n", " ").split()) if len(row) > 2 else ""
-                    prezzo = parse_italian_money(row[-1])
-                    if not descrizione:
-                        continue
-                    rows.append({
-                        "adm_codice": code,
-                        "codice": adm_local_code(code),
-                        "descrizione": descrizione,
-                        "confezione": confezione,
-                        "prezzo": prezzo,
-                        "categoria_adm": category["categoria"],
-                        "fonte": "ADM",
-                        "adm_pdf_url": category["url"],
-                        "adm_aggiornato_il": category.get("aggiornato_il"),
-                    })
+    # I listini ADM possono essere grandi. Scaricarli su un file temporaneo evita
+    # di tenere contemporaneamente in RAM sia i byte del PDF sia le strutture di
+    # pdfplumber; il filesystem effimero di Render e sufficiente per questo uso.
+    with requests.get(category["url"], timeout=90, stream=True) as response:
+        response.raise_for_status()
+        with tempfile.TemporaryFile(suffix=".pdf") as pdf_file:
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if chunk:
+                    pdf_file.write(chunk)
+            pdf_file.seek(0)
+
+            with pdfplumber.open(pdf_file) as pdf:
+                for page in pdf.pages:
+                    try:
+                        tables = page.extract_tables() or []
+                        for table in tables:
+                            if not table:
+                                continue
+                            for row in table[1:]:
+                                if not row or len(row) < 4:
+                                    continue
+                                code = adm_numeric_code(row[0])
+                                if not code or not code.isdigit():
+                                    continue
+                                descrizione = " ".join(str(row[1] or "").replace("\n", " ").split())
+                                confezione = " ".join(str(row[2] or "").replace("\n", " ").split()) if len(row) > 2 else ""
+                                prezzo = parse_italian_money(row[-1])
+                                if not descrizione:
+                                    continue
+                                rows.append({
+                                    "adm_codice": code,
+                                    "codice": adm_local_code(code),
+                                    "descrizione": descrizione,
+                                    "confezione": confezione,
+                                    "prezzo": prezzo,
+                                    "categoria_adm": category["categoria"],
+                                    "fonte": "ADM",
+                                    "adm_pdf_url": category["url"],
+                                    "adm_aggiornato_il": category.get("aggiornato_il"),
+                                })
+                    finally:
+                        # pdfplumber conserva cache grafiche pesanti per pagina.
+                        page.close()
     return rows
+
+
+def _adm_product_update_operations(rows: List[Dict[str, Any]], product_codes: set[str]):
+    """Prepara update ADM solo per codici realmente presenti nei prodotti."""
+    operations = []
+    for item in rows:
+        candidate_codes = {item["codice"].upper(), item["adm_codice"].upper()}
+        if candidate_codes.isdisjoint(product_codes):
+            continue
+        operations.append(UpdateMany(
+            {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
+            {"$set": {
+                "categoria": item["categoria_adm"],
+                "categoria_adm": item["categoria_adm"],
+                "adm_codice": item["adm_codice"],
+                "adm_descrizione": item["descrizione"],
+                "adm_prezzo": item["prezzo"],
+                "adm_aggiornato_il": item.get("adm_aggiornato_il"),
+            }},
+        ))
+    return operations
 
 
 @api.get("/adm/categories")
@@ -563,13 +599,16 @@ async def adm_sync():
 
     total_rows = inserted = updated = product_updates = 0
     detail = []
-    rows_by_category = await asyncio.gather(*(
-        asyncio.to_thread(parse_adm_pdf_sync, category)
-        for category in categories
-    ))
-    all_rows = []
-    for category, rows in zip(categories, rows_by_category):
-        all_rows.extend(rows)
+    product_codes = {
+        str(product.get("codice") or "").strip().upper()
+        async for product in db.prodotti.find({}, {"_id": 0, "codice": 1})
+        if product.get("codice")
+    }
+
+    # Una categoria alla volta: sul piano Render Free l'estrazione parallela di
+    # sette PDF supera i 512 MB e provoca il riavvio del processo.
+    for category in categories:
+        rows = await asyncio.to_thread(parse_adm_pdf_sync, category)
         total_rows += len(rows)
         operations = []
         for item in rows:
@@ -592,24 +631,20 @@ async def adm_sync():
         result = await _bulk_upsert(db.listino_adm, operations)
         inserted += result.get("inseriti", 0)
         updated += result.get("aggiornati", 0)
-        detail.append({**category, "righe": len(rows), **result})
+        product_operations = _adm_product_update_operations(rows, product_codes)
+        product_result = await _bulk_update(db.prodotti, product_operations)
+        product_updates += product_result["modificati"]
+        detail.append({
+            **category,
+            "righe": len(rows),
+            **result,
+            "prodotti_trovati": product_result["trovati"],
+            "prodotti_aggiornati": product_result["modificati"],
+        })
 
-    product_operations = [
-        UpdateMany(
-            {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
-            {"$set": {
-                "categoria": item["categoria_adm"],
-                "categoria_adm": item["categoria_adm"],
-                "adm_codice": item["adm_codice"],
-                "adm_descrizione": item["descrizione"],
-                "adm_prezzo": item["prezzo"],
-                "adm_aggiornato_il": item.get("adm_aggiornato_il"),
-            }},
-        )
-        for item in all_rows
-    ]
-    product_result = await _bulk_update(db.prodotti, product_operations)
-    product_updates = product_result["modificati"]
+        # Rilascia subito righe, operazioni e cache cicliche prima del PDF seguente.
+        del rows, operations, product_operations
+        gc.collect()
 
     await db.prodotti.update_many(
         {"$or": [{"categoria_adm": {"$exists": False}}, {"categoria_adm": ""}, {"categoria_adm": None}]},
