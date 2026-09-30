@@ -5,7 +5,7 @@ import requests
 import pytest
 
 def _load_env():
-    p = "/app/frontend/.env"
+    p = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", ".env")
     if os.path.exists(p):
         for line in open(p):
             if "=" in line and not line.strip().startswith("#"):
@@ -13,9 +13,12 @@ def _load_env():
                 os.environ.setdefault(k, v)
 
 _load_env()
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
-assert BASE_URL, "REACT_APP_BACKEND_URL missing"
+BASE_URL = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("requires TEST_BACKEND_URL", allow_module_level=True)
 API = f"{BASE_URL}/api"
+
+pytestmark = pytest.mark.external
 
 
 @pytest.fixture(scope="module")
@@ -100,7 +103,9 @@ def test_cov1(client):
         "acquistati": 50,
         "venduti_negozio": 25,
         "venduti_vending": 0,
-        "giacenza_negozio": 5,
+        # Dopo le 5 vendite da 6 pezzi resteranno 5 pezzi fisici, senza
+        # trasformare il caso di copertura bassa in un'anomalia negativa.
+        "giacenza_negozio": 35,
         "giacenza_vending": 0,
     }
     r = client.post(f"{API}/prodotti", json=payload)
@@ -170,7 +175,7 @@ def test_edge_zero_sales_no_trigger(client):
         client.delete(f"{API}/prodotti/{prod['id']}")
 
 
-def test_edge_negozio_zero_no_sales(client):
+def test_edge_negozio_zero_no_sales_requires_manual_review(client):
     prods = client.get(f"{API}/prodotti").json()
     for p in prods:
         if p.get("codice") == "TEST_ESAUR":
@@ -182,10 +187,10 @@ def test_edge_negozio_zero_no_sales(client):
     try:
         ao = client.get(f"{API}/auto-order").json()
         matches = [x for x in ao["righe"] if x["codice"] == "TEST_ESAUR"]
-        assert matches, "TEST_ESAUR (giacenza=0) deve essere proposto"
-        row = matches[0]
-        assert "ESAUR" in (row["motivo"] or "").upper() or "REINTEGRO" in (row["motivo"] or "").upper()
-        assert row["qta_da_ordinare"] >= 10  # lotto SIGARETTE
+        assert not matches, "Senza vendite recenti non deve partire un ordine automatico"
+        excluded = next(x for x in ao["esclusi"] if x["codice"] == "TEST_ESAUR")
+        assert excluded["stato"] == "NESSUN ORDINE"
+        assert excluded["qta_da_ordinare"] == 0
     finally:
         client.delete(f"{API}/prodotti/{prod['id']}")
 

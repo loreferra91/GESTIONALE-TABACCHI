@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
+import { api, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { PRODUCT_CATEGORIES } from "../lib/categories";
 
 export default function Prodotti() {
+  const [searchParams] = useSearchParams();
   const [allRows, setAllRows] = useState([]);
   const [cat, setCat] = useState("");
   const [loading, setLoading] = useState(false);
@@ -15,8 +18,13 @@ export default function Prodotti() {
   const filtered = cat ? allRows.filter(r => r.categoria === cat) : allRows;
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(filtered, {
     initial: "codice", dir: "asc",
-    searchFields: ["codice", "descrizione", "categoria"],
+    searchFields: ["codice", "descrizione", "categoria", "categoria_adm", "adm_codice"],
   });
+
+  useEffect(() => {
+    const search = searchParams.get("search");
+    if (search) setQuery(search);
+  }, [searchParams, setQuery]);
 
   const load = async () => {
     setLoading(true);
@@ -41,15 +49,19 @@ export default function Prodotti() {
       setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" });
       load();
     } catch (e) {
-      toast.error("Errore salvataggio");
+      toast.error(apiErrorMessage(e, "Errore salvataggio prodotto"));
     }
   };
 
   const del = async (id) => {
     if (!window.confirm("Eliminare?")) return;
-    await api.delete(`/prodotti/${id}`);
-    toast.success("Eliminato");
-    load();
+    try {
+      await api.delete(`/prodotti/${id}`);
+      toast.success("Eliminato");
+      load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore eliminazione prodotto"));
+    }
   };
 
   const startEdit = (r) => {
@@ -65,9 +77,7 @@ export default function Prodotti() {
           <input data-testid="prod-form-codice" placeholder="Codice" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.codice} onChange={e => setForm({...form, codice: e.target.value})} />
           <input data-testid="prod-form-desc" placeholder="Descrizione" className="border rounded-md px-3 py-2 text-sm col-span-2" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} />
           <select data-testid="prod-form-cat" className="border rounded-md px-3 py-2 text-sm" value={form.categoria} onChange={e => setForm({...form, categoria: e.target.value})}>
-            <option>SIGARETTE</option>
-            <option>SIGARETTE ELETTRONICHE</option>
-            <option>ACCESSORI</option>
+            {PRODUCT_CATEGORIES.map(c => <option key={c}>{c}</option>)}
           </select>
           <input data-testid="prod-form-prezzo" type="number" step="0.01" placeholder="Prezzo" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.prezzo} onChange={e => setForm({...form, prezzo: e.target.value})} />
           <div className="flex gap-2 col-span-2 md:col-span-1">
@@ -85,9 +95,7 @@ export default function Prodotti() {
         <SearchBar data-testid="prod-search" value={query} onChange={setQuery} placeholder="Cerca codice, descrizione o categoria…" className="flex-1 sm:max-w-md" />
         <select data-testid="prod-filter-cat" value={cat} onChange={e => setCat(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
           <option value="">Tutte le categorie</option>
-          <option>SIGARETTE</option>
-          <option>SIGARETTE ELETTRONICHE</option>
-          <option>ACCESSORI</option>
+          {PRODUCT_CATEGORIES.map(c => <option key={c}>{c}</option>)}
         </select>
         <span className="text-sm text-slate-500 self-center">{rows.length} risultati</span>
       </div>
@@ -100,6 +108,7 @@ export default function Prodotti() {
                 <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
                 <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
                 <Th sortKey="categoria" currentKey={sortKey} dir={sortDir} onClick={toggle}>Categoria</Th>
+                <Th sortKey="categoria_adm" currentKey={sortKey} dir={sortDir} onClick={toggle}>Categoria ADM</Th>
                 <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
                 <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. negozio</Th>
                 <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. vending</Th>
@@ -108,12 +117,13 @@ export default function Prodotti() {
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={8} className="text-center py-8 text-slate-400">Caricamento…</td></tr>}
+              {loading && <tr><td colSpan={9} className="text-center py-8 text-slate-400">Caricamento…</td></tr>}
               {rows.map(r => (
                 <tr key={r.id} data-testid={`prod-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
                   <td className="max-w-sm truncate">{r.descrizione}</td>
                   <td><Badge tone="info">{r.categoria}</Badge></td>
+                  <td>{r.categoria_adm ? <Badge tone="ok">{r.categoria_adm}</Badge> : <span className="text-slate-400">—</span>}</td>
                   <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
                   <td className={`font-mono text-right ${r.giacenza_negozio < 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.giacenza_negozio)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending)}</td>

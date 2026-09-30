@@ -5,18 +5,40 @@ import os
 import requests
 import pytest
 import time
+from pathlib import Path
 
 def _load_frontend_env():
-    envp = "/app/frontend/.env"
-    if os.path.exists(envp):
-        with open(envp) as f:
-            for line in f:
-                if line.startswith("REACT_APP_BACKEND_URL="):
-                    return line.split("=", 1)[1].strip()
+    envp = Path(__file__).resolve().parents[2] / "frontend" / ".env"
+    if envp.exists():
+        for line in envp.read_text().splitlines():
+            if line.startswith("REACT_APP_BACKEND_URL="):
+                return line.split("=", 1)[1].strip()
     return None
 
-BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or _load_frontend_env()).rstrip("/")
+BASE_URL = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("requires TEST_BACKEND_URL", allow_module_level=True)
 API = f"{BASE_URL}/api"
+
+pytestmark = pytest.mark.external
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "gods34.xlsm"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def reset_fixture_for_module():
+    """Rende Iter10 indipendente dalle mutazioni dei moduli external precedenti."""
+    assert FIXTURE.exists(), f"fixture missing: {FIXTURE}"
+    with FIXTURE.open("rb") as fh:
+        response = requests.post(
+            f"{API}/import/excel-full",
+            files={"file": (
+                "gods34.xlsm",
+                fh,
+                "application/vnd.ms-excel.sheet.macroEnabled.12",
+            )},
+            timeout=240,
+        )
+    assert response.status_code == 200, response.text[:500]
 
 
 @pytest.fixture(scope="module")
@@ -75,48 +97,44 @@ class TestAutoOrderAMMS395_396:
         righe = {row["codice"]: row for row in data["righe"]}
         assert "AMMS395" in righe, f"AMMS395 not in auto-order (n_righe={data['n_righe']})"
         row = righe["AMMS395"]
-        assert row["giacenza_negozio"] == 28, row
+        # RIMANENZE Excel viene convertita in stock fisico libero.
+        assert row["giacenza_negozio"] == 0, row
         assert row["qta_da_ordinare"] > 0
         assert ("COPERTURA" in row["motivo"]) or ("FAST MOVER" in row["motivo"]), row["motivo"]
         assert row["domanda_gg"] > 4
         assert row["copertura_gg"] is not None and row["copertura_gg"] < 10
 
-    def test_amms396_in_auto_order(self, client):
+    def test_amms396_has_sufficient_physical_coverage(self, client):
         r = client.get(f"{API}/auto-order")
         data = r.json()
-        righe = {row["codice"]: row for row in data["righe"]}
-        assert "AMMS396" in righe, "AMMS396 not in auto-order"
-        row = righe["AMMS396"]
-        assert row["giacenza_negozio"] == 37, row
-        assert row["qta_da_ordinare"] > 0
-        assert ("COPERTURA" in row["motivo"]) or ("FAST MOVER" in row["motivo"]), row["motivo"]
-        assert row["domanda_gg"] > 4
-        assert row["copertura_gg"] is not None and row["copertura_gg"] < 10
+        rows = {row["codice"]: row for row in [*data["righe"], *data["esclusi"]]}
+        row = rows["AMMS396"]
+        assert row["giacenza_negozio"] == 20, row
+        assert row["stato"] == "NESSUN ORDINE"
+        assert row["qta_da_ordinare"] == 0
+        assert row["copertura_gg"] is not None and row["copertura_gg"] >= 14
 
-    def test_n_righe_significantly_higher(self, client):
+    def test_auto_order_returns_actionable_subset(self, client):
         r = client.get(f"{API}/auto-order")
         data = r.json()
-        assert data["n_righe"] > 100, f"expected >100 rows, got {data['n_righe']}"
+        assert data["n_righe"] > 0
+        assert data["n_righe"] == len(data["righe"])
+        assert all(not row["anomalia"] for row in data["righe"])
 
 
 # --- 3. Effetto parametro ---
 class TestPeriodoEffect:
-    def test_periodo_180_halves_domanda(self, client):
+    def test_periodo_legacy_does_not_change_recent_demand(self, client):
         _set_param(client, "PERIODO_VENDUTI_GG", 90)
         r = client.get(f"{API}/auto-order")
-        row90 = next((x for x in r.json()["righe"] if x["codice"] == "AMMS395"), None)
-        assert row90 is not None
-        d90 = row90["domanda_gg"]
+        row90 = next(x for x in r.json()["righe"] if x["codice"] == "AMMS395")
 
         _set_param(client, "PERIODO_VENDUTI_GG", 180)
         r = client.get(f"{API}/auto-order")
-        row180 = next((x for x in r.json()["righe"] if x["codice"] == "AMMS395"), None)
-        assert row180 is not None
-        d180 = row180["domanda_gg"]
-        # atteso ~6.4
-        assert 5.5 <= d180 <= 7.5, f"expected ~6.4, got {d180}"
-        assert d180 < d90
-        # ripristino
+        row180 = next(x for x in r.json()["righe"] if x["codice"] == "AMMS395")
+        assert row180["domanda_gg"] == row90["domanda_gg"]
+        assert row180["venduto_breve"] == row90["venduto_breve"]
+        assert row180["venduto_lungo"] == row90["venduto_lungo"]
         assert _set_param(client, "PERIODO_VENDUTI_GG", 90).status_code == 200
 
 
@@ -147,7 +165,7 @@ class TestRegressionInAppTracking:
             "categoria": "ACCESSORI",
             "prezzo": 5.0,
             "acquistati": 10,
-            "giacenza_negozio": 5,
+            "giacenza_negozio": 35,
             "giacenza_vending": 0,
             "venduti_negozio": 0,
             "venduti_vending": 0,
@@ -194,19 +212,36 @@ class TestNegozioEsaurito:
             "descrizione": "Test esaurito",
             "categoria": "ACCESSORI",
             "prezzo": 3.0,
-            "acquistati": 0,
-            "giacenza_negozio": 0,
+            "acquistati": 2,
+            "giacenza_negozio": 2,
             "giacenza_vending": 0,
             "venduti_negozio": 0,
             "venduti_vending": 0,
         }
         r = client.post(f"{API}/prodotti", json=prod)
         assert r.status_code in (200, 201), r.text
-        r = client.get(f"{API}/auto-order")
-        righe = {row["codice"]: row for row in r.json()["righe"]}
-        assert self.codice in righe
-        assert righe[self.codice]["motivo"] == "NEGOZIO ESAURITO", righe[self.codice]["motivo"]
-        client.delete(f"{API}/prodotti/{self.codice}")
+        product_id = r.json()["id"]
+        sale_ids = []
+        from datetime import datetime, timezone
+        for _ in range(2):
+            sale = client.post(f"{API}/vendite", json={
+                "codice": self.codice,
+                "quantita": 1,
+                "canale": "NEGOZIO",
+                "data": datetime.now(timezone.utc).isoformat(),
+            })
+            assert sale.status_code in (200, 201), sale.text
+            sale_ids.append(sale.json()["id"])
+        try:
+            r = client.get(f"{API}/auto-order")
+            righe = {row["codice"]: row for row in r.json()["righe"]}
+            assert self.codice in righe
+            assert "COPERTURA" in righe[self.codice]["motivo"]
+            assert righe[self.codice]["giacenza_negozio"] == 0
+        finally:
+            for sale_id in sale_ids:
+                client.delete(f"{API}/vendite/{sale_id}")
+            client.delete(f"{API}/prodotti/{product_id}")
 
 
 # --- Final teardown: assicura PERIODO_VENDUTI_GG=90 ---

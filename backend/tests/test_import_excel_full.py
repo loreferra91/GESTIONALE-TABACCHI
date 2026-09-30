@@ -13,12 +13,15 @@ import io
 import os
 import pytest
 import requests
+from pathlib import Path
 
 BASE = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
 if not BASE:
     pytest.skip("requires TEST_BACKEND_URL", allow_module_level=True)
 
-FIXTURE = "/app/backend/tests/fixtures/gods27.xlsm"
+pytestmark = pytest.mark.external
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "gods27.xlsm"
 
 
 @pytest.fixture(scope="module")
@@ -52,14 +55,17 @@ def prepare(s):
 
 
 def test_import_excel_full_happy_path(s, prepare):
-    assert os.path.exists(FIXTURE), f"fixture missing: {FIXTURE}"
-    with open(FIXTURE, "rb") as fh:
+    assert FIXTURE.exists(), f"fixture missing: {FIXTURE}"
+    with FIXTURE.open("rb") as fh:
         files = {"file": ("gods27.xlsm", fh, "application/vnd.ms-excel.sheet.macroEnabled.12")}
         r = s.post(f"{BASE}/api/import/excel-full", files=files, timeout=180)
     assert r.status_code == 200, r.text
     j = r.json()
     assert j.get("ok") is True
-    expected_sheets = {"RIEP_VENDITA", "LISTINO ADM", "RICARICA VENDING", "STORICO_ORDINI", "PARAMETRI"}
+    expected_sheets = {
+        "RIEP_VENDITA", "LISTINO ADM", "RICARICA VENDING", "STORICO_ORDINI",
+        "PARAMETRI", "DB_STORICO_VEND", "DB_STORICO_VENDING_EXT",
+    }
     assert set(j["fogli_trovati"]) == expected_sheets, f"got {j['fogli_trovati']}"
     assert j["fogli_mancanti"] == []
     t = j["totali"]

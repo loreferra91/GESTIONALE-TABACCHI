@@ -1,0 +1,17 @@
+{
+  "short_name": "Gestionale",
+  "name": "Gestionale Tabacchi",
+  "description": "Gestionale operativo per magazzino, vendite, vending e Auto-Order.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F8F9FA",
+  "theme_color": "#0F172A",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

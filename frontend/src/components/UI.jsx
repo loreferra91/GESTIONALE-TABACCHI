@@ -1,3 +1,5 @@
+import { shortCategory } from "../lib/categories";
+
 export function Badge({ children, tone = "ok" }) {
   const map = {
     ok: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -8,8 +10,8 @@ export function Badge({ children, tone = "ok" }) {
   // Abbreviazioni per label lunghe
   const s = typeof children === "string" ? children : null;
   let display = children;
-  if (s === "SIGARETTE ELETTRONICHE") display = "ELETTR.";
-  else if (s && s.startsWith("SLOW MOVER: 1 LOTTO")) display = "SLOW MOVER";
+  if (s) display = shortCategory(s);
+  if (s && s.startsWith("SLOW MOVER: 1 LOTTO")) display = "SLOW MOVER";
   else if (s && s.startsWith("FAST MOVER")) display = "FAST MOVER";
   else if (s && s.startsWith("ALLERT SOTTO SOGLIA")) display = "SOTTO SOGLIA";
   return (

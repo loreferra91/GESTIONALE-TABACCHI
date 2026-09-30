@@ -4,12 +4,15 @@ vending ricarica PDF, and regression checks.
 import os
 import pytest
 import requests
+from pathlib import Path
 
 BASE = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
 if not BASE:
     pytest.skip("requires TEST_BACKEND_URL", allow_module_level=True)
 
-FIXTURE = "/app/backend/tests/fixtures/gods34.xlsm"
+pytestmark = pytest.mark.external
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "gods34.xlsm"
 
 
 @pytest.fixture(scope="module")
@@ -25,8 +28,8 @@ def s():
 
 # ---------- Excel full import (7 sheets) ----------
 def test_import_excel_full_7_sheets(s):
-    assert os.path.exists(FIXTURE), f"fixture missing: {FIXTURE}"
-    with open(FIXTURE, "rb") as fh:
+    assert FIXTURE.exists(), f"fixture missing: {FIXTURE}"
+    with FIXTURE.open("rb") as fh:
         files = {"file": ("gods34.xlsm", fh,
                           "application/vnd.ms-excel.sheet.macroEnabled.12")}
         r = s.post(f"{BASE}/api/import/excel-full", files=files, timeout=240)
@@ -62,13 +65,14 @@ def test_auto_order_uses_negozio_only(s):
     if pid:
         s.delete(f"{BASE}/api/prodotti/{pid}")
 
-    # Create product: negozio=0 (empty), vending=5, acquistati=10
+    # Parte da 2 pezzi fisici liberi e 5 nella vending. La vendita recente
+    # esaurisce solo il negozio: la scorta vending non deve coprire il fabbisogno.
     payload = {
         "codice": codice,
         "descrizione": "TEST",
         "categoria": "SIGARETTE",
         "prezzo": 5.0,
-        "giacenza_negozio": 0,
+        "giacenza_negozio": 2,
         "giacenza_vending": 5,
         "acquistati": 10,
         "venduti_negozio": 0,
@@ -79,7 +83,20 @@ def test_auto_order_uses_negozio_only(s):
     new_id = r.json().get("id")
     assert new_id
 
+    vendita_id = None
     try:
+        vendita = s.post(f"{BASE}/api/vendite", json={
+            "data": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "codice": codice,
+            "descrizione": "TEST",
+            "quantita": 2,
+            "importo": 10,
+            "canale": "NEGOZIO",
+            "pagamento": "CONTANTI",
+        }, timeout=30)
+        assert vendita.status_code in (200, 201), vendita.text[:300]
+        vendita_id = vendita.json().get("id")
+
         # GET auto-order
         r = s.get(f"{BASE}/api/auto-order", timeout=60)
         assert r.status_code == 200, r.text[:300]
@@ -88,10 +105,12 @@ def test_auto_order_uses_negozio_only(s):
         row = next((x for x in ao["righe"] if x.get("codice") == codice), None)
         assert row is not None, f"{codice} not present in auto-order righe"
         assert row["qta_da_ordinare"] > 0, f"expected qta>0, got {row['qta_da_ordinare']}"
-        assert "NEGOZIO" in row["motivo"].upper(), f"motivo missing NEGOZIO: {row['motivo']}"
+        assert "COPERTURA" in row["motivo"].upper(), row["motivo"]
         assert row["giacenza_negozio"] == 0
         assert row["giacenza_vending"] == 5
     finally:
+        if vendita_id:
+            s.delete(f"{BASE}/api/vendite/{vendita_id}")
         s.delete(f"{BASE}/api/prodotti/{new_id}")
 
 

@@ -4,10 +4,17 @@ import { api } from "../lib/api";
 import { toast, Toaster } from "sonner";
 import { House, Trash, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { formatEur, formatNum } from "../components/UI";
+import { PRODUCT_CATEGORIES, shortCategory } from "../lib/categories";
 
 const CAT_STYLE = {
   "SIGARETTE": "bg-slate-900 text-white",
-  "SIGARETTE ELETTRONICHE": "bg-amber-600 text-white",
+  "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE": "bg-amber-600 text-white",
+  "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA": "bg-fuchsia-700 text-white",
+  "SIGARI": "bg-violet-700 text-white",
+  "SIGARETTI": "bg-violet-600 text-white",
+  "TRINCIATI PER SIGARETTA": "bg-sky-700 text-white",
+  "ALTRI TABACCHI DA FUMO": "bg-teal-700 text-white",
+  "FIUTO E MASTICO": "bg-orange-700 text-white",
   "ACCESSORI": "bg-emerald-700 text-white",
 };
 
@@ -111,9 +118,9 @@ export default function CassaRapida() {
               <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input data-testid="pos-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca codice o descrizione…" className="w-full border border-slate-300 rounded-md pl-9 pr-3 py-3 text-base bg-white" autoFocus />
             </div>
-            {["ALL", "SIGARETTE", "SIGARETTE ELETTRONICHE", "ACCESSORI"].map(c => (
+            {["ALL", ...PRODUCT_CATEGORIES].map(c => (
               <button key={c} data-testid={`pos-cat-${c}`} onClick={() => setCat(c)} className={`px-4 py-2 rounded-md text-xs font-bold uppercase tracking-wider transition-colors ${cat === c ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-50"}`}>
-                {c === "ALL" ? "Preferiti" : c === "SIGARETTE ELETTRONICHE" ? "Elettr." : c}
+                {c === "ALL" ? "Preferiti" : shortCategory(c)}
               </button>
             ))}
           </div>
@@ -128,7 +135,7 @@ export default function CassaRapida() {
                   className="text-left bg-white border border-slate-200 rounded-md p-3 hover:border-slate-900 hover:shadow-md transition-all group relative overflow-hidden"
                 >
                   <div className={`inline-block text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${CAT_STYLE[p.categoria] || "bg-slate-100 text-slate-700"}`}>
-                    {p.categoria === "SIGARETTE ELETTRONICHE" ? "ELETTR." : (p.categoria || "").slice(0,7)}
+                    {shortCategory(p.categoria).slice(0, 14)}
                   </div>
                   <div className="font-mono text-[10px] text-slate-400 mt-1">{p.codice}</div>
                   <div className="text-sm font-medium text-slate-900 mt-1 line-clamp-2 min-h-[2.5rem]">{p.descrizione}</div>

@@ -5,15 +5,19 @@ import requests
 from pathlib import Path
 
 def _load_frontend_env():
-    p = Path("/app/frontend/.env")
+    p = Path(__file__).resolve().parents[2] / "frontend" / ".env"
     if p.exists():
         for line in p.read_text().splitlines():
             if line.startswith("REACT_APP_BACKEND_URL="):
                 return line.split("=", 1)[1].strip()
     return None
 
-BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or _load_frontend_env() or "").rstrip("/")
+BASE_URL = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("requires TEST_BACKEND_URL", allow_module_level=True)
 API = f"{BASE_URL}/api"
+
+pytestmark = pytest.mark.external
 
 
 @pytest.fixture(scope="module")
@@ -92,10 +96,9 @@ def test_unknown_param_passthrough(client):
     r = client.put(f"{API}/parametri/TEST_UNKNOWN_PARAM", json={"valore": 42})
     assert r.status_code == 200
     assert r.json()["valore"] == 42
-    # cleanup
-    from pymongo import MongoClient
-    mc = MongoClient(os.environ.get("MONGO_URL"))
-    mc[os.environ.get("DB_NAME")].parametri.delete_one({"nome": "TEST_UNKNOWN_PARAM"})
+    # Il backend live può usare un DB remoto o simulato non raggiungibile dal
+    # processo pytest. La fixture/server isolato viene eliminata a fine run, quindi
+    # il test resta black-box e non apre una seconda connessione Mongo per cleanup.
 
 
 # ---------- Rollback safe after failed 422 ----------

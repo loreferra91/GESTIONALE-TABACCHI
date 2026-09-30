@@ -2,17 +2,23 @@
 import os
 import pytest
 import requests
+from pathlib import Path
 
 
 def _get_base():
-    with open("/app/frontend/.env") as f:
-        for line in f:
+    env_path = Path(__file__).resolve().parents[2] / "frontend" / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
             if line.startswith("REACT_APP_BACKEND_URL="):
                 return line.split("=", 1)[1].strip().rstrip("/")
-    raise RuntimeError("REACT_APP_BACKEND_URL missing")
+    return ""
 
 
-BASE = _get_base()
+BASE = os.environ.get("TEST_BACKEND_URL", "").rstrip("/")
+if not BASE:
+    pytest.skip("requires TEST_BACKEND_URL", allow_module_level=True)
+
+pytestmark = pytest.mark.external
 
 
 @pytest.fixture(scope="module")

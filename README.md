@@ -63,6 +63,38 @@ yarn start
 
 Il frontend locale sarà disponibile su `http://localhost:3000`.
 
+## Semantica magazzino e ordini
+
+`giacenza_negozio` indica lo stock fisico libero in negozio/magazzino, cioe i
+pezzi realmente disponibili per vendita o ricarica. Nei file Excel la colonna
+`RIMANENZE` e invece aggregata: durante l'import viene convertita una sola volta
+in stock fisico libero sottraendo giacenza vending e venduto vending. Da quel
+momento Auto-Order usa direttamente `giacenza_negozio` e non sottrae di nuovo la
+vending; una ricarica vending `-negozio/+vending` riduce quindi lo stock
+Auto-Order esattamente una volta.
+
+Stock importati o movimentati in modo incoerente, per esempio con
+`giacenza_negozio` negativa, sono trattati come `ANOMALIA`: non generano quantita
+da ordinare, non entrano in righe Auto-Order, PDF, totale o conferma, anche se le
+vendite recenti sarebbero sufficienti.
+
+La conferma Auto-Order crea solo un batch ordine fornitore idempotente
+(`ordini_fornitore` e `ordini_fornitore_righe`) usando la chiave inviata dal
+client o lo snapshot corrente. Non incrementa `giacenza_negozio`, non incrementa
+`acquistati` e non scrive in `storico_ordini`. Il carico merce resta
+`POST /api/ordini/bulk`: usare quell'endpoint quando la merce arriva fisicamente;
+quello e il percorso che registra lo storico di ricezione e aumenta scorte e
+acquistati.
+
+Le finestre Auto-Order sono configurabili con `AUTO_ORDER_FINESTRA_BREVE_GG` e
+`AUTO_ORDER_FINESTRA_LUNGA_GG`. Le API espongono i campi generici
+`venduto_breve` e `venduto_lungo`; `venduto_10gg` e `venduto_30gg` restano
+presenti per compatibilita.
+
+Il ciclo di vita FastAPI usa un `lifespan` asincrono: allo startup inizializza
+seed, parametri e indici; allo shutdown chiude il client Mongo. La migrazione da
+`on_event` è coperta dalla suite locale e da un avvio Uvicorn isolato.
+
 ## Pubblicazione gratuita
 
 ### 1. Creare MongoDB Atlas Free
@@ -138,6 +170,27 @@ Riferimenti: [Render Free](https://render.com/docs/free),
 [MongoDB Atlas Free](https://www.mongodb.com/docs/atlas/tutorial/deploy-free-tier-cluster/).
 
 ## Verifica prima del deploy
+
+Test locali principali:
+
+```bash
+pytest backend/tests -q
+python3 -m compileall backend
+cd frontend && yarn build
+```
+
+I test esterni che mutano un backend live sono marcati `external` e saltano in
+modo pulito senza URL. Per eseguirli, usare un backend isolato:
+
+```bash
+TEST_BACKEND_URL=http://localhost:8000 pytest backend/tests -m external -q
+```
+
+Smoke fixture import locale:
+
+```bash
+TEST_BACKEND_URL=http://localhost:8000 pytest backend/tests/test_import_excel_full.py backend/tests/test_iter8_features.py -m external -q
+```
 
 ```bash
 cd frontend

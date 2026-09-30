@@ -1,21 +1,34 @@
 import { useEffect, useState, useRef } from "react";
 import Layout from "../components/Layout";
-import { api, API } from "../lib/api";
+import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { UploadSimple, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 export default function Parametri() {
   const [rows, setRows] = useState([]);
   const [importing, setImporting] = useState(false);
   const [importReport, setImportReport] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [backups, setBackups] = useState([]);
+  const [restoreTarget, setRestoreTarget] = useState(null);
+  const [workingBackup, setWorkingBackup] = useState(false);
   const fileRef = useRef(null);
 
   const load = async () => {
     const r = await api.get("/parametri");
     setRows(r.data);
   };
-  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const loadAudit = async () => {
+    const [h, b] = await Promise.all([
+      api.get("/import/history"),
+      api.get("/backup"),
+    ]);
+    setHistory(h.data || []);
+    setBackups(b.data || []);
+  };
+  useEffect(() => { load(); loadAudit(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const update = async (nome, valore) => {
     try {
@@ -23,8 +36,7 @@ export default function Parametri() {
       toast.success(`${nome} aggiornato`);
       load();
     } catch (err) {
-      const msg = err?.response?.data?.detail || "Errore aggiornamento";
-      toast.error(msg);
+      toast.error(apiErrorMessage(err, "Errore aggiornamento"));
       load();
     }
   };
@@ -46,13 +58,43 @@ export default function Parametri() {
       setImportReport(j);
       const t = j.totali;
       const tot = (t.prodotti_inseriti || 0) + (t.prodotti_aggiornati || 0) + (t.listino_inseriti || 0) + (t.listino_aggiornati || 0) + (t.vending_inseriti || 0) + (t.vending_aggiornati || 0);
-      toast.success(`Import completato: ${tot} righe aggiornate su ${j.fogli_trovati.length} fogli`);
+      toast.success(`Import completato: ${tot} righe aggiornate su ${j.fogli_trovati.length} fogli. Backup creato.`);
       load();
+      loadAudit();
     } catch (err) {
-      toast.error(`Errore import: ${err.message || "sconosciuto"}`);
+      toast.error(apiErrorMessage(err, "Errore import Excel"));
     } finally {
       setImporting(false);
       if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const createBackup = async () => {
+    setWorkingBackup(true);
+    try {
+      await api.post("/backup/create", { label: "Backup manuale", reason: "manuale" });
+      toast.success("Backup manuale creato");
+      loadAudit();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore creazione backup"));
+    } finally {
+      setWorkingBackup(false);
+    }
+  };
+
+  const restoreBackup = async () => {
+    if (!restoreTarget) return;
+    setWorkingBackup(true);
+    try {
+      const r = await api.post(`/backup/${restoreTarget.id}/restore`);
+      toast.success(`Backup ripristinato. Backup pre-ripristino: ${r.data.pre_restore_backup}`);
+      setRestoreTarget(null);
+      load();
+      loadAudit();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore ripristino backup"));
+    } finally {
+      setWorkingBackup(false);
     }
   };
 
@@ -87,12 +129,17 @@ export default function Parametri() {
           </div>
         </div>
 
-        {importReport && (
+            {importReport && (
           <div className="mt-6 border-t border-slate-200 pt-5" data-testid="import-report">
             <div className="flex items-center gap-2 mb-3">
               <CheckCircle size={20} weight="fill" className="text-emerald-600" />
               <span className="font-heading font-black text-base">Report Import — {importReport.file}</span>
             </div>
+            {importReport.backup_id && (
+              <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+                Backup automatico creato prima dell'import: <b>{importReport.backup_id}</b>
+              </div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
               <ReportCard label="Prodotti nuovi" value={T.prodotti_inseriti} tone="ok" />
               <ReportCard label="Prodotti aggiornati" value={T.prodotti_aggiornati} tone="info" />
@@ -132,6 +179,50 @@ export default function Parametri() {
         )}
       </Card>
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
+        <Card className="p-5">
+          <div className="flex items-start justify-between gap-3 mb-4">
+            <div>
+              <h2 className="font-heading font-black text-lg">Backup e ripristino</h2>
+              <p className="text-sm text-slate-600">Ogni import completo crea un backup automatico. Puoi crearne uno manuale prima di prove importanti.</p>
+            </div>
+            <button onClick={createBackup} disabled={workingBackup} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
+              Backup ora
+            </button>
+          </div>
+          <div className="space-y-2">
+            {backups.slice(0, 6).map(b => (
+              <div key={b.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">{b.label}</div>
+                  <div className="text-xs text-slate-500">{new Date(b.created_at).toLocaleString("it-IT")} · {formatNum(b.total_docs)} documenti · {b.reason}</div>
+                </div>
+                <button onClick={() => setRestoreTarget(b)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-50">Ripristina</button>
+              </div>
+            ))}
+            {!backups.length && <div className="text-sm text-slate-400">Nessun backup registrato.</div>}
+          </div>
+        </Card>
+
+        <Card className="p-5">
+          <h2 className="font-heading font-black text-lg mb-4">Storico import</h2>
+          <div className="space-y-2">
+            {history.slice(0, 8).map(h => (
+              <div key={h.id} className="rounded-md border border-slate-200 px-3 py-2 text-sm">
+                <div className="flex justify-between gap-3">
+                  <span className="font-semibold truncate">{h.file}</span>
+                  <span className="text-xs text-slate-500">{new Date(h.created_at).toLocaleString("it-IT")}</span>
+                </div>
+                <div className="mt-1 text-xs text-slate-600">
+                  Prodotti {formatNum((h.totali?.prodotti_inseriti || 0) + (h.totali?.prodotti_aggiornati || 0))} · Vendite storiche {formatNum(h.totali?.db_storico_vend_righe)} · Errori {formatNum(h.errori)}
+                </div>
+              </div>
+            ))}
+            {!history.length && <div className="text-sm text-slate-400">Nessun import registrato.</div>}
+          </div>
+        </Card>
+      </div>
+
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="data-table w-full">
@@ -161,6 +252,18 @@ export default function Parametri() {
           </table>
         </div>
       </Card>
+      <ConfirmDialog
+        open={Boolean(restoreTarget)}
+        title="Ripristinare questo backup?"
+        confirmLabel="Ripristina backup"
+        danger
+        loading={workingBackup}
+        onCancel={() => setRestoreTarget(null)}
+        onConfirm={restoreBackup}
+      >
+        <p>Il database operativo verrà riportato allo stato del backup <b>{restoreTarget?.label}</b>.</p>
+        <p className="mt-2 text-slate-600">Prima del ripristino verrà creato automaticamente un nuovo backup dello stato attuale.</p>
+      </ConfirmDialog>
     </Layout>
   );
 }

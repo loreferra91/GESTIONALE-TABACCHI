@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
+import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { Plus, Trash, Warning, Lightning } from "@phosphor-icons/react";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { defaultLotForCategory } from "../lib/categories";
 
 export default function Carico() {
   const [prodotti, setProdotti] = useState([]);
@@ -13,6 +15,7 @@ export default function Carico() {
   const [righe, setRighe] = useState([]); // {codice, descrizione, quantita, prezzo}
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   useEffect(() => {
     api.get("/prodotti", { params: { limit: 5000 } }).then(r => setProdotti(r.data));
@@ -27,8 +30,8 @@ export default function Carico() {
   const addProd = (p) => {
     setRighe(r => {
       const existing = r.find(x => x.codice === p.codice);
-      if (existing) return r.map(x => x.codice === p.codice ? { ...x, quantita: (x.quantita || 0) + (p.categoria === "SIGARETTE" ? 10 : p.categoria === "SIGARETTE ELETTRONICHE" ? 5 : 1) } : x);
-      const lotto = p.categoria === "SIGARETTE" ? 10 : p.categoria === "SIGARETTE ELETTRONICHE" ? 5 : 1;
+      const lotto = defaultLotForCategory(p.categoria);
+      if (existing) return r.map(x => x.codice === p.codice ? { ...x, quantita: (x.quantita || 0) + lotto } : x);
       return [...r, { _uid: `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, codice: p.codice, descrizione: p.descrizione, quantita: lotto, prezzo: p.prezzo || 0 }];
     });
     setQ("");
@@ -69,7 +72,6 @@ export default function Carico() {
   const carica = async () => {
     const valide = righe.filter(r => r.codice && r.quantita > 0);
     if (!valide.length) return toast.error("Nessuna riga valida");
-    if (!window.confirm(`Confermi il carico di ${valide.length} righe per un totale di € ${totale.toFixed(2)}?\nGiacenze e Storico Ordini verranno aggiornati.`)) return;
     setSaving(true);
     try {
       const r = await api.post("/ordini/bulk", {
@@ -78,8 +80,9 @@ export default function Carico() {
       });
       toast.success(`${r.data.caricate} righe caricate · ${r.data.prodotti_nuovi} prodotti nuovi creati`);
       setRighe([]);
-    } catch {
-      toast.error("Errore durante il carico");
+      setConfirmOpen(false);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore durante il carico"));
     } finally {
       setSaving(false);
     }
@@ -199,10 +202,21 @@ export default function Carico() {
         <button data-testid="carico-clear" onClick={() => setRighe([])} disabled={!righe.length} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Svuota
         </button>
-        <button data-testid="carico-conferma" onClick={carica} disabled={saving || righe.filter(r => r.codice && r.quantita > 0).length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-6 py-2 text-sm font-bold transition-colors disabled:opacity-40">
+        <button data-testid="carico-conferma" onClick={() => setConfirmOpen(true)} disabled={saving || righe.filter(r => r.codice && r.quantita > 0).length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-6 py-2 text-sm font-bold transition-colors disabled:opacity-40">
           {saving ? "Carico in corso…" : `Carica in magazzino (${formatEur(totale)})`}
         </button>
       </div>
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Confermare carico merce?"
+        confirmLabel="Aggiorna magazzino"
+        loading={saving}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={carica}
+      >
+        <p>Verranno caricate <b>{formatNum(righe.filter(r => r.codice && r.quantita > 0).length)}</b> righe, per <b>{formatNum(pezziTot)}</b> pezzi totali e valore <b>{formatEur(totale)}</b>.</p>
+        <p className="mt-2 text-slate-600">L'operazione aggiorna <b>Storico ordini</b>, <b>giacenza negozio</b> e <b>acquistati</b>.</p>
+      </ConfirmDialog>
     </Layout>
   );
 }

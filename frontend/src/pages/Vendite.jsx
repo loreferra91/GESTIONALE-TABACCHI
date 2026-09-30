@@ -1,6 +1,6 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import Layout from "../components/Layout";
-import { api, API } from "../lib/api";
+import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { Trash } from "@phosphor-icons/react";
@@ -30,11 +30,11 @@ export default function Vendite() {
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const r = await api.get("/vendite", { params: { giorno } });
     setRows(r.data);
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [giorno]);
+  }, [giorno]);
+  useEffect(() => { load(); }, [load]);
 
   const save = async () => {
     if (!form.codice || !form.importo) { toast.error("Compila codice e importo"); return; }
@@ -109,7 +109,7 @@ export default function Vendite() {
       setBulkRows([]);
       load();
     } catch (e) {
-      toast.error("Errore bulk");
+      toast.error(apiErrorMessage(e, "Errore bulk"));
     }
   };
 
@@ -151,8 +151,8 @@ export default function Vendite() {
       setCsvResult(j);
       toast.success(`CSV vending: ${j.inseriti} righe importate`);
       load();
-    } catch {
-      toast.error("Errore import CSV");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore import CSV"));
     } finally {
       csvRef.current.value = "";
     }

@@ -1,12 +1,13 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request, Header
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError
-import os, json, logging, uuid, io, re, asyncio, math, unicodedata
+from pymongo.errors import BulkWriteError, DuplicateKeyError
+import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib
+from contextlib import asynccontextmanager
 from pathlib import Path
 import base64
 import secrets
@@ -21,7 +22,19 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI(title="God Services Gestionale Tabacchi")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # on_start è risolto quando il lifespan viene eseguito, dopo il caricamento
+    # completo del modulo.
+    await on_start()
+    try:
+        yield
+    finally:
+        client.close()
+
+
+app = FastAPI(title="God Services Gestionale Tabacchi", lifespan=lifespan)
 api = APIRouter(prefix="/api")
 
 
@@ -69,7 +82,7 @@ class Prodotto(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     codice: str
     descrizione: str
-    categoria: str = "ACCESSORI"  # SIGARETTE, SIGARETTE ELETTRONICHE, ACCESSORI
+    categoria: str = "ACCESSORI"
     prezzo: float = 0
     acquistati: int = 0
     venduti_negozio: int = 0
@@ -155,6 +168,11 @@ class OrdineIn(BaseModel):
     file_sorgente: Optional[str] = "manuale"
 
 
+class AutoOrderConfermaIn(BaseModel):
+    idempotency_key: Optional[str] = None
+    batch_key: Optional[str] = None
+
+
 class MovimentoCassa(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -185,10 +203,21 @@ class ParametroIn(BaseModel):
     valore: float
 
 
+BACKUP_COLLECTIONS = [
+    "prodotti",
+    "listino_adm",
+    "vending",
+    "storico_ordini",
+    "parametri",
+    "db_storico_vend",
+    "db_storico_vending_ext",
+]
+
+
 # ------------------------- Seed -------------------------
 DEFAULT_PARAMS = {
     "LOTTO_SIGARETTE": {"valore": 10, "descrizione": "Lotto standard per SIGARETTE"},
-    "LOTTO_ELETTRONICHE": {"valore": 5, "descrizione": "Lotto standard per SIGARETTE ELETTRONICHE"},
+    "LOTTO_ELETTRONICHE": {"valore": 5, "descrizione": "Lotto standard per prodotti da inalazione (TEREA e sigarette elettroniche)"},
     "LOTTO_ACCESSORI": {"valore": 1, "descrizione": "Lotto standard per ACCESSORI"},
     "GIORNI_STORICO_VEND": {"valore": 30, "descrizione": "Finestra storico vendite (giorni)"},
     "GIORNI_SETTIMANA": {"valore": 7, "descrizione": "Costante giorni settimana"},
@@ -242,7 +271,6 @@ async def seed_if_empty():
     await db.parametri.insert_many(param_docs)
 
 
-@app.on_event("startup")
 async def on_start():
     try:
         await seed_if_empty()
@@ -269,6 +297,14 @@ async def on_start():
             db.vendite.create_index([("data", 1), ("codice", 1)]),
             db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
+            db.ordini_fornitore.create_index("batch_key", unique=True),
+            db.ordini_fornitore_righe.create_index("batch_key"),
+            db.backup_snapshots.create_index("created_at"),
+            db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
+            db.import_history.create_index("created_at"),
+            db.listino_adm.create_index("adm_codice"),
+            db.listino_adm.create_index("categoria_adm"),
+            db.adm_sync.create_index("created_at"),
         )
     except Exception as e:
         logging.exception("seed failed: %s", e)
@@ -289,9 +325,61 @@ async def get_params() -> Dict[str, float]:
 def lotto_for(categoria: str, params: Dict[str, float]) -> int:
     if categoria == "SIGARETTE":
         return int(params.get("LOTTO_SIGARETTE", 10))
-    if categoria == "SIGARETTE ELETTRONICHE":
+    if categoria in (
+        "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE",
+        "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA",
+    ):
         return int(params.get("LOTTO_ELETTRONICHE", 5))
     return int(params.get("LOTTO_ACCESSORI", 1))
+
+
+def _param(params: Dict[str, float], name: str, default: float) -> float:
+    """Use the default only for a missing/None value; numeric zero is valid."""
+    value = params.get(name)
+    return default if value is None else value
+
+
+def _auto_order_snapshot_key(ao: Dict[str, Any]) -> str:
+    payload = {
+        "data_riferimento_domanda": ao.get("data_riferimento_domanda"),
+        "parametri": {
+            k: ao.get("parametri", {}).get(k)
+            for k in (
+                "GIORNI_COPERTURA_MIN",
+                "GIORNI_COPERTURA_TARGET",
+                "AUTO_ORDER_FINESTRA_BREVE_GG",
+                "AUTO_ORDER_FINESTRA_LUNGA_GG",
+                "AUTO_ORDER_PESO_BREVE",
+                "AUTO_ORDER_MIN_VENDUTO_BREVE",
+                "AUTO_ORDER_MIN_VENDUTO_LUNGO",
+                "AUTO_ORDER_FATTORE_SICUREZZA",
+            )
+        },
+        "righe": [
+            {
+                "codice": r.get("codice"),
+                "qta_da_ordinare": r.get("qta_da_ordinare"),
+                "prezzo": r.get("prezzo"),
+                "totale": r.get("totale"),
+            }
+            for r in ao.get("righe", [])
+        ],
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return "auto-order:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def physical_shop_stock_from_excel(
+    aggregate_remaining: Any, vending_stock: Any, vending_sold: Any
+) -> int:
+    """Convert Excel RIMANENZE to physical, freely available shop stock.
+
+    RIMANENZE is aggregate and still includes units moved through/to vending.
+    Normalize it once on import. Thereafter ``giacenza_negozio`` is authoritative
+    physical free stock and Auto-Order must not subtract vending a second time.
+    Negative results are retained so Auto-Order can report an ANOMALIA.
+    """
+    return int(aggregate_remaining or 0) - int(vending_stock or 0) - int(vending_sold or 0)
 
 
 # ------------------------- Root / Health -------------------------
@@ -303,6 +391,16 @@ async def root():
 # ------------------------- Prodotti -------------------------
 MAX_LIMIT = 5000
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+ADM_PREZZI_URL = "https://www.adm.gov.it/portale/monopoli/tabacchi/prezzi/prezzi_pubblico"
+ADM_CATEGORY_ALIASES = {
+    "SIGARETTE": ["sigarette"],
+    "SIGARI": ["sigari"],
+    "SIGARETTI": ["sigaretti"],
+    "FIUTO E MASTICO": ["fiuto", "mastico"],
+    "TRINCIATI PER SIGARETTA": ["trinciati", "ryo"],
+    "ALTRI TABACCHI DA FUMO": ["altri tabacchi"],
+    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE": ["inalazione senza combustione", "prodotti da inalazione"],
+}
 
 
 def _q_regex(q: str) -> Dict[str, Any]:
@@ -312,6 +410,28 @@ def _q_regex(q: str) -> Dict[str, Any]:
 
 def _cap(limit: int) -> int:
     return max(1, min(int(limit or 0), MAX_LIMIT))
+
+
+def adm_numeric_code(codice: Any) -> str:
+    text = str(codice or "").strip().upper()
+    if text.startswith("AMMS"):
+        text = text[4:]
+    digits = re.sub(r"\D", "", text)
+    return digits.lstrip("0") or digits
+
+
+def adm_local_code(codice_adm: Any) -> str:
+    code = adm_numeric_code(codice_adm)
+    return f"AMMS{code}" if code else ""
+
+
+def parse_italian_money(value: Any) -> float:
+    text = str(value or "").strip().replace(".", "").replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    try:
+        return float(text) if text else 0.0
+    except ValueError:
+        return 0.0
 
 
 @api.get("/prodotti")
@@ -360,6 +480,149 @@ async def list_listino(q: Optional[str] = None, limit: int = 300):
     docs = await db.listino_adm.find(filt, {"_id": 0}).sort("descrizione", 1).limit(capped_limit).to_list(capped_limit)
     total = await db.listino_adm.count_documents(filt)
     return {"items": docs, "total": total}
+
+
+def fetch_adm_categories_sync() -> List[Dict[str, Any]]:
+    import requests
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+
+    response = requests.get(ADM_PREZZI_URL, timeout=45)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    categories: Dict[str, Dict[str, Any]] = {}
+    page_text = " ".join(soup.get_text(" ", strip=True).split())
+    for category, aliases in ADM_CATEGORY_ALIASES.items():
+        for a in soup.find_all("a"):
+            text = " ".join(a.get_text(" ", strip=True).split())
+            href = a.get("href") or ""
+            haystack = f"{text} {href}".lower()
+            if not href or ".pdf" not in href.lower():
+                continue
+            if any(alias.lower() in haystack for alias in aliases):
+                updated_match = re.search(rf"{re.escape(text)}.*?aggiornato il\s+(\d{{2}}/\d{{2}}/\d{{4}})", page_text, re.I)
+                categories[category] = {
+                    "categoria": category,
+                    "titolo": text or category.title(),
+                    "url": urljoin(ADM_PREZZI_URL, href),
+                    "aggiornato_il": updated_match.group(1) if updated_match else None,
+                }
+                break
+    return [categories[k] for k in ADM_CATEGORY_ALIASES if k in categories]
+
+
+def parse_adm_pdf_sync(category: Dict[str, Any]) -> List[Dict[str, Any]]:
+    import requests
+    import pdfplumber
+
+    content = requests.get(category["url"], timeout=90).content
+    rows: List[Dict[str, Any]] = []
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                if not table:
+                    continue
+                for row in table[1:]:
+                    if not row or len(row) < 4:
+                        continue
+                    code = adm_numeric_code(row[0])
+                    if not code or not code.isdigit():
+                        continue
+                    descrizione = " ".join(str(row[1] or "").replace("\n", " ").split())
+                    confezione = " ".join(str(row[2] or "").replace("\n", " ").split()) if len(row) > 2 else ""
+                    prezzo = parse_italian_money(row[-1])
+                    if not descrizione:
+                        continue
+                    rows.append({
+                        "adm_codice": code,
+                        "codice": adm_local_code(code),
+                        "descrizione": descrizione,
+                        "confezione": confezione,
+                        "prezzo": prezzo,
+                        "categoria_adm": category["categoria"],
+                        "fonte": "ADM",
+                        "adm_pdf_url": category["url"],
+                        "adm_aggiornato_il": category.get("aggiornato_il"),
+                    })
+    return rows
+
+
+@api.get("/adm/categories")
+async def adm_categories():
+    categories = await asyncio.to_thread(fetch_adm_categories_sync)
+    last_sync = await db.adm_sync.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+    return {"source": ADM_PREZZI_URL, "categories": categories, "last_sync": last_sync}
+
+
+@api.post("/adm/sync")
+async def adm_sync():
+    started = datetime.now(timezone.utc).isoformat()
+    categories = await asyncio.to_thread(fetch_adm_categories_sync)
+    if not categories:
+        raise HTTPException(502, "Nessun PDF ADM trovato nella pagina ufficiale")
+
+    total_rows = inserted = updated = product_updates = 0
+    detail = []
+    for category in categories:
+        rows = await asyncio.to_thread(parse_adm_pdf_sync, category)
+        total_rows += len(rows)
+        operations = []
+        for item in rows:
+            insert_defaults = ListinoItem(
+                codice=item["codice"],
+                descrizione=item["descrizione"],
+                prezzo=item["prezzo"],
+                confezione=item["confezione"],
+            ).model_dump()
+            set_data = {**item, "updated_at": started}
+            operations.append(UpdateOne(
+                {"$or": [
+                    {"adm_codice": item["adm_codice"]},
+                    {"codice": item["codice"]},
+                    {"codice": item["adm_codice"]},
+                ]},
+                {"$set": set_data, "$setOnInsert": insert_defaults},
+                upsert=True,
+            ))
+        result = await _bulk_upsert(db.listino_adm, operations)
+        inserted += result.get("inseriti", 0)
+        updated += result.get("aggiornati", 0)
+        detail.append({**category, "righe": len(rows), **result})
+
+        for item in rows:
+            update = await db.prodotti.update_many(
+                {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
+                {"$set": {
+                    "categoria": item["categoria_adm"],
+                    "categoria_adm": item["categoria_adm"],
+                    "adm_codice": item["adm_codice"],
+                    "adm_descrizione": item["descrizione"],
+                    "adm_prezzo": item["prezzo"],
+                    "adm_aggiornato_il": item.get("adm_aggiornato_il"),
+                }},
+            )
+            product_updates += update.modified_count
+
+    await db.prodotti.update_many(
+        {"$or": [{"categoria_adm": {"$exists": False}}, {"categoria_adm": ""}, {"categoria_adm": None}]},
+        {"$set": {"categoria": "ACCESSORI"}},
+    )
+    await _apply_electronic_inhalation_categories()
+    linked_products = await db.prodotti.count_documents({"categoria_adm": {"$exists": True, "$ne": ""}})
+    sync_doc = {
+        "id": str(uuid.uuid4()),
+        "created_at": started,
+        "source": ADM_PREZZI_URL,
+        "categorie": len(categories),
+        "righe": total_rows,
+        "inseriti": inserted,
+        "aggiornati": updated,
+        "prodotti_aggiornati": product_updates,
+        "prodotti_collegati": linked_products,
+        "dettaglio": detail,
+    }
+    await db.adm_sync.insert_one(sync_doc.copy())
+    return sync_doc
 
 
 # ------------------------- Vendite giornaliere -------------------------
@@ -450,6 +713,224 @@ async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> b
         if len(buf) > max_bytes:
             raise HTTPException(413, f"File troppo grande (max {max_bytes // 1024 // 1024} MB)")
     return bytes(buf)
+
+
+async def create_backup_snapshot(label: str, reason: str = "manuale") -> Dict[str, Any]:
+    snapshot_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
+    counts: Dict[str, int] = {}
+    await db.backup_snapshot_items.delete_many({"snapshot_id": snapshot_id})
+    for collection_name in BACKUP_COLLECTIONS:
+        collection = db[collection_name]
+        docs = await collection.find({}, {"_id": 0}).to_list(25000)
+        counts[collection_name] = len(docs)
+        if docs:
+            await db.backup_snapshot_items.insert_many([
+                {"snapshot_id": snapshot_id, "collection": collection_name, "doc": doc}
+                for doc in docs
+            ])
+    total_docs = sum(counts.values())
+    meta = {
+        "id": snapshot_id,
+        "label": label[:180],
+        "reason": reason[:80],
+        "created_at": created_at,
+        "counts": counts,
+        "total_docs": total_docs,
+        "status": "READY",
+    }
+    await db.backup_snapshots.insert_one(meta)
+    return meta
+
+
+@api.post("/backup/create")
+async def backup_create(body: Optional[Dict[str, Any]] = None):
+    label = str((body or {}).get("label") or f"Backup {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}")
+    reason = str((body or {}).get("reason") or "manuale")
+    return await create_backup_snapshot(label, reason)
+
+
+@api.get("/backup")
+async def backup_list(limit: int = 20):
+    capped_limit = max(1, min(int(limit or 20), 100))
+    docs = await db.backup_snapshots.find({}, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
+    return docs
+
+
+@api.post("/backup/{snapshot_id}/restore")
+async def backup_restore(snapshot_id: str):
+    meta = await db.backup_snapshots.find_one({"id": snapshot_id}, {"_id": 0})
+    if not meta:
+        raise HTTPException(404, "backup non trovato")
+    restore_backup = await create_backup_snapshot(
+        f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
+        "pre-restore",
+    )
+    for collection_name in BACKUP_COLLECTIONS:
+        items = await db.backup_snapshot_items.find(
+            {"snapshot_id": snapshot_id, "collection": collection_name},
+            {"_id": 0, "doc": 1},
+        ).to_list(25000)
+        await db[collection_name].delete_many({})
+        docs = [item["doc"] for item in items]
+        if docs:
+            await db[collection_name].insert_many(docs)
+    await db.backup_snapshots.update_one(
+        {"id": snapshot_id},
+        {"$set": {"last_restored_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"ok": True, "restored": snapshot_id, "pre_restore_backup": restore_backup["id"]}
+
+
+async def record_import_history(file_name: str, report: Dict[str, Any], backup_id: Optional[str] = None):
+    totals = report.get("totali", {})
+    doc = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "file": file_name,
+        "backup_id": backup_id,
+        "fogli_trovati": report.get("fogli_trovati", []),
+        "fogli_mancanti": report.get("fogli_mancanti", []),
+        "totali": totals,
+        "errori": sum((v or {}).get("errori", 0) for v in (report.get("dettaglio") or {}).values() if isinstance(v, dict)),
+    }
+    await db.import_history.insert_one(doc)
+    return doc
+
+
+@api.get("/import/history")
+async def import_history(limit: int = 20):
+    capped_limit = max(1, min(int(limit or 20), 100))
+    return await db.import_history.find({}, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
+
+
+async def data_status_payload() -> Dict[str, Any]:
+    latest_app, latest_imported, counts, latest_import, latest_backup = await asyncio.gather(
+        db.vendite.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+        asyncio.gather(*[db[name].count_documents({}) for name in BACKUP_COLLECTIONS]),
+        db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
+        db.backup_snapshots.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
+    )
+
+    count_map = dict(zip(BACKUP_COLLECTIONS, counts))
+
+    def date_only(raw: Any) -> Optional[str]:
+        value = (raw or {}).get("data") if isinstance(raw, dict) else raw
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            return str(value)[:10]
+
+    latest_sales_day = max([d for d in [date_only(latest_app), date_only(latest_imported)] if d], default=None)
+    delay = None
+    if latest_sales_day:
+        try:
+            delay = max(0, (datetime.now(timezone.utc).date() - datetime.fromisoformat(latest_sales_day).date()).days)
+        except ValueError:
+            delay = None
+    return {
+        "counts": count_map,
+        "latest_app_sale": date_only(latest_app),
+        "latest_imported_sale": date_only(latest_imported),
+        "latest_sales_day": latest_sales_day,
+        "sales_data_delay_days": delay,
+        "latest_import": latest_import,
+        "latest_backup": latest_backup,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@api.get("/data-status")
+async def data_status():
+    return await data_status_payload()
+
+
+@api.get("/global-search")
+async def global_search(q: str, limit: int = 8):
+    text = (q or "").strip()
+    if len(text) < 2:
+        return {"items": []}
+    capped = max(1, min(int(limit or 8), 20))
+    rx = _q_regex(text)
+    products = await db.prodotti.find(
+        {"$or": [{"codice": rx}, {"descrizione": rx}]},
+        {"_id": 0},
+    ).sort("codice", 1).limit(capped).to_list(capped)
+    items = [
+        {
+            "type": "prodotto",
+            "codice": p.get("codice"),
+            "descrizione": p.get("descrizione", ""),
+            "categoria": p.get("categoria", ""),
+            "prezzo": p.get("prezzo", 0),
+            "giacenza_negozio": p.get("giacenza_negozio", 0),
+            "giacenza_vending": p.get("giacenza_vending", 0),
+        }
+        for p in products
+    ]
+    return {"items": items}
+
+
+@api.get("/anomalie")
+async def anomalie():
+    prodotti = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
+    product_codes = {p.get("codice") for p in prodotti if p.get("codice")}
+    items = []
+    for p in prodotti:
+        codice = p.get("codice", "")
+        if int(p.get("giacenza_negozio", 0) or 0) < 0:
+            items.append({"tipo": "stock_negativo", "severita": "alta", "codice": codice, "descrizione": p.get("descrizione", ""), "messaggio": f"Giacenza negozio negativa ({p.get('giacenza_negozio')})", "azione": "Verifica import o movimenti recenti"})
+        if not float(p.get("prezzo", 0) or 0):
+            items.append({"tipo": "prezzo_mancante", "severita": "media", "codice": codice, "descrizione": p.get("descrizione", ""), "messaggio": "Prezzo a zero", "azione": "Aggiorna prodotto o listino ADM"})
+        if not p.get("descrizione"):
+            items.append({"tipo": "descrizione_mancante", "severita": "bassa", "codice": codice, "descrizione": "", "messaggio": "Descrizione mancante", "azione": "Completa anagrafica prodotto"})
+    vendite_codes = await db.vendite.distinct("codice")
+    storico_codes = await db.db_storico_vend.distinct("codice")
+    unknown_codes = sorted({c for c in [*vendite_codes, *storico_codes] if c and c not in product_codes})[:200]
+    for codice in unknown_codes:
+        items.append({"tipo": "vendita_senza_prodotto", "severita": "media", "codice": codice, "descrizione": "", "messaggio": "Vendite presenti ma prodotto non trovato", "azione": "Importa listino/prodotti aggiornati o crea prodotto"})
+    status = await data_status_payload()
+    if status.get("sales_data_delay_days") is not None and status["sales_data_delay_days"] > 2:
+        items.insert(0, {
+            "tipo": "storico_vecchio",
+            "severita": "alta",
+            "codice": "",
+            "descrizione": "",
+            "messaggio": f"Ultima vendita disponibile: {status.get('latest_sales_day')} ({status['sales_data_delay_days']} giorni fa)",
+            "azione": "Importa Excel aggiornato prima di confermare ordini",
+        })
+    summary = {
+        "alta": sum(1 for i in items if i["severita"] == "alta"),
+        "media": sum(1 for i in items if i["severita"] == "media"),
+        "bassa": sum(1 for i in items if i["severita"] == "bassa"),
+        "totale": len(items),
+    }
+    return {"summary": summary, "items": items}
+
+
+@api.get("/report/giornaliero")
+async def report_giornaliero():
+    status, dashboard_data, anomaly_data, ao = await asyncio.gather(
+        data_status_payload(),
+        dashboard(),
+        anomalie(),
+        auto_order(),
+    )
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "dashboard": dashboard_data,
+        "anomalie": anomaly_data["summary"],
+        "auto_order": {
+            "righe": ao.get("n_righe", 0),
+            "totale": ao.get("totale", 0),
+            "data_riferimento_domanda": ao.get("data_riferimento_domanda"),
+            "da_controllare": (ao.get("riepilogo_stati", {}).get("CONTROLLO MANUALE", 0) or 0) + (ao.get("n_anomalie_stock", 0) or 0),
+        },
+    }
 
 
 @api.post("/vendite/import-csv-vending")
@@ -720,7 +1201,11 @@ class BulkOrdineIn(BaseModel):
 
 @api.post("/ordini/bulk")
 async def bulk_carico(body: BulkOrdineIn):
-    """Carico merce: registra multiple righe d'ordine e aggiorna giacenze."""
+    """Ricezione merce: registra il ricevuto e incrementa scorte/acquistati.
+
+    Un batch Auto-Order è solo un ordine fornitore; passa da questo endpoint
+    esclusivamente quando la merce è fisicamente arrivata.
+    """
     data = body.data or datetime.now(timezone.utc).isoformat()
     inserted = 0
     creati_prodotti = 0
@@ -745,7 +1230,7 @@ async def bulk_carico(body: BulkOrdineIn):
                 # crea prodotto minimale
                 await db.prodotti.insert_one(Prodotto(
                     codice=codice, descrizione=desc or codice,
-                    categoria="SIGARETTE" if codice.startswith("AMMS") else "ACCESSORI",
+                    categoria=_cat_from_desc(desc, codice),
                     prezzo=prezzo, acquistati=qta, giacenza_negozio=qta,
                 ).model_dump())
                 creati_prodotti += 1
@@ -837,12 +1322,12 @@ async def update_parametro(nome: str, body: ParametroIn):
 @api.get("/auto-order")
 async def auto_order():
     params = await get_params()
-    finestra_breve = max(3, min(30, int(params.get("AUTO_ORDER_FINESTRA_BREVE_GG", 10) or 10)))
-    finestra_lunga = max(finestra_breve, min(90, int(params.get("AUTO_ORDER_FINESTRA_LUNGA_GG", 30) or 30)))
-    peso_breve = max(0.0, min(1.0, float(params.get("AUTO_ORDER_PESO_BREVE", 0.70) or 0.70)))
+    finestra_breve = max(3, min(30, int(_param(params, "AUTO_ORDER_FINESTRA_BREVE_GG", 10))))
+    finestra_lunga = max(finestra_breve, min(90, int(_param(params, "AUTO_ORDER_FINESTRA_LUNGA_GG", 30))))
+    peso_breve = max(0.0, min(1.0, float(_param(params, "AUTO_ORDER_PESO_BREVE", 0.70))))
     peso_lungo = 1.0 - peso_breve
-    min_venduto_breve = max(0, int(params.get("AUTO_ORDER_MIN_VENDUTO_BREVE", 2) or 2))
-    min_venduto_lungo = max(0, int(params.get("AUTO_ORDER_MIN_VENDUTO_LUNGO", 4) or 4))
+    min_venduto_breve = max(0, int(_param(params, "AUTO_ORDER_MIN_VENDUTO_BREVE", 2)))
+    min_venduto_lungo = max(0, int(_param(params, "AUTO_ORDER_MIN_VENDUTO_LUNGO", 4)))
 
     # La finestra segue l'ultima giornata realmente disponibile nei dati. Un file
     # importato qualche giorno dopo la chiusura contabile non deve produrre zero
@@ -917,9 +1402,9 @@ async def auto_order():
         if r.get("_id") is not None
     }
 
-    fatt = max(1.0, float(params.get("AUTO_ORDER_FATTORE_SICUREZZA", 1.15) or 1.15))
-    gg_min = max(1.0, float(params.get("GIORNI_COPERTURA_MIN", 7) or 7))
-    gg_target = max(gg_min, float(params.get("GIORNI_COPERTURA_TARGET", 14) or 14))
+    fatt = max(1.0, float(_param(params, "AUTO_ORDER_FATTORE_SICUREZZA", 1.15)))
+    gg_min = max(1.0, float(_param(params, "GIORNI_COPERTURA_MIN", 7)))
+    gg_target = max(gg_min, float(_param(params, "GIORNI_COPERTURA_TARGET", 14)))
 
     proposte = []
     esclusi = []
@@ -929,11 +1414,11 @@ async def auto_order():
         giac_vending = int(p.get("giacenza_vending", 0) or 0)
         venduti_vending = int(p.get("venduti_vending", 0) or 0)
         giac_tot = giac_negozio + giac_vending
-        # RIMANENZE nel foglio è acquisti - vendite negozio. Per ottenere i pezzi
-        # fisicamente liberi vanno sottratti venduti e giacenza della vending.
-        magazzino_reale_lordo = giac_negozio - venduti_vending - giac_vending
+        # giacenza_negozio è già stock fisico libero: l'import Excel normalizza
+        # RIMANENZE una sola volta, quindi Auto-Order non sottrae più la vending.
+        magazzino_reale_lordo = giac_negozio
         magazzino_reale = max(0, magazzino_reale_lordo)
-        anomalia = magazzino_reale_lordo < 0
+        anomalia = giac_negozio < 0
 
         # DB_STORICO_VEND è la fonte giornaliera importata; le vendite registrate
         # nell'app sono il fallback. Non si sommano per evitare doppi conteggi.
@@ -964,11 +1449,12 @@ async def auto_order():
         stato = "NESSUN ORDINE"
         motivo = "NESSUNA VENDITA RECENTE"
         qta = 0
-        if not movimento_sufficiente:
-            if anomalia:
-                stato = "ANOMALIA"
-                motivo = f"STOCK LORDO NEGATIVO ({magazzino_reale_lordo}) · VERIFICARE I DATI"
-            elif magazzino_reale == 0 and venduto_lungo > 0:
+        if anomalia:
+            stato = "ANOMALIA"
+            motivo = f"STOCK NEGOZIO FISICO NEGATIVO ({giac_negozio}) · VERIFICARE IMPORT/MOVIMENTI"
+            qta = 0
+        elif not movimento_sufficiente:
+            if magazzino_reale == 0 and venduto_lungo > 0:
                 stato = "CONTROLLO MANUALE"
                 motivo = f"SCORTA ZERO MA MOVIMENTO BASSO ({venduto_breve}/{venduto_lungo} in {finestra_breve}/{finestra_lunga}gg)"
             elif venduto_lungo > 0:
@@ -999,6 +1485,8 @@ async def auto_order():
             "magazzino_reale": magazzino_reale,
             "venduto_periodo": venduto_breve,
             "finestra_domanda_gg": finestra_breve,
+            "venduto_breve": venduto_breve,
+            "venduto_lungo": venduto_lungo,
             "venduto_10gg": venduto_breve,
             "venduto_30gg": venduto_lungo,
             "fonte_domanda": fonte_domanda,
@@ -1015,7 +1503,7 @@ async def auto_order():
             "prezzo": p.get("prezzo", 0),
             "totale": round(qta * (p.get("prezzo") or 0), 2),
         }
-        if stato == "ORDINA ORA":
+        if stato == "ORDINA ORA" and not anomalia and qta > 0:
             proposte.append(row)
         else:
             esclusi.append(row)
@@ -1028,7 +1516,7 @@ async def auto_order():
     for row in esclusi:
         riepilogo_stati[row["stato"]] = riepilogo_stati.get(row["stato"], 0) + 1
     n_anomalie_stock = sum(1 for row in [*proposte, *esclusi] if row["anomalia"])
-    return {
+    response = {
         "righe": proposte,
         "esclusi": esclusi,
         "totale": tot,
@@ -1045,30 +1533,79 @@ async def auto_order():
         "data_riferimento_domanda": reference_day.isoformat(),
         "giorni_ritardo_dati": max(0, (datetime.now(timezone.utc).date() - reference_day).days),
     }
+    response["snapshot_key"] = _auto_order_snapshot_key(response)
+    return response
 
 
 @api.post("/auto-order/conferma")
-async def conferma_auto_order():
-    """Trasforma le proposte in ordini reali (storico_ordini) e aggiorna scorte."""
+async def conferma_auto_order(
+    body: Optional[AutoOrderConfermaIn] = None,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+):
+    """Crea un batch ordine fornitore idempotente senza caricare magazzino.
+
+    La ricezione fisica della merce resta su POST /api/ordini/bulk, che registra
+    storico_ordini e incrementa giacenza/acquistati quando il carico arriva.
+    """
     ao = await auto_order()
+    header_key = idempotency_key if isinstance(idempotency_key, str) else None
+    batch_key = (header_key or (body.idempotency_key if body else None) or (body.batch_key if body else None) or ao["snapshot_key"]).strip()
+    if not batch_key:
+        batch_key = ao["snapshot_key"]
+    existing = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
+    if existing:
+        return {**existing, "duplicate": True}
+
+    righe = [
+        r for r in ao["righe"]
+        if r.get("stato") == "ORDINA ORA" and not r.get("anomalia") and int(r.get("qta_da_ordinare") or 0) > 0
+    ]
     oggi = datetime.now(timezone.utc).isoformat()
-    inserted = 0
-    for r in ao["righe"]:
-        o = OrdineStorico(
-            data=oggi,
-            file_sorgente="AUTO-ORDER",
-            codice=r["codice"],
-            descrizione=r["descrizione"],
-            quantita=r["qta_da_ordinare"],
-            prezzo=r["prezzo"],
-        )
-        await db.storico_ordini.insert_one(o.model_dump())
-        await db.prodotti.update_one(
-            {"codice": r["codice"]},
-            {"$inc": {"giacenza_negozio": r["qta_da_ordinare"], "acquistati": r["qta_da_ordinare"]}},
-        )
-        inserted += 1
-    return {"ok": True, "ordinati": inserted, "totale": ao["totale"]}
+    batch = {
+        "id": str(uuid.uuid4()),
+        "batch_key": batch_key,
+        "snapshot_key": ao["snapshot_key"],
+        "data": oggi,
+        "stato": "CREATO",
+        "origine": "AUTO-ORDER",
+        "ordinati": len(righe),
+        "totale": round(sum(r.get("totale", 0) or 0 for r in righe), 2),
+        "data_riferimento_domanda": ao.get("data_riferimento_domanda"),
+    }
+    inserted_ids = []
+    try:
+        try:
+            await db.ordini_fornitore.insert_one(batch)
+        except DuplicateKeyError:
+            existing = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
+            if existing:
+                return {**existing, "duplicate": True}
+            raise
+        for index, r in enumerate(righe, start=1):
+            doc = {
+                "id": str(uuid.uuid4()),
+                "batch_key": batch_key,
+                "riga": index,
+                "codice": r["codice"],
+                "descrizione": r.get("descrizione", ""),
+                "categoria": r.get("categoria", ""),
+                "quantita": int(r["qta_da_ordinare"]),
+                "prezzo": float(r.get("prezzo") or 0),
+                "totale": round(float(r.get("totale") or 0), 2),
+                "motivo": r.get("motivo", ""),
+            }
+            await db.ordini_fornitore_righe.insert_one(doc)
+            inserted_ids.append(doc["id"])
+    except Exception as exc:
+        try:
+            if inserted_ids:
+                await db.ordini_fornitore_righe.delete_many({"id": {"$in": inserted_ids}})
+            await db.ordini_fornitore.delete_one({"batch_key": batch_key})
+        except Exception:
+            logging.exception("auto-order rollback failed for batch %s", batch_key)
+        raise HTTPException(500, f"Creazione batch Auto-Order annullata: {exc}")
+
+    return {"ok": True, **batch, "duplicate": False}
 
 
 # ------------------------- Auto-Order PDF -------------------------
@@ -1117,7 +1654,7 @@ async def auto_order_pdf(
             Paragraph(xml_escape(r["descrizione"] or ""), cell_s),
             (r["categoria"] or "")[:3],
             str(r.get("magazzino_reale_lordo", r.get("magazzino_reale", 0))),
-            f"{r.get('venduto_10gg', r.get('venduto_periodo', 0))}/{r.get('venduto_30gg', 0)}",
+            f"{r.get('venduto_breve', r.get('venduto_10gg', r.get('venduto_periodo', 0)))}/{r.get('venduto_lungo', r.get('venduto_30gg', 0))}",
             "-" if r.get("copertura_gg") is None else f"{r['copertura_gg']:.2f}",
             str(r["qta_da_ordinare"]),
             f"€ {r['totale']:.2f}",
@@ -1150,7 +1687,7 @@ async def auto_order_pdf(
     ]))
     story.append(tbl)
     footer = Paragraph(
-        "Calcolo Auto-Order: domanda ponderata {peso_breve:.0f}% ultimi {breve}gg + {peso_lungo:.0f}% ultimi {lungo}gg fino al {riferimento}; magazzino reale = rimanenze negozio - venduti vending - giacenza vending; ordine sotto {copertura}gg verso target {target}gg con sicurezza x{fattore:.2f}. Il PDF contiene solo ORDINA ORA.".format(
+        "Calcolo Auto-Order: domanda ponderata {peso_breve:.0f}% ultimi {breve}gg + {peso_lungo:.0f}% ultimi {lungo}gg fino al {riferimento}; giacenza negozio = stock fisico libero gia normalizzato dall'import; ordine sotto {copertura}gg verso target {target}gg con sicurezza x{fattore:.2f}. Il PDF contiene solo ORDINA ORA.".format(
             peso_breve=float(ao.get("peso_breve", 0.70)) * 100,
             peso_lungo=float(ao.get("peso_lungo", 0.30)) * 100,
             breve=int(ao.get("finestra_breve_gg", 10)),
@@ -1316,11 +1853,13 @@ async def import_excel(file: UploadFile = File(...)):
                 "descrizione": str(desc).strip(),
                 "acquistati": int(row[2] or 0),
                 "venduti_negozio": int(row[3] or 0),
-                "giacenza_negozio": int(row[6] or 0),
                 "prezzo": float(row[7] or 0),
                 "giacenza_vending": int(row[13] or 0),
                 "venduti_vending": int(row[17] or 0),
             }
+            data_p["giacenza_negozio"] = physical_shop_stock_from_excel(
+                row[6], data_p["giacenza_vending"], data_p["venduti_vending"]
+            )
             insert_defaults = Prodotto(
                 codice=data_p["codice"],
                 descrizione=data_p["descrizione"],
@@ -1339,11 +1878,35 @@ async def import_excel(file: UploadFile = File(...)):
 
 
 # ------------------------- Import Excel FULL (multi-sheet sync) -------------------------
+ELECTRONIC_INHALATION_CATEGORY = "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA"
+ELECTRONIC_INHALATION_BRANDS = ("ELFBAR", "ELFLIQ", "LOST MARY", "KIWI", "ELFA", "ELFX", "VAPORESSO")
+
+
+def _is_electronic_inhalation(desc: str) -> bool:
+    d = " ".join((desc or "").upper().split())
+    return any(brand in d for brand in ELECTRONIC_INHALATION_BRANDS)
+
+
+def _electronic_inhalation_filter() -> Dict[str, Any]:
+    return {"$or": [{"descrizione": {"$regex": re.escape(brand), "$options": "i"}} for brand in ELECTRONIC_INHALATION_BRANDS]}
+
+
+async def _apply_electronic_inhalation_categories() -> int:
+    """Reclassify ELFBAR/ELFLIQ/LOST MARY/KIWI even after ADM fallback to ACCESSORI."""
+    result = await db.prodotti.update_many(
+        _electronic_inhalation_filter(),
+        {"$set": {"categoria": ELECTRONIC_INHALATION_CATEGORY}},
+    )
+    return int(result.modified_count or 0)
+
+
 def _cat_from_desc(desc: str, code: str) -> str:
     d = (desc or "").upper()
-    for kw in ("ELFBAR", "LOST MARY", "VAPORESSO", "POD", "KIT", "MG/ML", "LIQUID", "ELFLIQ", "ELFA", "TEREA"):
+    if _is_electronic_inhalation(d):
+        return ELECTRONIC_INHALATION_CATEGORY
+    for kw in ("VAPORESSO", "POD", "KIT", "MG/ML", "LIQUID", "TEREA"):
         if kw in d:
-            return "SIGARETTE ELETTRONICHE"
+            return "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE"
     if str(code or "").startswith("AMMS"):
         return "SIGARETTE"
     return "ACCESSORI"
@@ -1382,16 +1945,19 @@ async def _import_prodotti(ws) -> Dict[str, int]:
                 "categoria": _cat_from_desc(desc, codice_s),
                 "acquistati": int(row[2] or 0),
                 "venduti_negozio": int(row[3] or 0),
-                "giacenza_negozio": int(row[6] or 0),
                 "prezzo": float(row[7] or 0),
                 "giacenza_vending": int(row[13] or 0),
                 "venduti_vending": int(row[17] or 0),
             }
+            data_p["giacenza_negozio"] = physical_shop_stock_from_excel(
+                row[6], data_p["giacenza_vending"], data_p["venduti_vending"]
+            )
             operations.append(UpdateOne({"codice": codice_s}, {"$set": data_p}, upsert=True))
         except Exception:
             err += 1
     result = await _bulk_upsert(db.prodotti, operations)
     result["errori"] += err
+    result["elettroniche"] = await _apply_electronic_inhalation_categories()
     return result
 
 
@@ -1635,6 +2201,11 @@ async def import_excel_full(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(422, f"File non leggibile: {e}")
 
+    backup = await create_backup_snapshot(
+        f"Prima import {file.filename or 'Excel'}",
+        "pre-import",
+    )
+
     fogli_trovati: List[str] = []
     fogli_mancanti: List[str] = []
     report: Dict[str, Any] = {}
@@ -1667,14 +2238,17 @@ async def import_excel_full(file: UploadFile = File(...)):
         "db_storico_vend_righe": report.get("DB_STORICO_VEND", {}).get("inseriti", 0),
         "db_storico_vending_ext_righe": report.get("DB_STORICO_VENDING_EXT", {}).get("inseriti", 0),
     }
-    return {
+    response = {
         "ok": True,
         "file": file.filename,
+        "backup_id": backup["id"],
         "fogli_trovati": fogli_trovati,
         "fogli_mancanti": fogli_mancanti,
         "dettaglio": report,
         "totali": totali,
     }
+    await record_import_history(file.filename or "Excel", response, backup["id"])
+    return response
 
 
 # ------------------------- Register -------------------------
@@ -1697,11 +2271,6 @@ app.add_middleware(
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s - %(message)s')
-
-
-@app.on_event("shutdown")
-async def _shutdown():
-    client.close()
 
 
 # ------------------------------------------------------------------

@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { api, API } from "../lib/api";
+import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 export default function AutoOrder() {
   const [data, setData] = useState(null);
@@ -11,13 +12,21 @@ export default function AutoOrder() {
   const [error, setError] = useState("");
   const [categoria, setCategoria] = useState("");
   const [mostraEsclusi, setMostraEsclusi] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmedKeys, setConfirmedKeys] = useState(() => new Set());
   const allRighe = data?.righe || [];
   const allEsclusi = data?.esclusi || [];
+  const categorieDisponibili = Array.from(new Set([...allRighe, ...allEsclusi].map(r => r.categoria).filter(Boolean))).sort();
   const ordiniCategoria = categoria ? allRighe.filter(r => r.categoria === categoria) : allRighe;
   const esclusiCategoria = categoria ? allEsclusi.filter(r => r.categoria === categoria) : allEsclusi;
   const righeCategoria = mostraEsclusi ? [...ordiniCategoria, ...esclusiCategoria] : ordiniCategoria;
   const totaleCategoria = ordiniCategoria.reduce((totale, r) => totale + (r.totale || 0), 0);
   const coperturaMin = data?.parametri?.GIORNI_COPERTURA_MIN || 7;
+  const breveGg = data?.finestra_breve_gg || 10;
+  const lungoGg = data?.finestra_lunga_gg || 30;
+  const snapshotKey = data?.snapshot_key || "";
+  const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(snapshotKey));
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
     : null;
@@ -26,7 +35,7 @@ export default function AutoOrder() {
     searchFields: ["codice", "descrizione", "categoria", "stato", "motivo"],
   });
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -36,20 +45,28 @@ export default function AutoOrder() {
       const timedOut = err.code === "ECONNABORTED";
       const message = timedOut
         ? "Il calcolo sta richiedendo troppo tempo. Riprova tra qualche secondo."
-        : "Impossibile calcolare gli ordini. Controlla la connessione e riprova.";
+        : apiErrorMessage(err, "Impossibile calcolare gli ordini. Controlla la connessione e riprova.");
       setError(message);
       toast.error(message);
     } finally {
       setLoading(false);
     }
-  };
-  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => { load(); }, [load]);
 
   const conferma = async () => {
-    if (!window.confirm(`Confermi ${data.n_righe} ordini per un totale di € ${data.totale}?`)) return;
-    const r = await api.post("/auto-order/conferma");
-    toast.success(`${r.data.ordinati} ordini creati`);
-    load();
+    setConfirming(true);
+    try {
+      const r = await api.post("/auto-order/conferma", { idempotency_key: snapshotKey });
+      if (snapshotKey) setConfirmedKeys(keys => new Set(keys).add(snapshotKey));
+      toast.success(`${r.data.ordinati} righe ordine fornitore ${r.data.duplicate ? "gia presenti" : "create"}`);
+      setConfirmOpen(false);
+      load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore durante la conferma Auto-Order"));
+    } finally {
+      setConfirming(false);
+    }
   };
 
   const downloadPdf = async () => {
@@ -62,11 +79,18 @@ export default function AutoOrder() {
 
   return (
     <Layout title="Auto-Order" subtitle="fabbisogno reale basato sulle vendite recenti">
+      <div className="mb-5 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 text-sm md:grid-cols-4">
+        <div><b>1. Import Excel</b><br/><span className="text-slate-500">Aggiorna dati in Parametri.</span></div>
+        <div><b>2. Anomalie</b><br/><span className="text-slate-500">Controlla stock e codici.</span></div>
+        <div><b>3. Ordine</b><br/><span className="text-slate-500">PDF o conferma fornitore.</span></div>
+        <div><b>4. Carico</b><br/><span className="text-slate-500">Aggiorna magazzino quando arriva.</span></div>
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <KpiCard label={categoria ? "Ordini selezionati" : "Ordina ora"} value={formatNum(ordiniCategoria.length)} />
         <KpiCard label={categoria ? "Totale selezione" : "Totale ordine"} value={formatEur(totaleCategoria)} tone="success" />
         <KpiCard label="Da controllare" value={formatNum((data?.riepilogo_stati?.["CONTROLLO MANUALE"] || 0) + (data?.n_anomalie_stock || 0))} tone="warning" />
-        <KpiCard label="Domanda ponderata" value={`${data?.finestra_breve_gg || 10}/${data?.finestra_lunga_gg || 30}gg`} />
+        <KpiCard label="Domanda ponderata" value={`${breveGg}/${lungoGg}gg`} />
       </div>
 
       <div className="flex flex-wrap gap-3 mb-4">
@@ -74,8 +98,8 @@ export default function AutoOrder() {
         <button data-testid="ao-pdf" onClick={downloadPdf} disabled={!ordiniCategoria.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF {categoria ? "selezione" : "fornitore"}
         </button>
-        <button data-testid="ao-conferma" onClick={conferma} disabled={!allRighe.length || Boolean(categoria)} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
-          Conferma tutti gli ordini
+        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+          {confirming ? "Conferma..." : alreadyConfirmed ? "Ordine confermato" : "Conferma tutti gli ordini"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
           {mostraEsclusi ? "Nascondi esclusi" : `Mostra esclusi (${esclusiCategoria.length})`}
@@ -90,8 +114,8 @@ export default function AutoOrder() {
       )}
 
       <div data-testid="ao-calculation-note" className={`mb-4 rounded-md border px-4 py-3 text-sm ${data?.giorni_ritardo_dati > 2 ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
-        Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {data?.finestra_breve_gg || 10}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {data?.finestra_lunga_gg || 30}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
-        Il magazzino reale è <b>rimanenze negozio − venduti vending − giacenza vending</b>. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
+        Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
+        Il magazzino reale è la <b>giacenza negozio fisica libera</b> normalizzata dall'import. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
         {data?.giorni_ritardo_dati > 2 ? <span className="block mt-1 font-semibold">Attenzione: l'ultima vendita importata risale a {data.giorni_ritardo_dati} giorni fa. Importa il file Excel aggiornato per un ordine più preciso.</span> : null}
       </div>
 
@@ -101,9 +125,7 @@ export default function AutoOrder() {
           Articoli da visualizzare e stampare
           <select data-testid="ao-filter-cat" value={categoria} onChange={e => setCategoria(e.target.value)} className="min-w-56 border border-slate-300 bg-white text-slate-900 rounded-md px-3 py-2 text-sm font-normal normal-case tracking-normal">
             <option value="">Tutte le categorie</option>
-            <option value="SIGARETTE">Solo sigarette</option>
-            <option value="SIGARETTE ELETTRONICHE">Solo sigarette elettroniche</option>
-            <option value="ACCESSORI">Solo accessori</option>
+            {categorieDisponibili.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </label>
         <span className="text-sm text-slate-500 self-center sm:pb-2">{righe.length} risultati</span>
@@ -121,8 +143,8 @@ export default function AutoOrder() {
                 <Th sortKey="venduti_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. vending</Th>
                 <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. vend.</Th>
                 <Th sortKey="magazzino_reale_lordo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Mag. reale</Th>
-                <Th sortKey="venduto_10gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. 10gg</Th>
-                <Th sortKey="venduto_30gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. 30gg</Th>
+                <Th sortKey="venduto_breve" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. {breveGg}gg</Th>
+                <Th sortKey="venduto_lungo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. {lungoGg}gg</Th>
                 <Th sortKey="domanda_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Dom./gg</Th>
                 <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. (gg)</Th>
                 <Th sortKey="target_scorta" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Target</Th>
@@ -144,8 +166,8 @@ export default function AutoOrder() {
                   <td className="font-mono text-right">{formatNum(r.venduti_vending ?? 0)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending ?? 0)}</td>
                   <td className={`font-mono text-right ${(r.magazzino_reale_lordo||0) < 0 ? 'text-red-600 font-bold' : (r.magazzino_reale_lordo||0) === 0 ? 'text-amber-700 font-bold' : ''}`}>{formatNum(r.magazzino_reale_lordo ?? 0)}</td>
-                  <td className="font-mono text-right">{formatNum(r.venduto_10gg)}</td>
-                  <td className="font-mono text-right">{formatNum(r.venduto_30gg)}</td>
+                  <td className="font-mono text-right">{formatNum(r.venduto_breve ?? r.venduto_10gg)}</td>
+                  <td className="font-mono text-right">{formatNum(r.venduto_lungo ?? r.venduto_30gg)}</td>
                   <td className="font-mono text-right">{formatNum(r.domanda_gg, 2)}</td>
                   <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
@@ -161,6 +183,17 @@ export default function AutoOrder() {
           </table>
         </div>
       </Card>
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Confermare Auto-Order?"
+        confirmLabel="Crea ordine fornitore"
+        loading={confirming}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={conferma}
+      >
+        <p>Verranno create <b>{formatNum(data?.n_righe)}</b> righe ordine fornitore per un totale di <b>{formatEur(data?.totale)}</b>.</p>
+        <p className="mt-2 text-slate-600">Questa azione non carica il magazzino: le giacenze aumentano solo dalla pagina <b>Carico Merce</b> quando la merce arriva fisicamente.</p>
+      </ConfirmDialog>
     </Layout>
   );
 }

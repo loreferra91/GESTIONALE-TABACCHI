@@ -13,6 +13,8 @@ import Cassa from "./pages/Cassa";
 import Parametri from "./pages/Parametri";
 import CassaRapida from "./pages/CassaRapida";
 import Carico from "./pages/Carico";
+import Anomalie from "./pages/Anomalie";
+import Report from "./pages/Report";
 
 function App() {
   return (
@@ -26,8 +28,10 @@ function App() {
           <Route path="/vending" element={<Vending />} />
           <Route path="/vendite" element={<Vendite />} />
           <Route path="/auto-order" element={<AutoOrder />} />
+          <Route path="/anomalie" element={<Anomalie />} />
           <Route path="/carico" element={<Carico />} />
           <Route path="/ordini" element={<Ordini />} />
+          <Route path="/report" element={<Report />} />
           <Route path="/cassa" element={<Cassa />} />
           <Route path="/cassa-rapida" element={<CassaRapida />} />
           <Route path="/parametri" element={<Parametri />} />
