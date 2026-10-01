@@ -42,8 +42,8 @@ export default function Vending() {
   };
 
   const cellTone = (r) => {
-    if (r.esito === "DA CARICARE" || r.esito === "DA CARICARE PARZIALE") return "bg-red-50 border-red-200";
-    if (r.esito === "MAGAZZINO ESAURITO") return "bg-amber-50 border-amber-300";
+    if (r.esito === "DA CARICARE") return "bg-red-50 border-red-200";
+    if (r.esito === "MAGAZZINO ESAURITO" || r.esito === "MAGAZZINO INSUFFICIENTE") return "bg-amber-50 border-amber-300";
     if (r.esito === "PIENO") return "bg-emerald-50 border-emerald-200";
     if (r.esito === "OLTRE CAPACITA") return "bg-amber-50 border-amber-200";
     return "bg-slate-50 border-slate-200";
@@ -113,7 +113,7 @@ export default function Vending() {
                   <td className="font-mono text-right">{r.capacita_max}</td>
                   <td className="font-mono text-right">{r.soglia_minima}</td>
                   <td className="font-mono text-right font-semibold">{r.proposta || "—"}</td>
-                  <td><Badge tone={r.esito === "PIENO" ? "ok" : r.esito.startsWith("DA CARICARE") ? "error" : "warning"}>{r.esito}</Badge></td>
+                  <td><Badge tone={r.esito === "PIENO" ? "ok" : r.esito === "DA CARICARE" ? "error" : "warning"}>{r.esito}</Badge></td>
                   <td className="text-right">
                     {r.proposta > 0 && (
                       <button data-testid={`vending-rica-${r.colonna}`} onClick={() => rica(r)} className="bg-slate-900 text-white rounded-md px-3 py-1 text-xs hover:bg-slate-800 transition-colors">Ricarica</button>

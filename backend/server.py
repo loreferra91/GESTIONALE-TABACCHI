@@ -1075,22 +1075,30 @@ async def list_vending():
         if p.get("codice")
     }
     # arricchisci con esito/proposta
+    # Invariante ricarica vending:
+    # - una proposta automatica deve portare la colonna fino alla capacità massima;
+    # - il magazzino usato qui è la giacenza_negozio fisica libera, già al netto
+    #   delle vendite/import e delle quantità presenti in vending;
+    # - la ricarica scatta quando la colonna è alla/sotto soglia minima;
+    # - se non ci sono abbastanza pezzi per completare la ricarica, non proponiamo
+    #   quantità parziali: lasciamo fabbisogno/giacenza_magazzino come diagnosi.
     out = []
     for d in docs:
         cap = d.get("capacita_max", 5) or 5
         giac = d.get("giacenza", 0) or 0
         soglia = d.get("soglia_minima", 2) or 2
-        fabbisogno = max(0, cap - giac) if giac < soglia else 0
+        fabbisogno = max(0, cap - giac)
+        sotto_soglia = giac <= soglia
         disponibile = disponibilita_per_codice.get(d.get("codice"), 0)
-        proposta = min(fabbisogno, disponibile)
+        proposta = fabbisogno if sotto_soglia and fabbisogno > 0 and disponibile >= fabbisogno else 0
         # esito
         if giac >= cap:
             esito = "PIENO" if giac == cap else "OLTRE CAPACITA"
-        elif giac < soglia:
+        elif sotto_soglia and fabbisogno > 0:
             if disponibile <= 0:
                 esito = "MAGAZZINO ESAURITO"
-            elif proposta < fabbisogno:
-                esito = "DA CARICARE PARZIALE"
+            elif disponibile < fabbisogno:
+                esito = "MAGAZZINO INSUFFICIENTE"
             else:
                 esito = "DA CARICARE"
         else:
@@ -1129,9 +1137,22 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
     codice = v.get("codice")
     prodotto = await db.prodotti.find_one({"codice": codice}) if codice else None
     disponibile = max(0, int((prodotto or {}).get("giacenza_negozio", 0) or 0))
+    fabbisogno = max(0, capacita - giacenza)
+    if fabbisogno <= 0:
+        raise HTTPException(409, "Colonna già alla capacità massima")
     if disponibile <= 0:
         raise HTTPException(409, "Magazzino negozio esaurito: impossibile ricaricare la vending")
-    qta_caricata = min(qta, max(0, capacita - giacenza), disponibile)
+    if disponibile < fabbisogno:
+        raise HTTPException(
+            409,
+            f"Magazzino insufficiente: servono {fabbisogno} pezzi per riempire la colonna, disponibili {disponibile}",
+        )
+    if qta < fabbisogno:
+        raise HTTPException(
+            422,
+            f"La ricarica vending deve arrivare alla capacità massima: inserisci almeno {fabbisogno} pezzi",
+        )
+    qta_caricata = fabbisogno
     nuovo = giacenza + qta_caricata
     await db.vending.update_one({"id": v_id}, {"$set": {"giacenza": nuovo}})
     # scala dal magazzino negozio
