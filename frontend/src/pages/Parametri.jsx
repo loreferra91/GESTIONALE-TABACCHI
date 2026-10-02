@@ -6,6 +6,43 @@ import { toast } from "sonner";
 import { UploadSimple, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function isValidIsoDate(year, month, day) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function openingDateToIso(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return "";
+
+  const compact = String(Math.trunc(numericValue));
+  if (/^\d{8}$/.test(compact)) {
+    const day = Number(compact.slice(0, 2));
+    const month = Number(compact.slice(2, 4));
+    const year = Number(compact.slice(4));
+    if (isValidIsoDate(year, month, day)) {
+      return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  // Excel serial dates use 30/12/1899 as day zero.
+  if (Number.isInteger(numericValue) && numericValue > 0 && numericValue < 100000) {
+    return new Date(Date.UTC(1899, 11, 30) + numericValue * DAY_MS).toISOString().slice(0, 10);
+  }
+
+  return "";
+}
+
+function isoDateToCompactNumber(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const [, year, month, day] = match;
+  if (!isValidIsoDate(Number(year), Number(month), Number(day))) return null;
+  return Number(`${day}${month}${year}`);
+}
+
 export default function Parametri() {
   const [rows, setRows] = useState([]);
   const [importing, setImporting] = useState(false);
@@ -233,17 +270,31 @@ export default function Parametri() {
                   <td className="font-mono font-semibold">{p.nome}</td>
                   <td className="text-slate-600">{p.descrizione}</td>
                   <td className="font-mono text-right">
-                    <input
-                      data-testid={`param-input-${p.nome}`}
-                      type="number"
-                      step="0.01"
-                      defaultValue={p.valore}
-                      className="border rounded-md px-3 py-1 text-sm font-mono w-32 text-right"
-                      onBlur={(e) => {
-                        const v = parseFloat(e.target.value);
-                        if (!Number.isNaN(v) && v !== Number(p.valore)) update(p.nome, v);
-                      }}
-                    />
+                    {p.nome === "DATA_APERTURA" ? (
+                      <input
+                        data-testid={`param-input-${p.nome}`}
+                        type="date"
+                        defaultValue={openingDateToIso(p.valore)}
+                        aria-label="Data apertura attività"
+                        className="border rounded-md px-3 py-1 text-sm font-mono w-40 text-right"
+                        onBlur={(e) => {
+                          const v = isoDateToCompactNumber(e.target.value);
+                          if (v !== null && e.target.value !== openingDateToIso(p.valore)) update(p.nome, v);
+                        }}
+                      />
+                    ) : (
+                      <input
+                        data-testid={`param-input-${p.nome}`}
+                        type="number"
+                        step="0.01"
+                        defaultValue={p.valore}
+                        className="border rounded-md px-3 py-1 text-sm font-mono w-32 text-right"
+                        onBlur={(e) => {
+                          const v = parseFloat(e.target.value);
+                          if (!Number.isNaN(v) && v !== Number(p.valore)) update(p.nome, v);
+                        }}
+                      />
+                    )}
                   </td>
                   <td></td>
                 </tr>
