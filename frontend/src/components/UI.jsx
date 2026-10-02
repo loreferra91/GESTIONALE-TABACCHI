@@ -57,6 +57,25 @@ export function formatEur(v) {
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(Number(v) || 0);
 }
 
+export function formatDashboardEur(v) {
+  if (v === null || v === undefined) return "—";
+  return new Intl.NumberFormat("it-IT", {
+    style: "currency",
+    currency: "EUR",
+    useGrouping: "always",
+  }).format(Number(v) || 0);
+}
+
+export function formatSignedEur(v) {
+  if (v === null || v === undefined) return "—";
+  return new Intl.NumberFormat("it-IT", {
+    style: "currency",
+    currency: "EUR",
+    useGrouping: "always",
+    signDisplay: "exceptZero",
+  }).format(Number(v) || 0);
+}
+
 export function formatNum(v) {
   if (v === null || v === undefined) return "0";
   return new Intl.NumberFormat("it-IT").format(Number(v) || 0);

@@ -1919,6 +1919,80 @@ async def pivot():
 
 
 # ------------------------- Dashboard KPIs -------------------------
+def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -> List[tuple]:
+    """Estrae importo e pagamento dalle due sorgenti vending compatibili."""
+    values = []
+    for document in documents:
+        if legacy_raw:
+            raw = document.get("raw") or []
+            if len(raw) < 12:
+                continue
+            contabilizzata = str(raw[15] if len(raw) > 15 else "").strip().upper()
+            esito = str(raw[16] if len(raw) > 16 else "").strip().upper()
+            if contabilizzata and contabilizzata not in {"SI", "SÌ", "YES", "1", "TRUE"}:
+                continue
+            if "ANNULL" in esito:
+                continue
+            importo = raw[7]
+            pagamento = raw[11]
+        else:
+            importo = document.get("importo")
+            pagamento = document.get("pagamento")
+
+        try:
+            amount = float(str(importo or 0).strip().replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+        values.append((amount, str(pagamento or "").strip()))
+    return values
+
+
+def _calculate_dashboard_balances(
+    vending_payments: List[tuple], saldo_cassa: float
+) -> Dict[str, float]:
+    """Calcola in un solo punto i saldi monetari esposti dalla dashboard."""
+    cash = 0.0
+    electronic = 0.0
+    for amount, payment_method in vending_payments:
+        normalized_method = unicodedata.normalize("NFKD", payment_method).encode("ascii", "ignore").decode().upper()
+        if not normalized_method or "CONTANT" in normalized_method:
+            cash += amount
+        else:
+            # Il modello prevede due soli bucket: ogni metodo non-contante
+            # valorizzato (Carte, PagoBancomat, POS, ecc.) resta elettronico.
+            # I valori legacy vuoti seguono il default storico CONTANTI dell'app.
+            electronic += amount
+
+    cash = round(cash, 2)
+    electronic = round(electronic, 2)
+    total = round(cash + electronic, 2)
+    saldo_cassa = round(float(saldo_cassa or 0), 2)
+    return {
+        "saldoVendingTotale": total,
+        "saldoVendingContanti": cash,
+        "saldoVendingElettronico": electronic,
+        "saldoCassa": saldo_cassa,
+        "differenzaCassaVendingContanti": round(saldo_cassa - cash, 2),
+    }
+
+
+async def _dashboard_balances(saldo_cassa: float) -> Dict[str, float]:
+    # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
+    # pagamento. Le vendite dell'app sono il fallback per database/import meno
+    # recenti che non hanno ancora lo storico vending esteso.
+    historical_docs = await db.db_storico_vending_ext.find(
+        {}, {"_id": 0, "raw": 1}
+    ).to_list(None)
+    payments = _vending_payment_values(historical_docs, legacy_raw=True)
+    if not payments:
+        app_docs = await db.vendite.find(
+            {"canale": {"$regex": "^VENDING$", "$options": "i"}},
+            {"_id": 0, "importo": 1, "pagamento": 1},
+        ).to_list(None)
+        payments = _vending_payment_values(app_docs, legacy_raw=False)
+    return _calculate_dashboard_balances(payments, saldo_cassa)
+
+
 @api.get("/dashboard")
 async def dashboard():
     pv = await pivot()
@@ -1942,6 +2016,7 @@ async def dashboard():
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
     versamenti = await _versamenti_summary()
     liquidita_residua = round(venduto_negozio_excel - versamenti["totale"], 2)
+    saldi = await _dashboard_balances(liquidita_residua)
     # vending
     vending = await list_vending()
     vend_da_caricare = sum(1 for v in vending if v["esito"] == "DA CARICARE")
@@ -1951,6 +2026,7 @@ async def dashboard():
         "totale_versamenti": versamenti["totale"],
         "liquidita_residua": liquidita_residua,
         "saldo_cassa": liquidita_residua,
+        "saldi": saldi,
         "vending_da_caricare": vend_da_caricare,
         "vending_totale": len(vending),
     }
