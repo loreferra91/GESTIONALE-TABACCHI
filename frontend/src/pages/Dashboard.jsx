@@ -113,6 +113,8 @@ export default function Dashboard() {
           value={formatDashboardEur(sales.totale_ultimo_giorno)}
           tone={variation >= 0 ? "success" : "danger"}
           detail={variation === null || variation === undefined ? "Media non disponibile" : `${variation >= 0 ? "+" : ""}${variation.toLocaleString("it-IT")}% vs media 30 gg`}
+          to="/vendite"
+          linkLabel="Inserisci vendita"
           testId="dashboard-last-sales"
         />
         <ActionCard
