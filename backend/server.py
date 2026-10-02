@@ -1972,7 +1972,7 @@ def _calculate_dashboard_balances(
         "saldoVendingContanti": cash,
         "saldoVendingElettronico": electronic,
         "saldoCassa": saldo_cassa,
-        "differenzaCassaVendingContanti": round(saldo_cassa - cash, 2),
+        "differenzaCassaVendingContanti": round(cash + saldo_cassa, 2),
     }
 
 

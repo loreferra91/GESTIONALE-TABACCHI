@@ -57,7 +57,7 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
         "saldoVendingContanti": 1200.0,
         "saldoVendingElettronico": 300.0,
         "saldoCassa": 1500.0,
-        "differenzaCassaVendingContanti": 300.0,
+        "differenzaCassaVendingContanti": 2700.0,
     }
     assert app_sales.queries == []
 
@@ -79,7 +79,7 @@ def test_uses_app_vending_sales_as_backward_compatible_fallback(monkeypatch):
     assert result["saldoVendingTotale"] == 1400.0
     assert result["saldoVendingContanti"] == 1200.0
     assert result["saldoVendingElettronico"] == 200.0
-    assert result["differenzaCassaVendingContanti"] == -200.0
+    assert result["differenzaCassaVendingContanti"] == 2200.0
     query = app_sales.queries[0][0]
     assert query["canale"]["$regex"] == "^VENDING$"
 
@@ -95,3 +95,11 @@ def test_empty_legacy_payment_uses_cash_default_without_losing_unknown_methods()
     assert result["saldoVendingTotale"] == (
         result["saldoVendingContanti"] + result["saldoVendingElettronico"]
     )
+
+
+def test_cash_difference_offsets_a_negative_cash_register_balance():
+    result = server._calculate_dashboard_balances(
+        [(3445.30, "Contanti")], -1610.62
+    )
+
+    assert result["differenzaCassaVendingContanti"] == 1834.68
