@@ -102,13 +102,12 @@ export default function Dashboard() {
   const variation = sales.variazione_pct;
   const difference = balances.differenzaCassaVendingContanti;
   const chartData = sales.serie || [];
-  const dailyAverage = chartData.length ? (sales.totale_periodo || 0) / chartData.length : null;
   const vendingToLoad = data?.vending_da_caricare || 0;
   const vendingTotal = data?.vending_totale || 0;
 
   return (
     <Layout title="Dashboard operativa" subtitle="controllo quotidiano" statusMode="compact">
-      <section className="grid grid-cols-1 gap-5 lg:grid-cols-3" aria-label="Indicatori operativi">
+      <section className="grid grid-cols-1 gap-5 lg:grid-cols-2" aria-label="Indicatori operativi">
         <ActionCard
           label={`Vendite ultimo giorno${sales.ultimo_giorno ? ` · ${formatShortDate(sales.ultimo_giorno)}` : ""}`}
           value={formatDashboardEur(sales.totale_ultimo_giorno)}
@@ -124,12 +123,6 @@ export default function Dashboard() {
           to="/vending"
           linkLabel="Apri Vending"
           testId="dashboard-vending-to-load"
-        />
-        <ActionCard
-          label="Media giornaliera 30 gg"
-          value={dailyAverage === null ? "—" : formatDashboardEur(dailyAverage)}
-          detail="media per giorno di calendario"
-          testId="dashboard-daily-average"
         />
       </section>
 
