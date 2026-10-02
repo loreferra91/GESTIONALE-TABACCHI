@@ -20,6 +20,7 @@ const NAV = [
   { to: "/ordini", label: "Storico ordini", icon: ClockCounterClockwise, testid: "nav-ordini" },
   { to: "/report", label: "Report giornaliero", icon: FileText, testid: "nav-report" },
   { to: "/versamenti", label: "Versamenti", icon: CashRegister, testid: "nav-versamenti" },
+  { to: "/prelievi-vending", label: "Prelievi Vending", icon: CashRegister, testid: "nav-prelievi-vending" },
   { to: "/parametri", label: "Parametri", icon: Gear, testid: "nav-parametri" },
 ];
 

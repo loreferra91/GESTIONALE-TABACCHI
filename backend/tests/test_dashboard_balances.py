@@ -57,6 +57,7 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
         "saldoVendingContanti": 1200.0,
         "saldoVendingElettronico": 300.0,
         "saldoCassa": 1500.0,
+        "totalePrelievi": 0.0,
         "differenzaCassaVendingContanti": 2700.0,
     }
     assert app_sales.queries == []
@@ -103,3 +104,12 @@ def test_cash_difference_offsets_a_negative_cash_register_balance():
     )
 
     assert result["differenzaCassaVendingContanti"] == 1834.68
+
+
+def test_cash_difference_subtracts_vending_withdrawals():
+    result = server._calculate_dashboard_balances(
+        [(3445.30, "Contanti")], -1610.62, 500
+    )
+
+    assert result["totalePrelievi"] == 500.0
+    assert result["differenzaCassaVendingContanti"] == 1334.68

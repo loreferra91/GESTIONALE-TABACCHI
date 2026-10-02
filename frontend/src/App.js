@@ -11,6 +11,7 @@ import AutoOrder from "./pages/AutoOrder";
 import Ordini from "./pages/Ordini";
 import Cassa from "./pages/Cassa";
 import Versamenti from "./pages/Versamenti";
+import PrelieviVending from "./pages/PrelieviVending";
 import Parametri from "./pages/Parametri";
 import CassaRapida from "./pages/CassaRapida";
 import Carico from "./pages/Carico";
@@ -35,6 +36,7 @@ function App() {
           <Route path="/report" element={<Report />} />
           <Route path="/cassa" element={<Cassa />} />
           <Route path="/versamenti" element={<Versamenti />} />
+          <Route path="/prelievi-vending" element={<PrelieviVending />} />
           <Route path="/cassa-rapida" element={<CassaRapida />} />
           <Route path="/parametri" element={<Parametri />} />
         </Routes>

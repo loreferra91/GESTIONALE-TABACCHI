@@ -207,6 +207,22 @@ class VersamentoIn(BaseModel):
     operatore: Optional[str] = ""
 
 
+class PrelievoVending(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    data: str
+    importo: float
+    descrizione: str = ""
+    operatore: str = ""
+
+
+class PrelievoVendingIn(BaseModel):
+    data: str
+    importo: float
+    descrizione: Optional[str] = ""
+    operatore: Optional[str] = ""
+
+
 class Parametro(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -228,6 +244,7 @@ BACKUP_COLLECTIONS = [
     "db_storico_vend",
     "db_storico_vending_ext",
     "versamenti",
+    "prelievi_vending",
 ]
 
 
@@ -322,6 +339,7 @@ async def on_start():
             db.import_history.create_index("id"),
             db.prodotti.create_index("ultimo_import_id"),
             db.versamenti.create_index("data"),
+            db.prelievi_vending.create_index("data"),
             db.listino_adm.create_index("adm_codice"),
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
@@ -1326,7 +1344,7 @@ async def bulk_carico(body: BulkOrdineIn):
 
 
 
-# ------------------------- Versamenti / Cassa -------------------------
+# ------------------------- Versamenti / Prelievi vending / Cassa -------------------------
 async def _versamenti_summary(limit: int = 500) -> Dict[str, Any]:
     capped_limit = _cap(limit)
     docs = await db.versamenti.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
@@ -1352,6 +1370,34 @@ async def add_versamento(m: VersamentoIn):
 @api.delete("/versamenti/{m_id}")
 async def del_versamento(m_id: str):
     await db.versamenti.delete_one({"id": m_id})
+    return {"ok": True}
+
+
+async def _prelievi_vending_summary(limit: int = 500) -> Dict[str, Any]:
+    capped_limit = _cap(limit)
+    docs = await db.prelievi_vending.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
+    all_docs = await db.prelievi_vending.find({}, {"_id": 0}).to_list(10000)
+    totale = sum(float(d.get("importo") or 0) for d in all_docs)
+    return {"movimenti": docs, "totale": round(totale, 2)}
+
+
+@api.get("/prelievi-vending")
+async def list_prelievi_vending(limit: int = 500):
+    return await _prelievi_vending_summary(limit)
+
+
+@api.post("/prelievi-vending")
+async def add_prelievo_vending(m: PrelievoVendingIn):
+    if m.importo <= 0:
+        raise HTTPException(422, "L'importo del prelievo deve essere positivo")
+    prelievo = PrelievoVending(**m.model_dump())
+    await db.prelievi_vending.insert_one(prelievo.model_dump())
+    return prelievo.model_dump()
+
+
+@api.delete("/prelievi-vending/{m_id}")
+async def del_prelievo_vending(m_id: str):
+    await db.prelievi_vending.delete_one({"id": m_id})
     return {"ok": True}
 
 
@@ -1948,7 +1994,7 @@ def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -
 
 
 def _calculate_dashboard_balances(
-    vending_payments: List[tuple], saldo_cassa: float
+    vending_payments: List[tuple], saldo_cassa: float, totale_prelievi: float = 0
 ) -> Dict[str, float]:
     """Calcola in un solo punto i saldi monetari esposti dalla dashboard."""
     cash = 0.0
@@ -1967,16 +2013,18 @@ def _calculate_dashboard_balances(
     electronic = round(electronic, 2)
     total = round(cash + electronic, 2)
     saldo_cassa = round(float(saldo_cassa or 0), 2)
+    totale_prelievi = round(float(totale_prelievi or 0), 2)
     return {
         "saldoVendingTotale": total,
         "saldoVendingContanti": cash,
         "saldoVendingElettronico": electronic,
         "saldoCassa": saldo_cassa,
-        "differenzaCassaVendingContanti": round(cash + saldo_cassa, 2),
+        "totalePrelievi": totale_prelievi,
+        "differenzaCassaVendingContanti": round(cash + saldo_cassa - totale_prelievi, 2),
     }
 
 
-async def _dashboard_balances(saldo_cassa: float) -> Dict[str, float]:
+async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) -> Dict[str, float]:
     # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
     # pagamento. Le vendite dell'app sono il fallback per database/import meno
     # recenti che non hanno ancora lo storico vending esteso.
@@ -1990,7 +2038,7 @@ async def _dashboard_balances(saldo_cassa: float) -> Dict[str, float]:
             {"_id": 0, "importo": 1, "pagamento": 1},
         ).to_list(None)
         payments = _vending_payment_values(app_docs, legacy_raw=False)
-    return _calculate_dashboard_balances(payments, saldo_cassa)
+    return _calculate_dashboard_balances(payments, saldo_cassa, totale_prelievi)
 
 
 @api.get("/dashboard")
@@ -2015,8 +2063,9 @@ async def dashboard():
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
     versamenti = await _versamenti_summary()
+    prelievi = await _prelievi_vending_summary()
     liquidita_residua = round(venduto_negozio_excel - versamenti["totale"], 2)
-    saldi = await _dashboard_balances(liquidita_residua)
+    saldi = await _dashboard_balances(liquidita_residua, prelievi["totale"])
     # vending
     vending = await list_vending()
     vend_da_caricare = sum(1 for v in vending if v["esito"] == "DA CARICARE")
@@ -2024,6 +2073,7 @@ async def dashboard():
         "kpi": pv["kpi"],
         "vendite_oggi": {"importo": round(v_oggi.get("tot") or 0, 2), "pezzi": v_oggi.get("pezzi") or 0},
         "totale_versamenti": versamenti["totale"],
+        "totale_prelievi": prelievi["totale"],
         "liquidita_residua": liquidita_residua,
         "saldo_cassa": liquidita_residua,
         "saldi": saldi,

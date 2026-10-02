@@ -61,13 +61,19 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <BalanceCard
           label="Saldo cassa"
           value={saldi.saldoCassa}
           tone={saldi.saldoCassa < 0 ? "negative" : "default"}
           detail="Movimenti entrata − uscita"
           testId="saldo-cassa"
+        />
+        <BalanceCard
+          label="Prelievi"
+          value={saldi.totalePrelievi}
+          tone={saldi.totalePrelievi > 0 ? "negative" : "default"}
+          testId="totale-prelievi"
         />
         <BalanceCard
           label="Differenza saldo cassa - saldo vending contanti"
