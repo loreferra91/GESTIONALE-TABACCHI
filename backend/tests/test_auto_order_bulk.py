@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 import backend.server as server
+import pdfplumber
 from fastapi.testclient import TestClient
 
 
@@ -221,3 +223,10 @@ def test_auto_order_pdf_filters_selected_category(monkeypatch):
     assert response.headers["x-auto-order-category"] == "SIGARETTE"
     assert response.headers["x-auto-order-rows"] == "1"
     assert "ordine_sigarette_" in response.headers["content-disposition"]
+
+    with pdfplumber.open(io.BytesIO(response.content)) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    assert all(label in text for label in ("CODICE", "ARTICOLO", "QTA", "TOTALE"))
+    assert all(label not in text for label in ("TIPO", "MAG.", "V10/30", "COP.", "MOTIVO"))
+    assert "SIG1" in text
+    assert "ACC1" not in text

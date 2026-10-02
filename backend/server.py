@@ -2013,23 +2013,18 @@ async def auto_order_pdf(
     story.append(Paragraph(f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{now}</b>{filtro_pdf} &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; Totale: <b>€ {totale:.2f}</b>", sub_s))
 
     # Table
-    header = ["CODICE", "ARTICOLO", "TIPO", "MAG.", "V10/30", "COP.", "QTA", "TOTALE", "MOTIVO"]
+    header = ["CODICE", "ARTICOLO", "QTA", "TOTALE"]
     data = [header]
     for r in righe:
         data.append([
             r["codice"],
             Paragraph(xml_escape(r["descrizione"] or ""), cell_s),
-            (r["categoria"] or "")[:3],
-            str(r.get("magazzino_reale_lordo", r.get("magazzino_reale", 0))),
-            f"{r.get('venduto_breve', r.get('venduto_10gg', r.get('venduto_periodo', 0)))}/{r.get('venduto_lungo', r.get('venduto_30gg', 0))}",
-            "-" if r.get("copertura_gg") is None else f"{r['copertura_gg']:.2f}",
             str(r["qta_da_ordinare"]),
             f"€ {r['totale']:.2f}",
-            Paragraph(xml_escape(r["motivo"] or ""), cell_s),
         ])
-    data.append(["", "", "", "", "", "", "TOTALE", f"€ {totale:.2f}", ""])
+    data.append(["", "", "TOTALE", f"€ {totale:.2f}"])
 
-    col_widths = [19*mm, 49*mm, 10*mm, 12*mm, 16*mm, 12*mm, 12*mm, 20*mm, 30*mm]
+    col_widths = [25*mm, 105*mm, 15*mm, 35*mm]
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
     tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0F172A')),
@@ -2037,7 +2032,7 @@ async def auto_order_pdf(
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,0), 8),
         ('ALIGN', (0,0), (-1,0), 'LEFT'),
-        ('ALIGN', (3,1), (7,-1), 'RIGHT'),
+        ('ALIGN', (2,1), (3,-1), 'RIGHT'),
         ('FONTNAME', (0,1), (-1,-2), 'Helvetica'),
         ('FONTSIZE', (0,1), (-1,-1), 8),
         ('TEXTCOLOR', (0,1), (-1,-1), colors.HexColor('#0F172A')),
