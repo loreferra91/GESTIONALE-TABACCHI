@@ -79,6 +79,23 @@ def test_lotto_zero(client):
     assert r.status_code == 422
 
 
+def test_lotto_inalazione_senza_combustione_valid(client):
+    r = client.put(
+        f"{API}/parametri/LOTTO_INALAZIONE_SENZA_COMBUSTIONE",
+        json={"valore": 10},
+    )
+    assert r.status_code == 200
+    assert r.json()["valore"] == 10
+
+
+def test_lotto_inalazione_senza_combustione_zero(client):
+    r = client.put(
+        f"{API}/parametri/LOTTO_INALAZIONE_SENZA_COMBUSTIONE",
+        json={"valore": 0},
+    )
+    assert r.status_code == 422
+
+
 # ---------- GIORNI_STORICO_VEND ----------
 def test_giorni_valid(client):
     r = client.put(f"{API}/parametri/GIORNI_STORICO_VEND", json={"valore": 30})

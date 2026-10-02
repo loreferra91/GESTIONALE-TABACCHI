@@ -251,7 +251,8 @@ BACKUP_COLLECTIONS = [
 # ------------------------- Seed -------------------------
 DEFAULT_PARAMS = {
     "LOTTO_SIGARETTE": {"valore": 10, "descrizione": "Lotto standard per SIGARETTE"},
-    "LOTTO_ELETTRONICHE": {"valore": 5, "descrizione": "Lotto standard per prodotti da inalazione (TEREA e sigarette elettroniche)"},
+    "LOTTO_INALAZIONE_SENZA_COMBUSTIONE": {"valore": 10, "descrizione": "Lotto standard per PRODOTTI DA INALAZIONE SENZA COMBUSTIONE"},
+    "LOTTO_ELETTRONICHE": {"valore": 5, "descrizione": "Lotto standard per SIGARETTE ELETTRONICHE"},
     "LOTTO_ACCESSORI": {"valore": 1, "descrizione": "Lotto standard per ACCESSORI"},
     "GIORNI_STORICO_VEND": {"valore": 30, "descrizione": "Finestra storico vendite (giorni)"},
     "GIORNI_SETTIMANA": {"valore": 7, "descrizione": "Costante giorni settimana"},
@@ -370,10 +371,9 @@ async def get_params() -> Dict[str, float]:
 def lotto_for(categoria: str, params: Dict[str, float]) -> int:
     if categoria == "SIGARETTE":
         return int(params.get("LOTTO_SIGARETTE", 10))
-    if categoria in (
-        "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE",
-        "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA",
-    ):
+    if categoria == "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE":
+        return int(params.get("LOTTO_INALAZIONE_SENZA_COMBUSTIONE", 10))
+    if categoria == "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA":
         return int(params.get("LOTTO_ELETTRONICHE", 5))
     return int(params.get("LOTTO_ACCESSORI", 1))
 
@@ -1644,6 +1644,7 @@ PARAM_BOUNDS = {
     "FAST_VENDUTO30_MIN": (0.0, 10000.0, "0 ≤ soglia"),
     "SLOW_VENDUTO30_MAX": (0.0, 10000.0, "0 ≤ soglia"),
     "LOTTO_SIGARETTE": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_INALAZIONE_SENZA_COMBUSTIONE": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_ELETTRONICHE": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_ACCESSORI": (1.0, 10000.0, "1 ≤ lotto"),
 }

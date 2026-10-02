@@ -21,7 +21,16 @@ def test_cat_from_desc_electronic_brands(desc, code, expected):
 
 
 def test_lotto_for_electronic_inhalation():
-    params = {"LOTTO_SIGARETTE": 10, "LOTTO_ELETTRONICHE": 5, "LOTTO_ACCESSORI": 1}
+    params = {
+        "LOTTO_SIGARETTE": 10,
+        "LOTTO_INALAZIONE_SENZA_COMBUSTIONE": 10,
+        "LOTTO_ELETTRONICHE": 5,
+        "LOTTO_ACCESSORI": 1,
+    }
     assert server.lotto_for(server.ELECTRONIC_INHALATION_CATEGORY, params) == 5
-    assert server.lotto_for("PRODOTTI DA INALAZIONE SENZA COMBUSTIONE", params) == 5
+    assert server.lotto_for("PRODOTTI DA INALAZIONE SENZA COMBUSTIONE", params) == 10
     assert server.lotto_for("ACCESSORI", params) == 1
+
+
+def test_lotto_for_inhalation_without_combustion_has_independent_default():
+    assert server.lotto_for("PRODOTTI DA INALAZIONE SENZA COMBUSTIONE", {}) == 10
