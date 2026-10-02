@@ -191,6 +191,22 @@ class MovimentoIn(BaseModel):
     operatore: Optional[str] = ""
 
 
+class Versamento(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    data: str
+    importo: float
+    descrizione: str = ""
+    operatore: str = ""
+
+
+class VersamentoIn(BaseModel):
+    data: str
+    importo: float
+    descrizione: Optional[str] = ""
+    operatore: Optional[str] = ""
+
+
 class Parametro(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -211,6 +227,7 @@ BACKUP_COLLECTIONS = [
     "parametri",
     "db_storico_vend",
     "db_storico_vending_ext",
+    "versamenti",
 ]
 
 
@@ -302,6 +319,9 @@ async def on_start():
             db.backup_snapshots.create_index("created_at"),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
             db.import_history.create_index("created_at"),
+            db.import_history.create_index("id"),
+            db.prodotti.create_index("ultimo_import_id"),
+            db.versamenti.create_index("data"),
             db.listino_adm.create_index("adm_codice"),
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
@@ -1306,7 +1326,35 @@ async def bulk_carico(body: BulkOrdineIn):
 
 
 
-# ------------------------- Cassa -------------------------
+# ------------------------- Versamenti / Cassa -------------------------
+async def _versamenti_summary(limit: int = 500) -> Dict[str, Any]:
+    capped_limit = _cap(limit)
+    docs = await db.versamenti.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
+    all_docs = await db.versamenti.find({}, {"_id": 0}).to_list(10000)
+    totale = sum(float(d.get("importo") or 0) for d in all_docs)
+    return {"movimenti": docs, "totale": round(totale, 2)}
+
+
+@api.get("/versamenti")
+async def list_versamenti(limit: int = 500):
+    return await _versamenti_summary(limit)
+
+
+@api.post("/versamenti")
+async def add_versamento(m: VersamentoIn):
+    if m.importo <= 0:
+        raise HTTPException(422, "L'importo del versamento deve essere positivo")
+    versamento = Versamento(**m.model_dump())
+    await db.versamenti.insert_one(versamento.model_dump())
+    return versamento.model_dump()
+
+
+@api.delete("/versamenti/{m_id}")
+async def del_versamento(m_id: str):
+    await db.versamenti.delete_one({"id": m_id})
+    return {"ok": True}
+
+
 @api.get("/cassa")
 async def list_cassa(limit: int = 500):
     capped_limit = _cap(limit)
@@ -1798,7 +1846,7 @@ async def prodotti_top(limit: int = 40):
 # ------------------------- Pivot magazzino -------------------------
 @api.get("/pivot")
 async def pivot():
-    prods = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
+    prods = await db.prodotti.find({"presente_ultimo_import": {"$ne": False}}, {"_id": 0}).to_list(5000)
     params = await get_params()
     divisor = params.get("VENDITE_GIORNALIERE_MESE", 6.5)
     aggio = params.get("AGGIO_PCT", 0.10)
@@ -1874,6 +1922,17 @@ async def pivot():
 @api.get("/dashboard")
 async def dashboard():
     pv = await pivot()
+    ultimo_import = await db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+    import_totali = (ultimo_import or {}).get("totali", {})
+    venduto_negozio_excel = float(import_totali.get("valore_venduto_negozio_excel") or 0)
+    venduto_vending_excel = float(import_totali.get("valore_venduto_vending_excel") or 0)
+    venduto_totale_excel = float(import_totali.get("valore_venduto_totale_excel") or 0)
+    if venduto_totale_excel:
+        pv["kpi"]["valore_venduto"] = round(venduto_totale_excel, 2)
+        pv["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
+        pv["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
+        pv["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
+        pv["kpi"]["margine_lordo"] = round(venduto_totale_excel - (pv["kpi"].get("valore_acquistato") or 0), 2)
     # vendite oggi
     oggi = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     vendite_oggi = await db.vendite.aggregate([
@@ -1881,15 +1940,17 @@ async def dashboard():
         {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
-    # cassa
-    cassa = await list_cassa()
+    versamenti = await _versamenti_summary()
+    liquidita_residua = round(venduto_negozio_excel - versamenti["totale"], 2)
     # vending
     vending = await list_vending()
     vend_da_caricare = sum(1 for v in vending if v["esito"] == "DA CARICARE")
     return {
         "kpi": pv["kpi"],
         "vendite_oggi": {"importo": round(v_oggi.get("tot") or 0, 2), "pezzi": v_oggi.get("pezzi") or 0},
-        "saldo_cassa": cassa["saldo"],
+        "totale_versamenti": versamenti["totale"],
+        "liquidita_residua": liquidita_residua,
+        "saldo_cassa": liquidita_residua,
         "vending_da_caricare": vend_da_caricare,
         "vending_totale": len(vending),
     }
@@ -2012,6 +2073,10 @@ async def _bulk_update(collection, operations, batch_size: int = 1000) -> Dict[s
 
 async def _import_prodotti(ws) -> Dict[str, int]:
     operations = []
+    import_id = str(uuid.uuid4())
+    codici_importati = set()
+    valore_venduto_negozio_excel = 0.0
+    valore_venduto_vending_excel = 0.0
     err = 0
     for row in ws.iter_rows(min_row=3, values_only=True):
         try:
@@ -2020,15 +2085,23 @@ async def _import_prodotti(ws) -> Dict[str, int]:
                 continue
             codice_s = str(codice).strip()
             desc = str(row[1] or "").strip()
+            prezzo = float(row[7] or 0)
+            venduti_negozio = int(row[3] or 0)
+            venduti_vending = int(row[17] or 0)
+            valore_venduto_negozio_excel += venduti_negozio * prezzo
+            valore_venduto_vending_excel += venduti_vending * prezzo
+            codici_importati.add(codice_s)
             data_p = {
                 "codice": codice_s,
                 "descrizione": desc,
                 "categoria": _cat_from_desc(desc, codice_s),
                 "acquistati": int(row[2] or 0),
-                "venduti_negozio": int(row[3] or 0),
-                "prezzo": float(row[7] or 0),
+                "venduti_negozio": venduti_negozio,
+                "prezzo": prezzo,
                 "giacenza_vending": int(row[13] or 0),
-                "venduti_vending": int(row[17] or 0),
+                "venduti_vending": venduti_vending,
+                "presente_ultimo_import": True,
+                "ultimo_import_id": import_id,
             }
             data_p["giacenza_negozio"] = physical_shop_stock_from_excel(
                 row[6], data_p["giacenza_vending"], data_p["venduti_vending"]
@@ -2037,8 +2110,20 @@ async def _import_prodotti(ws) -> Dict[str, int]:
         except Exception:
             err += 1
     result = await _bulk_upsert(db.prodotti, operations)
+    if codici_importati:
+        await db.prodotti.update_many(
+            {"codice": {"$nin": list(codici_importati)}},
+            {"$set": {"presente_ultimo_import": False}},
+        )
     result["errori"] += err
     result["elettroniche"] = await _apply_electronic_inhalation_categories()
+    result["ultimo_import_id"] = import_id
+    result["valore_venduto_negozio_excel"] = round(valore_venduto_negozio_excel, 2)
+    result["valore_venduto_vending_excel"] = round(valore_venduto_vending_excel, 2)
+    result["valore_venduto_totale_excel"] = round(
+        valore_venduto_negozio_excel + valore_venduto_vending_excel,
+        2,
+    )
     return result
 
 
@@ -2318,6 +2403,10 @@ async def import_excel_full(file: UploadFile = File(...)):
         "parametri_saltati": report.get("PARAMETRI", {}).get("saltati", 0),
         "db_storico_vend_righe": report.get("DB_STORICO_VEND", {}).get("inseriti", 0),
         "db_storico_vending_ext_righe": report.get("DB_STORICO_VENDING_EXT", {}).get("inseriti", 0),
+        "ultimo_import_id": report.get("RIEP_VENDITA", {}).get("ultimo_import_id"),
+        "valore_venduto_negozio_excel": report.get("RIEP_VENDITA", {}).get("valore_venduto_negozio_excel", 0),
+        "valore_venduto_vending_excel": report.get("RIEP_VENDITA", {}).get("valore_venduto_vending_excel", 0),
+        "valore_venduto_totale_excel": report.get("RIEP_VENDITA", {}).get("valore_venduto_totale_excel", 0),
     }
     response = {
         "ok": True,

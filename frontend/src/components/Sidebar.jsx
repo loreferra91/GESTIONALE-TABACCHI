@@ -19,7 +19,7 @@ const NAV = [
   { to: "/carico", label: "Carico Merce", icon: Truck, testid: "nav-carico" },
   { to: "/ordini", label: "Storico ordini", icon: ClockCounterClockwise, testid: "nav-ordini" },
   { to: "/report", label: "Report giornaliero", icon: FileText, testid: "nav-report" },
-  { to: "/cassa", label: "Cassa", icon: CashRegister, testid: "nav-cassa" },
+  { to: "/versamenti", label: "Versamenti", icon: CashRegister, testid: "nav-versamenti" },
   { to: "/parametri", label: "Parametri", icon: Gear, testid: "nav-parametri" },
 ];
 
@@ -40,28 +40,28 @@ export default function Sidebar() {
               to={n.to}
               end={n.end}
               data-testid={n.testid}
-              onClick={() => setOpen(false)}
               className={({ isActive }) =>
-                `flex items-center gap-3 px-5 py-2.5 text-sm font-medium transition-colors border-l-2 ${
+                `group flex items-center gap-3 px-5 py-3 mx-5 rounded-lg transition-all ${
                   isActive
-                    ? "bg-slate-800 border-brand text-white"
-                    : n.highlight
-                      ? "border-transparent text-amber-300 hover:bg-slate-800 hover:text-white"
-                      : "border-transparent text-slate-300 hover:bg-slate-800 hover:text-white"
+                    ? "bg-slate-800 text-white shadow-lg"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/50"
                 }`
               }
+              onClick={() => setOpen(false)}
             >
-              <Icon size={18} weight="regular" />
-              <span>{n.label}</span>
+              {({ isActive }) => (
+                <>
+                  <Icon size={20} weight={isActive ? "fill" : "bold"} />
+                  <span className="font-medium">{n.label}</span>
+                </>
+              )}
             </NavLink>
           );
         })}
       </nav>
-      <div className="p-4 text-xs text-slate-500 border-t border-slate-800">
-        v1.1 · Backup & Anomalie
-      </div>
     </>
   );
+
   return (
     <>
       <button
