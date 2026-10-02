@@ -61,16 +61,9 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <BalanceCard
-          label="Saldo cassa"
-          value={saldi.saldoCassa}
-          tone={saldi.saldoCassa < 0 ? "negative" : "default"}
-          detail="Movimenti entrata − uscita"
-          testId="saldo-cassa"
-        />
-        <BalanceCard
-          label="Prelievi"
+          label="Giacenza contanti vending"
           value={saldi.totalePrelievi}
           tone={saldi.totalePrelievi > 0 ? "negative" : "default"}
           testId="totale-prelievi"
@@ -82,14 +75,6 @@ export default function Dashboard() {
           signed
           testId="differenza-cassa-vending"
         />
-        <Card className="p-6">
-          <div className="overline leading-4 min-h-8">Vending</div>
-          <div className="kpi-value text-4xl mt-2 text-slate-900 tabular-nums">
-            {formatNum(data?.vending_da_caricare)}
-            <span className="text-lg text-slate-400 ml-2">/ {formatNum(data?.vending_totale)}</span>
-          </div>
-          <div className="text-sm text-slate-500 mt-1">Colonne da caricare</div>
-        </Card>
       </div>
 
       <div className="mt-8">
