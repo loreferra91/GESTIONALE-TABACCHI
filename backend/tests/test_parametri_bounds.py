@@ -96,6 +96,21 @@ def test_lotto_inalazione_senza_combustione_zero(client):
     assert r.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "nome",
+    [
+        "LOTTO_SIGARI",
+        "LOTTO_SIGARETTI",
+        "LOTTO_FIUTO_E_MASTICO",
+        "LOTTO_TRINCIATI_PER_SIGARETTA",
+        "LOTTO_ALTRI_TABACCHI_DA_FUMO",
+    ],
+)
+def test_lotti_categorie_adm_reject_zero(client, nome):
+    r = client.put(f"{API}/parametri/{nome}", json={"valore": 0})
+    assert r.status_code == 422
+
+
 # ---------- GIORNI_STORICO_VEND ----------
 def test_giorni_valid(client):
     r = client.put(f"{API}/parametri/GIORNI_STORICO_VEND", json={"valore": 30})

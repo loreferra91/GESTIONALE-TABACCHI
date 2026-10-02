@@ -251,6 +251,11 @@ BACKUP_COLLECTIONS = [
 # ------------------------- Seed -------------------------
 DEFAULT_PARAMS = {
     "LOTTO_SIGARETTE": {"valore": 10, "descrizione": "Lotto standard per SIGARETTE"},
+    "LOTTO_SIGARI": {"valore": 1, "descrizione": "Lotto standard per SIGARI"},
+    "LOTTO_SIGARETTI": {"valore": 1, "descrizione": "Lotto standard per SIGARETTI"},
+    "LOTTO_FIUTO_E_MASTICO": {"valore": 1, "descrizione": "Lotto standard per FIUTO E MASTICO"},
+    "LOTTO_TRINCIATI_PER_SIGARETTA": {"valore": 1, "descrizione": "Lotto standard per TRINCIATI PER SIGARETTA"},
+    "LOTTO_ALTRI_TABACCHI_DA_FUMO": {"valore": 1, "descrizione": "Lotto standard per ALTRI TABACCHI DA FUMO"},
     "LOTTO_INALAZIONE_SENZA_COMBUSTIONE": {"valore": 10, "descrizione": "Lotto standard per PRODOTTI DA INALAZIONE SENZA COMBUSTIONE"},
     "LOTTO_ELETTRONICHE": {"valore": 5, "descrizione": "Lotto standard per SIGARETTE ELETTRONICHE"},
     "LOTTO_ACCESSORI": {"valore": 1, "descrizione": "Lotto standard per ACCESSORI"},
@@ -273,6 +278,19 @@ DEFAULT_PARAMS = {
     "AUTO_ORDER_FATTORE_SICUREZZA": {"valore": 1.15, "descrizione": "Margine di sicurezza applicato alla scorta obiettivo"},
     "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Periodo informativo del totale venduto importato (non usato da Auto-Order)"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
+}
+
+
+LOTTO_PARAM_BY_CATEGORY = {
+    "SIGARETTE": ("LOTTO_SIGARETTE", 10),
+    "SIGARI": ("LOTTO_SIGARI", 1),
+    "SIGARETTI": ("LOTTO_SIGARETTI", 1),
+    "FIUTO E MASTICO": ("LOTTO_FIUTO_E_MASTICO", 1),
+    "TRINCIATI PER SIGARETTA": ("LOTTO_TRINCIATI_PER_SIGARETTA", 1),
+    "ALTRI TABACCHI DA FUMO": ("LOTTO_ALTRI_TABACCHI_DA_FUMO", 1),
+    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE": ("LOTTO_INALAZIONE_SENZA_COMBUSTIONE", 10),
+    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA": ("LOTTO_ELETTRONICHE", 5),
+    "ACCESSORI": ("LOTTO_ACCESSORI", 1),
 }
 
 
@@ -369,13 +387,11 @@ async def get_params() -> Dict[str, float]:
 
 
 def lotto_for(categoria: str, params: Dict[str, float]) -> int:
-    if categoria == "SIGARETTE":
-        return int(params.get("LOTTO_SIGARETTE", 10))
-    if categoria == "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE":
-        return int(params.get("LOTTO_INALAZIONE_SENZA_COMBUSTIONE", 10))
-    if categoria == "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA":
-        return int(params.get("LOTTO_ELETTRONICHE", 5))
-    return int(params.get("LOTTO_ACCESSORI", 1))
+    param_name, default = LOTTO_PARAM_BY_CATEGORY.get(
+        categoria,
+        LOTTO_PARAM_BY_CATEGORY["ACCESSORI"],
+    )
+    return int(params.get(param_name, default))
 
 
 def _param(params: Dict[str, float], name: str, default: float) -> float:
@@ -1644,6 +1660,11 @@ PARAM_BOUNDS = {
     "FAST_VENDUTO30_MIN": (0.0, 10000.0, "0 ≤ soglia"),
     "SLOW_VENDUTO30_MAX": (0.0, 10000.0, "0 ≤ soglia"),
     "LOTTO_SIGARETTE": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_SIGARI": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_SIGARETTI": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_FIUTO_E_MASTICO": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_TRINCIATI_PER_SIGARETTA": (1.0, 10000.0, "1 ≤ lotto"),
+    "LOTTO_ALTRI_TABACCHI_DA_FUMO": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_INALAZIONE_SENZA_COMBUSTIONE": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_ELETTRONICHE": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_ACCESSORI": (1.0, 10000.0, "1 ≤ lotto"),
