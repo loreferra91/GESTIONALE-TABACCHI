@@ -74,22 +74,19 @@ function ActivityRow({ label, value }) {
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
-  const [anomalies, setAnomalies] = useState(null);
   const [activities, setActivities] = useState({ ordine: null, versamento: null, prelievo: null });
 
   useEffect(() => {
     let active = true;
     Promise.all([
       api.get("/dashboard"),
-      api.get("/anomalie"),
       api.get("/ordini?limit=1"),
       api.get("/versamenti?limit=1"),
       api.get("/prelievi-vending?limit=1"),
     ])
-      .then(([dashboard, anomalyData, orders, deposits, withdrawals]) => {
+      .then(([dashboard, orders, deposits, withdrawals]) => {
         if (!active) return;
         setData(dashboard.data);
-        setAnomalies(anomalyData.data?.summary || null);
         setActivities({
           ordine: orders.data?.[0]?.data || null,
           versamento: deposits.data?.movimenti?.[0]?.data || null,
@@ -100,13 +97,14 @@ export default function Dashboard() {
     return () => { active = false; };
   }, []);
 
-  const kpi = data?.kpi || {};
   const sales = data?.andamento_vendite || {};
   const balances = data?.saldi || {};
   const variation = sales.variazione_pct;
-  const anomalyCount = anomalies?.totale || 0;
   const difference = balances.differenzaCassaVendingContanti;
   const chartData = sales.serie || [];
+  const dailyAverage = chartData.length ? (sales.totale_periodo || 0) / chartData.length : null;
+  const vendingToLoad = data?.vending_da_caricare || 0;
+  const vendingTotal = data?.vending_totale || 0;
 
   return (
     <Layout title="Dashboard operativa" subtitle="controllo quotidiano" statusMode="compact">
@@ -119,20 +117,19 @@ export default function Dashboard() {
           testId="dashboard-last-sales"
         />
         <ActionCard
-          label="Da riordinare"
-          value={`${formatNum(kpi.da_riordinare)} prodotti`}
-          tone={kpi.da_riordinare ? "danger" : "success"}
-          to="/auto-order"
-          linkLabel="Apri Auto-Order"
-          testId="dashboard-reorder"
+          label="Da caricare Vending"
+          value={`${formatNum(vendingToLoad)} su ${formatNum(vendingTotal)}`}
+          tone={vendingToLoad ? "warning" : "success"}
+          detail={vendingToLoad ? "colonne da rifornire" : "tutte le colonne sono operative"}
+          to="/vending"
+          linkLabel="Apri Vending"
+          testId="dashboard-vending-to-load"
         />
         <ActionCard
-          label="Anomalie"
-          value={`${formatNum(anomalyCount)} da verificare`}
-          tone={anomalyCount ? "warning" : "success"}
-          to="/anomalie"
-          linkLabel="Controlla ora"
-          testId="dashboard-anomalies"
+          label="Media giornaliera 30 gg"
+          value={dailyAverage === null ? "—" : formatDashboardEur(dailyAverage)}
+          detail="media per giorno di calendario"
+          testId="dashboard-daily-average"
         />
       </section>
 
@@ -172,7 +169,13 @@ export default function Dashboard() {
             <div className="text-xs text-slate-500">Fino al {sales.ultimo_giorno ? new Date(`${sales.ultimo_giorno}T12:00:00`).toLocaleDateString("it-IT") : "—"}</div>
           </div>
           <div className="mt-4 h-40 w-full" data-testid="dashboard-sales-chart">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer
+              width="100%"
+              height="100%"
+              minWidth={0}
+              minHeight={160}
+              initialDimension={{ width: 1000, height: 160 }}
+            >
               <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1">
