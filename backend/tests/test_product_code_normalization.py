@@ -34,6 +34,16 @@ def test_common_blue_blu_spelling_variant_is_matched():
     ) == "AMMS201"
 
 
+def test_same_code_and_brand_matches_legacy_commercial_name():
+    aliases = server._adm_alias_index([
+        ("AMMS395", "MARLBORO KS *AST 20"),
+    ])
+
+    assert server._canonical_product_code(
+        "395", "MARLBORO RED KS (BOX)", aliases
+    ) == "AMMS395"
+
+
 def test_amms_codes_are_normalized_consistently():
     assert server._canonical_product_code("amms0096", "anything", {}) == "AMMS96"
 

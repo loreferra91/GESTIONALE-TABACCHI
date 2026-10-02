@@ -489,6 +489,10 @@ def _same_adm_product(description: Any, adm_description: Any) -> bool:
         return False
     if product_tokens == adm_tokens:
         return True
+    # Il numero ADM identico è già un segnale forte: lo stesso marchio consente
+    # di riconoscere anche vecchi nomi commerciali molto diversi (BOX/KS/AST).
+    if len(product_tokens[0]) >= 4 and product_tokens[0] == adm_tokens[0]:
+        return True
     common = set(product_tokens) & set(adm_tokens)
     same_prefix = len(product_tokens) >= 2 and len(adm_tokens) >= 2 and product_tokens[:2] == adm_tokens[:2]
     coverage = len(common) / max(1, min(len(set(product_tokens)), len(set(adm_tokens))))
