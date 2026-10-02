@@ -43,8 +43,8 @@ export function KpiCard({ label, value, tone = "default", suffix }) {
   const toneColor = { danger: "text-red-600", warning: "text-amber-600", success: "text-emerald-700", default: "text-slate-900" }[tone];
   return (
     <Card className="p-4 lg:p-5 hover:-translate-y-[2px] hover:shadow-md transition-transform duration-200 min-w-0">
-      <div className="overline truncate">{label}</div>
-      <div className={`kpi-value text-2xl xl:text-3xl 2xl:text-4xl mt-2 truncate tabular-nums ${toneColor}`}>
+      <div className="overline leading-tight min-h-[2.5rem] break-words" title={label}>{label}</div>
+      <div className={`kpi-value text-[clamp(1.35rem,1.8vw,2.15rem)] leading-tight mt-2 whitespace-nowrap tabular-nums ${toneColor}`} title={String(value ?? "")}>
         {value}
         {suffix && <span className="text-base text-slate-400 ml-1">{suffix}</span>}
       </div>

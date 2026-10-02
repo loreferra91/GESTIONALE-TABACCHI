@@ -344,6 +344,9 @@ async def on_start():
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
         )
+        aliases_merged = await reconcile_adm_product_aliases()
+        if aliases_merged:
+            logging.info("Unified %s verified ADM product aliases", aliases_merged)
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
@@ -463,6 +466,119 @@ def adm_local_code(codice_adm: Any) -> str:
     return f"AMMS{code}" if code else ""
 
 
+def _product_code_text(value: Any) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value or "").strip().upper()
+
+
+def _description_tokens(value: Any) -> List[str]:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_text = text.encode("ascii", "ignore").decode().upper()
+    return re.findall(r"[A-Z0-9]+", ascii_text)
+
+
+def _same_adm_product(description: Any, adm_description: Any) -> bool:
+    """Match name variants without confusing numeric accessory codes with ADM codes."""
+    product_tokens = _description_tokens(description)
+    adm_tokens = _description_tokens(adm_description)
+    if not product_tokens or not adm_tokens:
+        return False
+    if product_tokens == adm_tokens:
+        return True
+    common = set(product_tokens) & set(adm_tokens)
+    same_prefix = len(product_tokens) >= 2 and len(adm_tokens) >= 2 and product_tokens[:2] == adm_tokens[:2]
+    coverage = len(common) / max(1, min(len(set(product_tokens)), len(set(adm_tokens))))
+    return len(common) >= 2 and (same_prefix or coverage >= 0.6)
+
+
+def _adm_alias_index(rows) -> Dict[str, List[Dict[str, str]]]:
+    """Index listino rows by bare ADM code (96 -> AMMS96)."""
+    aliases: Dict[str, List[Dict[str, str]]] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            raw_code = row.get("codice") or row.get("adm_codice")
+            description = row.get("descrizione") or row.get("adm_descrizione") or ""
+        else:
+            raw_code = row[0] if row else None
+            description = row[1] if len(row) > 1 else ""
+        code = adm_numeric_code(raw_code)
+        if not code or not str(raw_code or "").strip().upper().startswith("AMMS"):
+            continue
+        aliases.setdefault(code, []).append({
+            "codice": adm_local_code(code),
+            "descrizione": str(description or "").strip(),
+        })
+    return aliases
+
+
+def _canonical_product_code(code: Any, description: Any, aliases: Dict[str, List[Dict[str, str]]]) -> str:
+    raw = _product_code_text(code)
+    if raw.startswith("AMMS"):
+        return adm_local_code(raw)
+    if not raw.isdigit():
+        return raw
+    numeric = raw.lstrip("0") or raw
+    for candidate in aliases.get(numeric, []):
+        if _same_adm_product(description, candidate["descrizione"]):
+            return candidate["codice"]
+    return raw
+
+
+async def _remap_code_references(old_code: str, new_code: str) -> None:
+    for collection_name in ("vendite", "db_storico_vend", "storico_ordini", "vending", "ordini_fornitore_righe"):
+        await db[collection_name].update_many({"codice": old_code}, {"$set": {"codice": new_code}})
+
+
+async def reconcile_adm_product_aliases() -> int:
+    """Merge verified numeric/AMMS aliases already present in the database."""
+    products = await db.prodotti.find({}, {"_id": 0}).to_list(MAX_LIMIT)
+    listino = await db.listino_adm.find(
+        {},
+        {"_id": 0, "codice": 1, "adm_codice": 1, "descrizione": 1, "adm_descrizione": 1},
+    ).to_list(MAX_LIMIT)
+    aliases = _adm_alias_index(listino)
+    candidates = []
+    by_code = {str(product.get("codice") or "").strip().upper(): product for product in products}
+    for product in products:
+        old_code = _product_code_text(product.get("codice"))
+        new_code = _canonical_product_code(old_code, product.get("descrizione"), aliases)
+        if old_code != new_code:
+            candidates.append((product, old_code, new_code))
+    if not candidates:
+        return 0
+
+    await create_backup_snapshot("Prima unificazione codici ADM duplicati", "migrazione-codici-adm")
+    merged = 0
+    numeric_fields = ("acquistati", "venduti_negozio", "venduti_vending", "giacenza_negozio", "giacenza_vending")
+    for alias, old_code, new_code in candidates:
+        canonical = by_code.get(new_code)
+        await _remap_code_references(old_code, new_code)
+        alias_filter = {"id": alias["id"]} if alias.get("id") else {"codice": old_code}
+        if canonical:
+            merged_values = {
+                field: int(canonical.get(field) or 0) + int(alias.get(field) or 0)
+                for field in numeric_fields
+            }
+            merged_values["presente_ultimo_import"] = bool(
+                canonical.get("presente_ultimo_import") or alias.get("presente_ultimo_import")
+            )
+            merged_values["alias_unificati"] = sorted(set(canonical.get("alias_unificati") or []) | {old_code})
+            canonical_filter = {"id": canonical["id"]} if canonical.get("id") else {"codice": new_code}
+            await db.prodotti.update_one(canonical_filter, {"$set": merged_values})
+            await db.prodotti.delete_one(alias_filter)
+            canonical.update(merged_values)
+        else:
+            await db.prodotti.update_one(alias_filter, {"$set": {
+                "codice": new_code,
+                "categoria": _cat_from_desc(alias.get("descrizione", ""), new_code),
+                "alias_unificati": sorted(set(alias.get("alias_unificati") or []) | {old_code}),
+            }})
+            by_code[new_code] = alias
+        merged += 1
+    return merged
+
+
 def parse_italian_money(value: Any) -> float:
     text = str(value or "").strip().replace(".", "").replace(",", ".")
     text = re.sub(r"[^0-9.\-]", "", text)
@@ -485,16 +601,35 @@ async def list_prodotti(q: Optional[str] = None, categoria: Optional[str] = None
     return docs
 
 
+async def _canonical_manual_product_payload(p: ProdottoIn) -> Dict[str, Any]:
+    payload = p.model_dump()
+    raw_code = _product_code_text(payload["codice"])
+    numeric = adm_numeric_code(raw_code)
+    listino = await db.listino_adm.find({"$or": [
+        {"codice": adm_local_code(numeric)},
+        {"adm_codice": numeric},
+    ]}, {"_id": 0}).to_list(20) if numeric else []
+    payload["codice"] = _canonical_product_code(raw_code, payload["descrizione"], _adm_alias_index(listino))
+    return payload
+
+
 @api.post("/prodotti")
 async def create_prodotto(p: ProdottoIn):
-    prod = Prodotto(**p.model_dump())
+    payload = await _canonical_manual_product_payload(p)
+    if await db.prodotti.find_one({"codice": payload["codice"]}):
+        raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
+    prod = Prodotto(**payload)
     await db.prodotti.insert_one(prod.model_dump())
     return prod.model_dump()
 
 
 @api.put("/prodotti/{prod_id}")
 async def update_prodotto(prod_id: str, p: ProdottoIn):
-    r = await db.prodotti.update_one({"id": prod_id}, {"$set": p.model_dump()})
+    payload = await _canonical_manual_product_payload(p)
+    collision = await db.prodotti.find_one({"codice": payload["codice"], "id": {"$ne": prod_id}})
+    if collision:
+        raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
+    r = await db.prodotti.update_one({"id": prod_id}, {"$set": payload})
     if r.matched_count == 0:
         raise HTTPException(404, "not found")
     doc = await db.prodotti.find_one({"id": prod_id}, {"_id": 0})
@@ -2197,10 +2332,13 @@ async def _bulk_update(collection, operations, batch_size: int = 1000) -> Dict[s
     return {"trovati": matched, "modificati": modified, "errori": errors}
 
 
-async def _import_prodotti(ws) -> Dict[str, int]:
-    operations = []
+async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, str]]]] = None) -> Dict[str, int]:
+    adm_aliases = adm_aliases or {}
     import_id = str(uuid.uuid4())
     codici_importati = set()
+    alias_codes = set()
+    alias_mappings: Dict[str, str] = {}
+    products_by_code: Dict[str, Dict[str, Any]] = {}
     valore_venduto_negozio_excel = 0.0
     valore_venduto_vending_excel = 0.0
     err = 0
@@ -2209,15 +2347,19 @@ async def _import_prodotti(ws) -> Dict[str, int]:
             codice = row[0]
             if not codice:
                 continue
-            codice_s = str(codice).strip()
+            raw_code = _product_code_text(codice)
             desc = str(row[1] or "").strip()
+            codice_s = _canonical_product_code(raw_code, desc, adm_aliases)
+            if codice_s != raw_code:
+                alias_codes.add(raw_code)
+                alias_mappings[raw_code] = codice_s
             prezzo = float(row[7] or 0)
             venduti_negozio = int(row[3] or 0)
             venduti_vending = int(row[17] or 0)
             valore_venduto_negozio_excel += venduti_negozio * prezzo
             valore_venduto_vending_excel += venduti_vending * prezzo
             codici_importati.add(codice_s)
-            data_p = {
+            row_data = {
                 "codice": codice_s,
                 "descrizione": desc,
                 "categoria": _cat_from_desc(desc, codice_s),
@@ -2229,13 +2371,29 @@ async def _import_prodotti(ws) -> Dict[str, int]:
                 "presente_ultimo_import": True,
                 "ultimo_import_id": import_id,
             }
-            data_p["giacenza_negozio"] = physical_shop_stock_from_excel(
-                row[6], data_p["giacenza_vending"], data_p["venduti_vending"]
+            row_data["giacenza_negozio"] = physical_shop_stock_from_excel(
+                row[6], row_data["giacenza_vending"], row_data["venduti_vending"]
             )
-            operations.append(UpdateOne({"codice": codice_s}, {"$set": data_p}, upsert=True))
+            existing = products_by_code.get(codice_s)
+            if existing:
+                for field in ("acquistati", "venduti_negozio", "venduti_vending", "giacenza_negozio", "giacenza_vending"):
+                    existing[field] += row_data[field]
+                if raw_code == codice_s or not existing.get("descrizione"):
+                    existing.update({
+                        "descrizione": row_data["descrizione"],
+                        "categoria": row_data["categoria"],
+                        "prezzo": row_data["prezzo"],
+                    })
+            else:
+                products_by_code[codice_s] = row_data
         except Exception:
             err += 1
+    operations = [UpdateOne({"codice": code}, {"$set": data}, upsert=True) for code, data in products_by_code.items()]
     result = await _bulk_upsert(db.prodotti, operations)
+    if alias_codes:
+        for old_code, new_code in alias_mappings.items():
+            await _remap_code_references(old_code, new_code)
+        await db.prodotti.delete_many({"codice": {"$in": sorted(alias_codes)}})
     if codici_importati:
         await db.prodotti.update_many(
             {"codice": {"$nin": list(codici_importati)}},
@@ -2243,6 +2401,7 @@ async def _import_prodotti(ws) -> Dict[str, int]:
         )
     result["errori"] += err
     result["elettroniche"] = await _apply_electronic_inhalation_categories()
+    result["alias_unificati"] = len(alias_codes)
     result["ultimo_import_id"] = import_id
     result["valore_venduto_negozio_excel"] = round(valore_venduto_negozio_excel, 2)
     result["valore_venduto_vending_excel"] = round(valore_venduto_vending_excel, 2)
@@ -2509,7 +2668,11 @@ async def import_excel_full(file: UploadFile = File(...)):
         else:
             fogli_mancanti.append(name)
 
-    await _run("RIEP_VENDITA", _import_prodotti)
+    adm_aliases = {}
+    if "LISTINO ADM" in wb.sheetnames:
+        adm_aliases = _adm_alias_index(wb["LISTINO ADM"].iter_rows(min_row=2, values_only=True))
+
+    await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
     await _run("LISTINO ADM", _import_listino)
     await _run("RICARICA VENDING", _import_vending)
     await _run("STORICO_ORDINI", _import_storico)
