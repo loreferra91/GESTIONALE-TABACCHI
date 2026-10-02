@@ -26,6 +26,20 @@ class FakeCollection:
         return FakeCursor(self.documents)
 
 
+class SalesCollection:
+    def __init__(self, documents):
+        self.documents = documents
+
+    async def find_one(self, *_args, **_kwargs):
+        if not self.documents:
+            return None
+        return max(self.documents, key=lambda item: item.get("data", ""))
+
+    def find(self, query, *_args):
+        start = query.get("data", {}).get("$gte", "")
+        return FakeCursor([item for item in self.documents if item.get("data", "") >= start])
+
+
 def historical_row(amount, payment, accounted="SI", outcome="OK"):
     raw = [""] * 18
     raw[7] = str(amount)
@@ -113,3 +127,45 @@ def test_cash_difference_subtracts_vending_withdrawals():
 
     assert result["totalePrelievi"] == 500.0
     assert result["differenzaCassaVendingContanti"] == 1334.68
+
+
+def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            vendite=SalesCollection([
+                {"data": "2026-09-30T10:00:00", "importo": 5},
+            ]),
+            db_storico_vend=SalesCollection([
+                {"data": "2026-09-30T00:00:00", "importo": 10},
+                {"data": "2026-10-01T00:00:00", "importo": 20},
+            ]),
+        ),
+    )
+
+    result = asyncio.run(server._dashboard_sales_trend())
+
+    assert result["ultimo_giorno"] == "2026-10-01"
+    assert result["totale_ultimo_giorno"] == 20
+    assert result["totale_periodo"] == 35
+    assert len(result["serie"]) == 30
+    assert result["serie"][-2] == {"data": "2026-09-30", "importo": 15.0}
+    assert result["serie"][-1] == {"data": "2026-10-01", "importo": 20.0}
+
+
+def test_dashboard_sales_trend_handles_empty_sources(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(vendite=SalesCollection([]), db_storico_vend=SalesCollection([])),
+    )
+
+    result = asyncio.run(server._dashboard_sales_trend())
+
+    assert result == {
+        "ultimo_giorno": None,
+        "totale_ultimo_giorno": 0,
+        "variazione_pct": None,
+        "serie": [],
+    }

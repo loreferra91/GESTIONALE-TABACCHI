@@ -2245,6 +2245,64 @@ async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) ->
     return _calculate_dashboard_balances(payments, saldo_cassa, totale_prelievi)
 
 
+async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
+    """Restituisce l'andamento fino all'ultimo giorno di vendita disponibile."""
+    latest_app, latest_imported = await asyncio.gather(
+        db.vendite.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+    )
+
+    latest_candidates = [
+        str(doc.get("data") or "")[:10]
+        for doc in (latest_app, latest_imported)
+        if doc and doc.get("data")
+    ]
+    latest_day = max(latest_candidates, default=None)
+    if not latest_day:
+        return {"ultimo_giorno": None, "totale_ultimo_giorno": 0, "variazione_pct": None, "serie": []}
+
+    try:
+        end_date = datetime.fromisoformat(latest_day).date()
+    except ValueError:
+        return {"ultimo_giorno": latest_day, "totale_ultimo_giorno": 0, "variazione_pct": None, "serie": []}
+
+    start_date = end_date - timedelta(days=days - 1)
+    start_iso = start_date.isoformat()
+    query = {"data": {"$gte": start_iso}}
+    app_sales, imported_sales = await asyncio.gather(
+        db.vendite.find(query, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
+        db.db_storico_vend.find(query, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
+    )
+
+    totals: Dict[str, float] = {}
+    for sale in [*imported_sales, *app_sales]:
+        day = str(sale.get("data") or "")[:10]
+        if day < start_iso or day > latest_day:
+            continue
+        try:
+            amount = float(sale.get("importo") or 0)
+        except (TypeError, ValueError):
+            continue
+        totals[day] = totals.get(day, 0) + amount
+
+    series = []
+    for offset in range(days):
+        day = (start_date + timedelta(days=offset)).isoformat()
+        series.append({"data": day, "importo": round(totals.get(day, 0), 2)})
+
+    latest_total = round(totals.get(latest_day, 0), 2)
+    previous_values = [point["importo"] for point in series[:-1]]
+    previous_average = sum(previous_values) / len(previous_values) if previous_values else 0
+    variation = round(((latest_total - previous_average) / previous_average) * 100, 1) if previous_average else None
+    return {
+        "ultimo_giorno": latest_day,
+        "totale_ultimo_giorno": latest_total,
+        "variazione_pct": variation,
+        "totale_periodo": round(sum(point["importo"] for point in series), 2),
+        "serie": series,
+    }
+
+
 @api.get("/dashboard")
 async def dashboard():
     pv = await pivot()
@@ -2269,7 +2327,10 @@ async def dashboard():
     versamenti = await _versamenti_summary()
     prelievi = await _prelievi_vending_summary()
     liquidita_residua = round(venduto_negozio_excel - versamenti["totale"], 2)
-    saldi = await _dashboard_balances(liquidita_residua, prelievi["totale"])
+    saldi, andamento_vendite = await asyncio.gather(
+        _dashboard_balances(liquidita_residua, prelievi["totale"]),
+        _dashboard_sales_trend(),
+    )
     # vending
     vending = await list_vending()
     vend_da_caricare = sum(1 for v in vending if v["esito"] == "DA CARICARE")
@@ -2281,6 +2342,7 @@ async def dashboard():
         "liquidita_residua": liquidita_residua,
         "saldo_cassa": liquidita_residua,
         "saldi": saldi,
+        "andamento_vendite": andamento_vendite,
         "vending_da_caricare": vend_da_caricare,
         "vending_totale": len(vending),
     }

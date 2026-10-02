@@ -17,6 +17,7 @@ import CassaRapida from "./pages/CassaRapida";
 import Carico from "./pages/Carico";
 import Anomalie from "./pages/Anomalie";
 import Report from "./pages/Report";
+import Contabilita from "./pages/Contabilita";
 
 function App() {
   return (
@@ -34,6 +35,7 @@ function App() {
           <Route path="/carico" element={<Carico />} />
           <Route path="/ordini" element={<Ordini />} />
           <Route path="/report" element={<Report />} />
+          <Route path="/contabilita" element={<Contabilita />} />
           <Route path="/cassa" element={<Cassa />} />
           <Route path="/versamenti" element={<Versamenti />} />
           <Route path="/prelievi-vending" element={<PrelieviVending />} />

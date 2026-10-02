@@ -1,116 +1,195 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { toast } from "sonner";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
-import { KpiCard, Card, formatEur, formatDashboardEur, formatSignedEur, formatNum, Badge } from "../components/UI";
+import { api, apiErrorMessage } from "../lib/api";
+import { Card, formatDashboardEur, formatEur, formatNum, formatSignedEur } from "../components/UI";
 
-function BalanceCard({ label, value, tone = "default", detail, signed = false, testId }) {
-  const toneColor = {
-    positive: "text-emerald-700",
-    negative: "text-red-600",
+function formatShortDate(value) {
+  if (!value) return "—";
+  const [year, month, day] = String(value).slice(0, 10).split("-");
+  return day && month && year ? `${day}/${month}` : value;
+}
+
+function formatActivityDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+  return new Intl.DateTimeFormat("it-IT", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function ActionCard({ label, value, tone = "default", detail, to, linkLabel, testId }) {
+  const tones = {
     default: "text-slate-900",
-  }[tone];
+    success: "text-emerald-700",
+    danger: "text-red-600",
+    warning: "text-amber-600",
+  };
 
   return (
-    <Card className="p-6 min-w-0">
-      <div className="overline leading-4 min-h-8 break-words" data-testid={`${testId}-label`}>{label}</div>
-      <div className={`kpi-value text-4xl mt-2 truncate tabular-nums ${toneColor}`} data-testid={testId}>
-        {signed ? formatSignedEur(value) : formatDashboardEur(value)}
+    <Card className="flex min-h-[178px] min-w-0 flex-col p-5 lg:p-6">
+      <div className="overline leading-4">{label}</div>
+      <div className={`kpi-value mt-5 text-[clamp(1.7rem,2.4vw,2.5rem)] leading-none ${tones[tone]}`} data-testid={testId}>
+        {value}
       </div>
-      {detail && <div className="text-sm text-slate-500 mt-1">{detail}</div>}
+      {detail ? <div className={`mt-3 text-sm font-semibold ${tones[tone]}`}>{detail}</div> : null}
+      {to ? (
+        <Link
+          to={to}
+          className="mt-auto flex items-center justify-center rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-blue-800 transition-colors hover:border-blue-200 hover:bg-blue-50"
+        >
+          {linkLabel} <span aria-hidden="true" className="ml-2">→</span>
+        </Link>
+      ) : null}
     </Card>
+  );
+}
+
+function ActivityRow({ label, value }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-slate-100 py-3 last:border-0">
+      <span className="font-semibold text-slate-800">{label}</span>
+      <span className="shrink-0 text-sm text-slate-500">{formatActivityDate(value)}</span>
+    </div>
   );
 }
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
-  const [pivot, setPivot] = useState(null);
+  const [anomalies, setAnomalies] = useState(null);
+  const [activities, setActivities] = useState({ ordine: null, versamento: null, prelievo: null });
 
   useEffect(() => {
-    api.get("/dashboard").then((r) => setData(r.data));
-    api.get("/pivot").then((r) => setPivot(r.data));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    let active = true;
+    Promise.all([
+      api.get("/dashboard"),
+      api.get("/anomalie"),
+      api.get("/ordini?limit=1"),
+      api.get("/versamenti?limit=1"),
+      api.get("/prelievi-vending?limit=1"),
+    ])
+      .then(([dashboard, anomalyData, orders, deposits, withdrawals]) => {
+        if (!active) return;
+        setData(dashboard.data);
+        setAnomalies(anomalyData.data?.summary || null);
+        setActivities({
+          ordine: orders.data?.[0]?.data || null,
+          versamento: deposits.data?.movimenti?.[0]?.data || null,
+          prelievo: withdrawals.data?.movimenti?.[0]?.data || null,
+        });
+      })
+      .catch((error) => toast.error(apiErrorMessage(error, "Impossibile caricare la dashboard")));
+    return () => { active = false; };
+  }, []);
 
-  const k = data?.kpi || {};
-  const saldi = data?.saldi || {};
-  const differenza = saldi.differenzaCassaVendingContanti;
-  const differenzaTone = differenza > 0 ? "positive" : differenza < 0 ? "negative" : "default";
+  const kpi = data?.kpi || {};
+  const sales = data?.andamento_vendite || {};
+  const balances = data?.saldi || {};
+  const variation = sales.variazione_pct;
+  const anomalyCount = anomalies?.totale || 0;
+  const difference = balances.differenzaCassaVendingContanti;
+  const chartData = sales.serie || [];
 
   return (
-    <Layout title="Dashboard operativa" subtitle="panoramica magazzino & vendita">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <KpiCard label={`Valore acquistato (netto aggio ${((k.aggio_pct||0)*100).toFixed(0)}%)`} value={formatEur(k.valore_acquistato)} />
-        <KpiCard label="Valore venduto (retail)" value={formatEur(k.valore_venduto)} tone="success" />
-        <KpiCard label="Margine lordo stimato" value={formatEur(k.margine_lordo)} tone={k.margine_lordo >= 0 ? "success" : "danger"} />
-        <KpiCard label="Valore giacenza (a costo)" value={formatEur(k.valore_giacenza)} />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <KpiCard label="Prodotti totali" value={formatNum(k.prodotti_totali)} />
-        <KpiCard label="Da riordinare" value={formatNum(k.da_riordinare)} tone={k.da_riordinare ? "danger" : "default"} />
-        <KpiCard label="Prodotti fermi" value={formatNum(k.prodotti_fermi)} tone={k.prodotti_fermi ? "warning" : "default"} />
-        <KpiCard label="Pezzi a magazzino" value={formatNum(k.pezzi_magazzino)} />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
-        <BalanceCard label="Saldo vending" value={saldi.saldoVendingTotale} testId="saldo-vending-totale" />
-        <BalanceCard label="Saldo vending contanti" value={saldi.saldoVendingContanti} testId="saldo-vending-contanti" />
-        <BalanceCard
-          label="Saldo vending bancomat / pagamenti elettronici"
-          value={saldi.saldoVendingElettronico}
-          testId="saldo-vending-elettronico"
+    <Layout title="Dashboard operativa" subtitle="controllo quotidiano" statusMode="compact">
+      <section className="grid grid-cols-1 gap-5 lg:grid-cols-3" aria-label="Indicatori operativi">
+        <ActionCard
+          label={`Vendite ultimo giorno${sales.ultimo_giorno ? ` · ${formatShortDate(sales.ultimo_giorno)}` : ""}`}
+          value={formatDashboardEur(sales.totale_ultimo_giorno)}
+          tone={variation >= 0 ? "success" : "danger"}
+          detail={variation === null || variation === undefined ? "Media non disponibile" : `${variation >= 0 ? "+" : ""}${variation.toLocaleString("it-IT")}% vs media 30 gg`}
+          testId="dashboard-last-sales"
         />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <BalanceCard
-          label="Giacenza contanti vending"
-          value={saldi.totalePrelievi}
-          tone={saldi.totalePrelievi > 0 ? "negative" : "default"}
-          testId="totale-prelievi"
+        <ActionCard
+          label="Da riordinare"
+          value={`${formatNum(kpi.da_riordinare)} prodotti`}
+          tone={kpi.da_riordinare ? "danger" : "success"}
+          to="/auto-order"
+          linkLabel="Apri Auto-Order"
+          testId="dashboard-reorder"
         />
-        <BalanceCard
-          label="Differenza saldo cassa - saldo vending contanti"
-          value={differenza}
-          tone={differenzaTone}
-          signed
-          testId="differenza-cassa-vending"
+        <ActionCard
+          label="Anomalie"
+          value={`${formatNum(anomalyCount)} da verificare`}
+          tone={anomalyCount ? "warning" : "success"}
+          to="/anomalie"
+          linkLabel="Controlla ora"
+          testId="dashboard-anomalies"
         />
-      </div>
+      </section>
 
-      <div className="mt-8">
-        <div className="flex items-baseline justify-between mb-3">
-          <h2 className="font-heading font-black text-xl text-slate-900">Top prodotti per valore giacenza</h2>
-          <Badge tone="info">TOP 10</Badge>
-        </div>
-        <Card className="overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th>Codice</th>
-                  <th>Descrizione</th>
-                  <th className="text-right">Giacenza</th>
-                  <th className="text-right">Prezzo</th>
-                  <th className="text-right">Valore</th>
-                  <th>Stato</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(pivot?.righe || []).slice(0, 10).map((r) => (
-                  <tr key={r.codice} data-testid={`dash-row-${r.codice}`}>
-                    <td className="font-mono">{r.codice}</td>
-                    <td className="max-w-md truncate">{r.descrizione}</td>
-                    <td className="font-mono text-right">{formatNum(r.giac_totale)}</td>
-                    <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
-                    <td className="font-mono text-right font-semibold">{formatEur(r.tot_giacenza)}</td>
-                    <td><Badge tone={r.stato === "OK" ? "ok" : r.stato === "ESAURITO" ? "error" : "warning"}>{r.stato}</Badge></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <section className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2" aria-label="Riepilogo e attività">
+        <Card className="flex min-h-[214px] flex-col p-5 lg:p-6">
+          <div className="overline">Cassa &amp; Vending</div>
+          <div className="mt-7 text-sm text-slate-500">Differenza cassa / vending</div>
+          <div
+            className={`kpi-value mt-2 text-[clamp(2rem,3vw,2.8rem)] leading-none ${difference < 0 ? "text-red-600" : "text-emerald-700"}`}
+            data-testid="differenza-cassa-vending"
+          >
+            {formatSignedEur(difference)}
+          </div>
+          <Link
+            to="/contabilita"
+            className="mt-auto flex items-center justify-center rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-blue-800 transition-colors hover:border-blue-200 hover:bg-blue-50"
+          >
+            Vai a Contabilità <span aria-hidden="true" className="ml-2">→</span>
+          </Link>
+        </Card>
+
+        <Card className="min-h-[214px] p-5 lg:p-6">
+          <div className="overline mb-3">Attività recenti</div>
+          <ActivityRow label="Ultimo carico merce" value={activities.ordine} />
+          <ActivityRow label="Ultimo versamento" value={activities.versamento} />
+          <ActivityRow label="Ultimo prelievo vending" value={activities.prelievo} />
+        </Card>
+      </section>
+
+      <section className="mt-5">
+        <Card className="p-5 lg:p-6">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <div className="overline">Andamento vendite · ultimi 30 giorni</div>
+              <div className="kpi-value mt-2 text-2xl text-slate-900">{formatEur(sales.totale_periodo)}</div>
+            </div>
+            <div className="text-xs text-slate-500">Fino al {sales.ultimo_giorno ? new Date(`${sales.ultimo_giorno}T12:00:00`).toLocaleDateString("it-IT") : "—"}</div>
+          </div>
+          <div className="mt-4 h-40 w-full" data-testid="dashboard-sales-chart">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#86efac" stopOpacity={0.5} />
+                    <stop offset="100%" stopColor="#dcfce7" stopOpacity={0.12} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="#E2E8F0" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="data" tickFormatter={formatShortDate} tick={{ fontSize: 11, fill: "#64748B" }} axisLine={false} tickLine={false} minTickGap={26} />
+                <YAxis tick={{ fontSize: 11, fill: "#64748B" }} axisLine={false} tickLine={false} width={48} />
+                <Tooltip
+                  labelFormatter={(label) => new Date(`${label}T12:00:00`).toLocaleDateString("it-IT")}
+                  formatter={(value) => [formatEur(value), "Vendite"]}
+                  contentStyle={{ border: "1px solid #E2E8F0", borderRadius: 6, boxShadow: "0 8px 24px rgba(15, 23, 42, .08)" }}
+                />
+                <Area type="monotone" dataKey="importo" stroke="#0F2B5B" strokeWidth={3} fill="url(#salesFill)" dot={false} activeDot={{ r: 4, fill: "#0F2B5B" }} />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
         </Card>
-      </div>
+      </section>
     </Layout>
   );
 }

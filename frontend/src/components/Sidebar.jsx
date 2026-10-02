@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import { useState } from "react";
 import {
   ChartBar, Package, ListChecks, Storefront, Receipt,
-  ShoppingCart, ClockCounterClockwise, CashRegister, Gear, GridFour, Lightning, Truck,
+  ShoppingCart, ClockCounterClockwise, Calculator, Gear, GridFour, Lightning, Truck,
   WarningCircle, FileText, List, X,
 } from "@phosphor-icons/react";
 
@@ -19,8 +19,7 @@ const NAV = [
   { to: "/carico", label: "Carico Merce", icon: Truck, testid: "nav-carico" },
   { to: "/ordini", label: "Storico ordini", icon: ClockCounterClockwise, testid: "nav-ordini" },
   { to: "/report", label: "Report giornaliero", icon: FileText, testid: "nav-report" },
-  { to: "/versamenti", label: "Versamenti", icon: CashRegister, testid: "nav-versamenti" },
-  { to: "/prelievi-vending", label: "Prelievi Vending", icon: CashRegister, testid: "nav-prelievi-vending" },
+  { to: "/contabilita", label: "Contabilità", icon: Calculator, testid: "nav-contabilita" },
   { to: "/parametri", label: "Parametri", icon: Gear, testid: "nav-parametri" },
 ];
 

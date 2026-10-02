@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Badge, formatNum } from "./UI";
 
-export default function DataStatusBar() {
+export default function DataStatusBar({ compact = false }) {
   const [status, setStatus] = useState(null);
 
   useEffect(() => {
@@ -18,9 +18,9 @@ export default function DataStatusBar() {
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={stale ? "warning" : "ok"}>{stale ? "Dati da aggiornare" : "Dati aggiornati"}</Badge>
         <span>Ultima vendita: <b>{status.latest_sales_day || "non disponibile"}</b></span>
-        {delay !== null && delay !== undefined && <span>Ritardo: <b>{delay} gg</b></span>}
-        <span>Prodotti: <b>{formatNum(status.counts?.prodotti)}</b></span>
-        <span>Vendite storiche: <b>{formatNum(status.counts?.db_storico_vend)}</b></span>
+        {!compact && delay !== null && delay !== undefined && <span>Ritardo: <b>{delay} gg</b></span>}
+        {!compact && <span>Prodotti: <b>{formatNum(status.counts?.prodotti)}</b></span>}
+        {!compact && <span>Vendite storiche: <b>{formatNum(status.counts?.db_storico_vend)}</b></span>}
         {latestImport && <span>Ultimo import: <b>{latestImport.file}</b></span>}
         {status.latest_backup && <span>Backup: <b>{new Date(status.latest_backup.created_at).toLocaleString("it-IT")}</b></span>}
       </div>
