@@ -343,10 +343,14 @@ async def on_start():
             db.listino_adm.create_index("adm_codice"),
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
+            db.app_migrations.create_index("id", unique=True),
         )
         aliases_merged = await reconcile_adm_product_aliases()
         if aliases_merged:
             logging.info("Unified %s verified ADM product aliases", aliases_merged)
+        products_restored = await restore_canonical_product_snapshots()
+        if products_restored:
+            logging.info("Restored %s canonical ADM product snapshots", products_restored)
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
@@ -557,20 +561,14 @@ async def reconcile_adm_product_aliases() -> int:
 
     await create_backup_snapshot("Prima unificazione codici ADM duplicati", "migrazione-codici-adm")
     merged = 0
-    numeric_fields = ("acquistati", "venduti_negozio", "venduti_vending", "giacenza_negozio", "giacenza_vending")
     for alias, old_code, new_code in candidates:
         canonical = by_code.get(new_code)
         await _remap_code_references(old_code, new_code)
         alias_filter = {"id": alias["id"]} if alias.get("id") else {"codice": old_code}
         if canonical:
             merged_values = {
-                field: int(canonical.get(field) or 0) + int(alias.get(field) or 0)
-                for field in numeric_fields
+                "alias_unificati": sorted(set(canonical.get("alias_unificati") or []) | {old_code}),
             }
-            merged_values["presente_ultimo_import"] = bool(
-                canonical.get("presente_ultimo_import") or alias.get("presente_ultimo_import")
-            )
-            merged_values["alias_unificati"] = sorted(set(canonical.get("alias_unificati") or []) | {old_code})
             canonical_filter = {"id": canonical["id"]} if canonical.get("id") else {"codice": new_code}
             await db.prodotti.update_one(canonical_filter, {"$set": merged_values})
             await db.prodotti.delete_one(alias_filter)
@@ -584,6 +582,53 @@ async def reconcile_adm_product_aliases() -> int:
             by_code[new_code] = alias
         merged += 1
     return merged
+
+
+async def restore_canonical_product_snapshots() -> int:
+    """One-time repair for aliases that were initially merged by summing stale stock."""
+    migration_id = "restore-canonical-adm-snapshots-v1"
+    if await db.app_migrations.find_one({"id": migration_id}):
+        return 0
+    backup = await db.backup_snapshots.find_one(
+        {"reason": "migrazione-codici-adm"},
+        {"_id": 0, "id": 1},
+        sort=[("created_at", 1)],
+    )
+    if not backup:
+        return 0
+    products = await db.prodotti.find(
+        {"alias_unificati": {"$exists": True, "$ne": []}},
+        {"_id": 0},
+    ).to_list(MAX_LIMIT)
+    if not products:
+        return 0
+
+    await create_backup_snapshot("Prima ripristino valori canonici ADM", "ripristino-codici-adm")
+    restored = 0
+    snapshot_fields = (
+        "acquistati", "venduti_negozio", "venduti_vending",
+        "giacenza_negozio", "giacenza_vending", "presente_ultimo_import", "ultimo_import_id",
+    )
+    for product in products:
+        item = await db.backup_snapshot_items.find_one({
+            "snapshot_id": backup["id"],
+            "collection": "prodotti",
+            "doc.codice": product["codice"],
+        }, {"_id": 0, "doc": 1})
+        original = (item or {}).get("doc")
+        if not original:
+            continue
+        values = {field: original[field] for field in snapshot_fields if field in original}
+        product_filter = {"id": product["id"]} if product.get("id") else {"codice": product["codice"]}
+        await db.prodotti.update_one(product_filter, {"$set": values})
+        restored += 1
+    await db.app_migrations.insert_one({
+        "id": migration_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "backup_id": backup["id"],
+        "prodotti_ripristinati": restored,
+    })
+    return restored
 
 
 def parse_italian_money(value: Any) -> float:
@@ -2346,6 +2391,7 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
     alias_codes = set()
     alias_mappings: Dict[str, str] = {}
     products_by_code: Dict[str, Dict[str, Any]] = {}
+    canonical_rows = set()
     valore_venduto_negozio_excel = 0.0
     valore_venduto_vending_excel = 0.0
     err = 0
@@ -2383,16 +2429,15 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
             )
             existing = products_by_code.get(codice_s)
             if existing:
-                for field in ("acquistati", "venduti_negozio", "venduti_vending", "giacenza_negozio", "giacenza_vending"):
-                    existing[field] += row_data[field]
-                if raw_code == codice_s or not existing.get("descrizione"):
-                    existing.update({
-                        "descrizione": row_data["descrizione"],
-                        "categoria": row_data["categoria"],
-                        "prezzo": row_data["prezzo"],
-                    })
+                if raw_code == codice_s:
+                    products_by_code[codice_s] = row_data
+                    canonical_rows.add(codice_s)
+                elif codice_s not in canonical_rows and not existing.get("descrizione"):
+                    products_by_code[codice_s] = row_data
             else:
                 products_by_code[codice_s] = row_data
+                if raw_code == codice_s:
+                    canonical_rows.add(codice_s)
         except Exception:
             err += 1
     operations = [UpdateOne({"codice": code}, {"$set": data}, upsert=True) for code, data in products_by_code.items()]

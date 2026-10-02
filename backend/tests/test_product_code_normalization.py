@@ -90,7 +90,7 @@ def _product_row(code, description, acquired, sold_shop, remaining, vending_stoc
     return tuple(row)
 
 
-def test_import_merges_verified_alias_rows_without_losing_totals(monkeypatch):
+def test_import_prefers_canonical_snapshot_over_stale_alias(monkeypatch):
     products = _Collection()
     fake_db = _Db(
         prodotti=products,
@@ -118,9 +118,9 @@ def test_import_merges_verified_alias_rows_without_losing_totals(monkeypatch):
     assert len(products.operations) == 1
     merged = products.operations[0]._doc["$set"]
     assert merged["codice"] == "AMMS96"
-    assert merged["acquistati"] == 7
-    assert merged["venduti_negozio"] == 10
-    assert merged["venduti_vending"] == 3
-    assert merged["giacenza_vending"] == 3
-    assert merged["giacenza_negozio"] == 13
+    assert merged["acquistati"] == 5
+    assert merged["venduti_negozio"] == 7
+    assert merged["venduti_vending"] == 2
+    assert merged["giacenza_vending"] == 2
+    assert merged["giacenza_negozio"] == 8
     assert products.deleted == [{"codice": {"$in": ["96"]}}]
