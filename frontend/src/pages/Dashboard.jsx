@@ -22,8 +22,12 @@ function formatShortDate(value) {
 
 function formatActivityDate(value) {
   if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+  const raw = String(value);
+  const isoDate = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:T00:00:00(?:\.000)?(?:Z|[+-]\d{2}:?\d{2})?)?$/);
+  if (isoDate) return `${isoDate[3]}/${isoDate[2]}`;
+  if (/^\d{2}[/-]\d{2}[/-]\d{4}$/.test(raw.slice(0, 10))) return raw.slice(0, 10);
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw.slice(0, 10);
   return new Intl.DateTimeFormat("it-IT", {
     day: "2-digit",
     month: "2-digit",

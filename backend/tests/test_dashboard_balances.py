@@ -30,14 +30,12 @@ class SalesCollection:
     def __init__(self, documents):
         self.documents = documents
 
-    async def find_one(self, *_args, **_kwargs):
-        if not self.documents:
-            return None
-        return max(self.documents, key=lambda item: item.get("data", ""))
-
-    def find(self, query, *_args):
-        start = query.get("data", {}).get("$gte", "")
-        return FakeCursor([item for item in self.documents if item.get("data", "") >= start])
+    def aggregate(self, _pipeline):
+        totals = {}
+        for item in self.documents:
+            day = str(item.get("data") or "")[:10]
+            totals[day] = totals.get(day, 0) + float(item.get("importo") or 0)
+        return FakeCursor([{"_id": day, "importo": amount} for day, amount in totals.items()])
 
 
 def historical_row(amount, payment, accounted="SI", outcome="OK"):
@@ -139,7 +137,7 @@ def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monk
             ]),
             db_storico_vend=SalesCollection([
                 {"data": "2026-09-30T00:00:00", "importo": 10},
-                {"data": "2026-10-01T00:00:00", "importo": 20},
+                {"data": "01/10/2026", "importo": 20},
             ]),
         ),
     )
@@ -167,5 +165,6 @@ def test_dashboard_sales_trend_handles_empty_sources(monkeypatch):
         "ultimo_giorno": None,
         "totale_ultimo_giorno": 0,
         "variazione_pct": None,
+        "totale_periodo": 0,
         "serie": [],
     }

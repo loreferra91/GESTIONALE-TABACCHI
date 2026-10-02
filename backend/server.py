@@ -2247,55 +2247,61 @@ async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) ->
 
 async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
     """Restituisce l'andamento fino all'ultimo giorno di vendita disponibile."""
-    latest_app, latest_imported = await asyncio.gather(
-        db.vendite.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
-        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
-    )
-
-    latest_candidates = [
-        str(doc.get("data") or "")[:10]
-        for doc in (latest_app, latest_imported)
-        if doc and doc.get("data")
+    pipeline = [
+        {
+            "$project": {
+                "giorno": {"$substrBytes": [{"$toString": "$data"}, 0, 10]},
+                "importo": {"$ifNull": ["$importo", 0]},
+            }
+        },
+        {"$group": {"_id": "$giorno", "importo": {"$sum": "$importo"}}},
     ]
-    latest_day = max(latest_candidates, default=None)
-    if not latest_day:
-        return {"ultimo_giorno": None, "totale_ultimo_giorno": 0, "variazione_pct": None, "serie": []}
-
-    try:
-        end_date = datetime.fromisoformat(latest_day).date()
-    except ValueError:
-        return {"ultimo_giorno": latest_day, "totale_ultimo_giorno": 0, "variazione_pct": None, "serie": []}
-
-    start_date = end_date - timedelta(days=days - 1)
-    start_iso = start_date.isoformat()
-    query = {"data": {"$gte": start_iso}}
     app_sales, imported_sales = await asyncio.gather(
-        db.vendite.find(query, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-        db.db_storico_vend.find(query, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
+        db.vendite.aggregate(pipeline).to_list(None),
+        db.db_storico_vend.aggregate(pipeline).to_list(None),
     )
 
-    totals: Dict[str, float] = {}
+    totals_by_date: Dict[Any, float] = {}
     for sale in [*imported_sales, *app_sales]:
-        day = str(sale.get("data") or "")[:10]
-        if day < start_iso or day > latest_day:
+        raw_day = str(sale.get("_id") or "")[:10]
+        parsed_day = None
+        for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
+            try:
+                parsed_day = datetime.strptime(raw_day, date_format).date()
+                break
+            except ValueError:
+                continue
+        if parsed_day is None:
             continue
         try:
             amount = float(sale.get("importo") or 0)
         except (TypeError, ValueError):
             continue
-        totals[day] = totals.get(day, 0) + amount
+        totals_by_date[parsed_day] = totals_by_date.get(parsed_day, 0) + amount
+
+    if not totals_by_date:
+        return {
+            "ultimo_giorno": None,
+            "totale_ultimo_giorno": 0,
+            "variazione_pct": None,
+            "totale_periodo": 0,
+            "serie": [],
+        }
+
+    end_date = max(totals_by_date)
+    start_date = end_date - timedelta(days=days - 1)
 
     series = []
     for offset in range(days):
-        day = (start_date + timedelta(days=offset)).isoformat()
-        series.append({"data": day, "importo": round(totals.get(day, 0), 2)})
+        current_date = start_date + timedelta(days=offset)
+        series.append({"data": current_date.isoformat(), "importo": round(totals_by_date.get(current_date, 0), 2)})
 
-    latest_total = round(totals.get(latest_day, 0), 2)
+    latest_total = round(totals_by_date.get(end_date, 0), 2)
     previous_values = [point["importo"] for point in series[:-1]]
     previous_average = sum(previous_values) / len(previous_values) if previous_values else 0
     variation = round(((latest_total - previous_average) / previous_average) * 100, 1) if previous_average else None
     return {
-        "ultimo_giorno": latest_day,
+        "ultimo_giorno": end_date.isoformat(),
         "totale_ultimo_giorno": latest_total,
         "variazione_pct": variation,
         "totale_periodo": round(sum(point["importo"] for point in series), 2),
