@@ -475,7 +475,10 @@ def _product_code_text(value: Any) -> str:
 def _description_tokens(value: Any) -> List[str]:
     text = unicodedata.normalize("NFKD", str(value or ""))
     ascii_text = text.encode("ascii", "ignore").decode().upper()
-    return re.findall(r"[A-Z0-9]+", ascii_text)
+    token_aliases = {
+        "BLUE": "BLU",
+    }
+    return [token_aliases.get(token, token) for token in re.findall(r"[A-Z0-9]+", ascii_text)]
 
 
 def _same_adm_product(description: Any, adm_description: Any) -> bool:

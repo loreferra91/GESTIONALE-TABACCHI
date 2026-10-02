@@ -24,6 +24,16 @@ def test_numeric_accessory_is_not_confused_with_same_numbered_adm_product():
     ) == "913"
 
 
+def test_common_blue_blu_spelling_variant_is_matched():
+    aliases = server._adm_alias_index([
+        ("AMMS201", "CHESTERFIELD BLU KS *AST 20"),
+    ])
+
+    assert server._canonical_product_code(
+        "201", "CHESTERFIELD BLUE (BOX)", aliases
+    ) == "AMMS201"
+
+
 def test_amms_codes_are_normalized_consistently():
     assert server._canonical_product_code("amms0096", "anything", {}) == "AMMS96"
 
