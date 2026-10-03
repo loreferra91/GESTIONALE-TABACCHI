@@ -136,6 +136,8 @@ class VenditaGiornaliera(BaseModel):
     importo: float = 0
     canale: str = "NEGOZIO"  # NEGOZIO / VENDING
     pagamento: str = "CONTANTI"
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    sorgente: str = "MANUALE"
 
 
 class VenditaIn(BaseModel):
@@ -243,9 +245,18 @@ BACKUP_COLLECTIONS = [
     "parametri",
     "db_storico_vend",
     "db_storico_vending_ext",
+    "vendite",
     "versamenti",
     "prelievi_vending",
+    "cassa",
+    "ordini_fornitore",
+    "ordini_fornitore_righe",
+    "import_history",
+    "adm_sync",
 ]
+
+BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
+BACKUP_FILE_VERSION = 1
 
 
 # ------------------------- Seed -------------------------
@@ -978,7 +989,16 @@ async def bulk_vendite(body: BulkVenditaIn):
                 field = "giacenza_vending" if body.canale == "VENDING" else "giacenza_negozio"
                 vend_field = "venduti_vending" if body.canale == "VENDING" else "venduti_negozio"
                 await db.prodotti.update_one({"codice": codice}, {"$inc": {field: -qta, vend_field: qta}})
-            v = VenditaGiornaliera(data=data, codice=codice, descrizione=desc, quantita=qta, importo=imp, canale=body.canale, pagamento=body.pagamento)
+            v = VenditaGiornaliera(
+                data=data,
+                codice=codice,
+                descrizione=desc,
+                quantita=qta,
+                importo=imp,
+                canale=body.canale,
+                pagamento=body.pagamento,
+                sorgente="BULK",
+            )
             await db.vendite.insert_one(v.model_dump())
             inserted += 1
         except Exception as e:
@@ -1023,8 +1043,57 @@ async def create_backup_snapshot(label: str, reason: str = "manuale") -> Dict[st
         "total_docs": total_docs,
         "status": "READY",
     }
-    await db.backup_snapshots.insert_one(meta)
+    # Motor muta il dizionario passato a insert_one aggiungendo ``_id``.
+    # Manteniamo pulito l'oggetto restituito all'API: ObjectId non e' JSON
+    # serializzabile e faceva apparire fallito un backup gia' creato.
+    await db.backup_snapshots.insert_one(meta.copy())
     return meta
+
+
+async def _backup_documents(
+    snapshot_id: str, collection_names: Optional[List[str]] = None
+) -> Dict[str, List[Dict[str, Any]]]:
+    collections: Dict[str, List[Dict[str, Any]]] = {}
+    names = BACKUP_COLLECTIONS if collection_names is None else collection_names
+    for collection_name in names:
+        items = await db.backup_snapshot_items.find(
+            {"snapshot_id": snapshot_id, "collection": collection_name},
+            {"_id": 0, "doc": 1},
+        ).to_list(25000)
+        collections[collection_name] = [item["doc"] for item in items]
+    return collections
+
+
+def _validate_backup_file(payload: Any) -> Dict[str, List[Dict[str, Any]]]:
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "Il file di backup non contiene un oggetto JSON valido")
+    if payload.get("format") != BACKUP_FILE_FORMAT or payload.get("version") != BACKUP_FILE_VERSION:
+        raise HTTPException(422, "Formato o versione del backup non riconosciuti")
+    collections = payload.get("collections")
+    if not isinstance(collections, dict):
+        raise HTTPException(422, "Il backup non contiene le collezioni dati")
+    missing = [name for name in BACKUP_COLLECTIONS if name not in collections]
+    unknown = [name for name in collections if name not in BACKUP_COLLECTIONS]
+    if missing:
+        raise HTTPException(422, f"Backup incompleto: mancano {', '.join(missing)}")
+    if unknown:
+        raise HTTPException(422, f"Backup non valido: collezioni sconosciute {', '.join(unknown)}")
+    for collection_name, docs in collections.items():
+        if not isinstance(docs, list) or len(docs) > 25000:
+            raise HTTPException(422, f"Collezione {collection_name} non valida o troppo grande")
+        if any(not isinstance(doc, dict) or "_id" in doc for doc in docs):
+            raise HTTPException(422, f"Documento non valido nella collezione {collection_name}")
+    return collections
+
+
+async def _restore_collections(collections: Dict[str, List[Dict[str, Any]]]):
+    for collection_name in BACKUP_COLLECTIONS:
+        if collection_name not in collections:
+            continue
+        await db[collection_name].delete_many({})
+        docs = collections[collection_name]
+        if docs:
+            await db[collection_name].insert_many(docs)
 
 
 @api.post("/backup/create")
@@ -1041,6 +1110,37 @@ async def backup_list(limit: int = 20):
     return docs
 
 
+@api.get("/backup/{snapshot_id}/download")
+async def backup_download(snapshot_id: str):
+    meta = await db.backup_snapshots.find_one({"id": snapshot_id}, {"_id": 0})
+    if not meta:
+        raise HTTPException(404, "backup non trovato")
+    backed_up_names = list((meta.get("counts") or {}).keys())
+    missing = [name for name in BACKUP_COLLECTIONS if name not in backed_up_names]
+    if missing:
+        raise HTTPException(
+            409,
+            "Questo backup è precedente al formato completo. Creane uno nuovo per scaricare anche vendite, cassa e ordini.",
+        )
+    collections = await _backup_documents(snapshot_id)
+    payload = {
+        "format": BACKUP_FILE_FORMAT,
+        "version": BACKUP_FILE_VERSION,
+        "created_at": meta.get("created_at"),
+        "label": meta.get("label"),
+        "counts": {name: len(docs) for name, docs in collections.items()},
+        "collections": collections,
+    }
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    timestamp = str(meta.get("created_at") or datetime.now(timezone.utc).isoformat())[:19].replace(":", "-")
+    filename = f"gestionale-backup-{timestamp}.json"
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @api.post("/backup/{snapshot_id}/restore")
 async def backup_restore(snapshot_id: str):
     meta = await db.backup_snapshots.find_one({"id": snapshot_id}, {"_id": 0})
@@ -1050,20 +1150,36 @@ async def backup_restore(snapshot_id: str):
         f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
         "pre-restore",
     )
-    for collection_name in BACKUP_COLLECTIONS:
-        items = await db.backup_snapshot_items.find(
-            {"snapshot_id": snapshot_id, "collection": collection_name},
-            {"_id": 0, "doc": 1},
-        ).to_list(25000)
-        await db[collection_name].delete_many({})
-        docs = [item["doc"] for item in items]
-        if docs:
-            await db[collection_name].insert_many(docs)
+    # I vecchi snapshot non contenevano tutte le collezioni operative: in quel
+    # caso ripristiniamo soltanto ciò che era stato effettivamente salvato.
+    backed_up_names = [name for name in (meta.get("counts") or {}) if name in BACKUP_COLLECTIONS]
+    await _restore_collections(await _backup_documents(snapshot_id, backed_up_names))
     await db.backup_snapshots.update_one(
         {"id": snapshot_id},
         {"$set": {"last_restored_at": datetime.now(timezone.utc).isoformat()}},
     )
     return {"ok": True, "restored": snapshot_id, "pre_restore_backup": restore_backup["id"]}
+
+
+@api.post("/backup/restore-file")
+async def backup_restore_file(file: UploadFile = File(...)):
+    raw = await _read_capped(file)
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(422, f"File di backup non leggibile: {exc}")
+    collections = _validate_backup_file(payload)
+    restore_backup = await create_backup_snapshot(
+        f"Prima del ripristino file {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
+        "pre-restore-file",
+    )
+    await _restore_collections(collections)
+    return {
+        "ok": True,
+        "file": file.filename,
+        "restored_docs": sum(len(docs) for docs in collections.values()),
+        "pre_restore_backup": restore_backup["id"],
+    }
 
 
 async def record_import_history(file_name: str, report: Dict[str, Any], backup_id: Optional[str] = None):
@@ -1218,15 +1334,38 @@ async def report_giornaliero():
     }
 
 
-@api.post("/vendite/import-csv-vending")
-async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
-    """Import CSV del distributore vending. Colonne accettate (case-insensitive):
-       data, prodotto/nome prodotto, prezzo, colonna, codice/codice aams, categoria, pagamento.
-       Separatore auto-rilevato (, ; \\t).
-    """
+def _csv_vending_datetime(value: Any) -> str:
+    """Normalizza le date esportate dal distributore in un ISO filtrabile."""
+    text = str(value or "").strip()
+    if not text:
+        return datetime.now(timezone.utc).isoformat()
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized).isoformat()
+    except ValueError:
+        pass
+    for fmt in (
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        "%d/%m/%Y", "%d-%m-%Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt).isoformat()
+        except ValueError:
+            continue
+    raise ValueError(f"data non riconosciuta: {text}")
+
+
+def _normalize_vending_column(value: Any) -> str:
+    """Converte le colonne esportate come ``1-B02`` nel codice interno ``B02``."""
+    column = re.sub(r"\s+", "", str(value or "").strip().upper())
+    match = re.fullmatch(r"\d+[-/]([A-Z]+\d+)", column)
+    return match.group(1) if match else column
+
+
+def _parse_csv_vending(raw: str, pagamento: str = "CONTANTI") -> Dict[str, Any]:
+    """Condivide parsing e validazione tra anteprima e import effettivo."""
     import csv
-    raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
-    # rileva delimitatore
     sample = raw[:2000]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
@@ -1244,38 +1383,166 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 return row.get(actual)
         return None
 
-    inserted = 0
     skipped = 0
     errors = []
+    rows = []
     for i, row in enumerate(reader):
         try:
             codice = str(pick(row, "codice", "codice aams", "cod aams", "cod", "aams") or "").strip()
             nome = str(pick(row, "nome prodotto", "prodotto", "descrizione", "articolo") or "").strip()
             prezzo = pick(row, "prezzo", "importo")
             data = pick(row, "data", "date")
-            colonna = str(pick(row, "colonna", "column") or "").strip()
+            colonna = _normalize_vending_column(pick(row, "colonna", "column"))
             categoria = str(pick(row, "categoria", "tipo") or "").strip()
-            pag = str(pick(row, "pagamento", "payment") or pagamento).strip() or pagamento
+            pag = str(pick(row, "pagamento", "payment") or pagamento).strip().upper() or pagamento.upper()
 
             if not codice and not nome:
                 skipped += 1
                 continue
             prezzo_f = float(str(prezzo).replace(",", ".")) if prezzo not in (None, "") else 0.0
-            # data: default oggi se mancante
-            data_iso = str(data) if data else datetime.now(timezone.utc).isoformat()
+            data_iso = _csv_vending_datetime(data)
+            rows.append({
+                "riga": i + 2,
+                "data": data_iso,
+                "codice": codice,
+                "nome": nome,
+                "prezzo": prezzo_f,
+                "colonna": colonna,
+                "categoria": categoria,
+                "pagamento": pag,
+            })
+        except Exception as exc:
+            errors.append({"riga": i + 2, "errore": str(exc)})
+    return {"righe": rows, "saltati": skipped, "errori": errors, "delimitatore": delim}
+
+
+def _parse_sale_datetime(value: Any):
+    """Normalizza data e ora delle vendite senza perdere il dettaglio orario."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+    if parsed:
+        return parsed.replace(tzinfo=None)
+    for fmt in (
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        "%d/%m/%Y", "%d-%m-%Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _latest_historical_vending_datetime(documents: List[Dict[str, Any]]):
+    """Restituisce l'ultimo timestamp già incluso nello storico vending Excel."""
+    parsed_datetimes = []
+    for document in documents:
+        raw = document.get("raw") or []
+        # DB_STORICO_VENDING_EXT: DATA_ORA è la seconda colonna. DATA resta
+        # il fallback per vecchi file che non conservano l'orario.
+        value = raw[1] if len(raw) > 1 and raw[1] else (raw[2] if len(raw) > 2 else None)
+        parsed = _parse_sale_datetime(value)
+        if parsed:
+            parsed_datetimes.append(parsed)
+    return max(parsed_datetimes, default=None)
+
+
+def _filter_new_csv_vending_rows(
+    rows: List[Dict[str, Any]], historical_documents: List[Dict[str, Any]]
+) -> tuple[List[Dict[str, Any]], Any]:
+    """Tiene solo le righe successive all'ultima vendita presente nell'Excel."""
+    cutoff = _latest_historical_vending_datetime(historical_documents)
+    if not cutoff:
+        return rows, None
+    return [row for row in rows if (_parse_sale_datetime(row.get("data")) or datetime.min) > cutoff], cutoff
+
+
+async def _prepare_csv_vending_import(raw: str, pagamento: str) -> tuple[Dict[str, Any], Any, int]:
+    parsed = _parse_csv_vending(raw, pagamento)
+    historical_documents = await db.db_storico_vending_ext.find(
+        {}, {"_id": 0, "raw": 1}
+    ).to_list(None)
+    all_rows = parsed["righe"]
+    parsed["righe"], cutoff = _filter_new_csv_vending_rows(all_rows, historical_documents)
+    return parsed, cutoff, len(all_rows)
+
+
+@api.post("/vendite/preview-csv-vending")
+async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
+    """Mostra solo le vendite successive allo storico vending importato da Excel."""
+    raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
+    parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
+    payment_counts: Dict[str, int] = {}
+    total = 0.0
+    for row in parsed["righe"]:
+        method = row["pagamento"]
+        payment_counts[method] = payment_counts.get(method, 0) + 1
+        total += row["prezzo"]
+    dates = [row["data"][:10] for row in parsed["righe"]]
+    return {
+        "righe": len(parsed["righe"]),
+        "saltati": parsed["saltati"],
+        "errori": parsed["errori"],
+        "delimitatore": parsed["delimitatore"],
+        "pagamenti": payment_counts,
+        "totale": round(total, 2),
+        "data_da": min(dates, default=None),
+        "data_a": max(dates, default=None),
+        "righe_file": file_rows,
+        "righe_gia_presenti": file_rows - len(parsed["righe"]),
+        "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
+        "vendite": parsed["righe"],
+    }
+
+
+@api.post("/vendite/import-csv-vending")
+async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
+    """Importa il CSV gia' validato dall'anteprima della UI."""
+    raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
+    parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
+    inserted = 0
+    errors = list(parsed["errori"])
+    payment_counts: Dict[str, int] = {}
+    for csv_row in parsed["righe"]:
+        try:
+            codice = csv_row["codice"]
+            nome = csv_row["nome"]
+            prezzo_f = csv_row["prezzo"]
+            data_iso = csv_row["data"]
+            colonna = csv_row["colonna"]
+            categoria = csv_row["categoria"]
+            pag = csv_row["pagamento"]
+
+            prod = None
+            if codice:
+                raw_code = _product_code_text(codice)
+                candidates = [raw_code]
+                if raw_code.isdigit() or raw_code.startswith("AMMS"):
+                    candidates.append(adm_local_code(raw_code))
+                prod = await db.prodotti.find_one({"codice": {"$in": list(dict.fromkeys(candidates))}})
+                if prod:
+                    codice = prod["codice"]
             # se codice manca prova a risolvere dal nome
             if not codice and nome:
-                p = await db.prodotti.find_one({"descrizione": {"$regex": f"^{re.escape(nome)}$", "$options": "i"}})
-                if p:
-                    codice = p["codice"]
+                prod = await db.prodotti.find_one({"descrizione": {"$regex": f"^{re.escape(nome)}$", "$options": "i"}})
+                if prod:
+                    codice = prod["codice"]
             if not codice:
                 # crea un placeholder
-                codice = f"CSV-{norm(nome)[:20].replace(' ', '_')}"
+                slug = re.sub(r"\s+", "_", nome.strip().lower())[:20]
+                codice = f"CSV-{slug}"
 
             # ogni riga CSV = 1 pezzo venduto (formato tipico distributore)
             v = VenditaGiornaliera(
                 data=data_iso, codice=codice, descrizione=nome, quantita=1, importo=prezzo_f,
-                canale="VENDING", pagamento=pag,
+                canale="VENDING", pagamento=pag, sorgente="CSV_VENDING",
             )
             await db.vendite.insert_one(v.model_dump())
 
@@ -1284,9 +1551,9 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 col = await db.vending.find_one({"colonna": colonna})
                 if col:
                     new_g = max(0, (col.get("giacenza") or 0) - 1)
-                    await db.vending.update_one({"colonna": colonna}, {"$set": {"giacenza": new_g}})
+                    await db.vending.update_one({"id": col["id"]}, {"$set": {"giacenza": new_g}})
             # aggiorna prodotto
-            prod = await db.prodotti.find_one({"codice": codice})
+            prod = prod or await db.prodotti.find_one({"codice": codice})
             if prod:
                 await db.prodotti.update_one({"codice": codice}, {"$inc": {"giacenza_vending": -1, "venduti_vending": 1}})
             else:
@@ -1297,9 +1564,19 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                     prezzo=prezzo_f, venduti_vending=1,
                 ).model_dump())
             inserted += 1
-        except Exception as e:
-            errors.append({"riga": i + 2, "errore": str(e)})
-    return {"inseriti": inserted, "saltati": skipped, "errori": errors, "delimitatore": delim}
+            payment_counts[pag] = payment_counts.get(pag, 0) + 1
+        except Exception as exc:
+            errors.append({"riga": csv_row["riga"], "errore": str(exc)})
+    return {
+        "inseriti": inserted,
+        "saltati": parsed["saltati"],
+        "errori": errors,
+        "delimitatore": parsed["delimitatore"],
+        "pagamenti": payment_counts,
+        "righe_file": file_rows,
+        "righe_gia_presenti": file_rows - len(parsed["righe"]),
+        "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
+    }
 
 
 
@@ -2192,6 +2469,32 @@ def _latest_sale_date(documents: List[Dict[str, Any]]):
     return max((parsed for parsed in parsed_dates if parsed), default=None)
 
 
+def _parse_utc_datetime(value: Any):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_sale_after_excel_import(
+    document: Dict[str, Any], latest_imported_sale: Any, latest_import_created_at: Any
+) -> bool:
+    """Include le registrazioni create dopo l'Excel, anche nello stesso giorno."""
+    import_cutoff = _parse_utc_datetime(latest_import_created_at)
+    created_at = _parse_utc_datetime(document.get("created_at"))
+    if import_cutoff and created_at:
+        return created_at > import_cutoff
+    sale_cutoff = _parse_sale_date(latest_imported_sale)
+    sale_day = _parse_sale_date(document.get("data"))
+    return not sale_cutoff or bool(sale_day and sale_day > sale_cutoff)
+
+
 def _is_cash_payment(payment_method: Any) -> bool:
     normalized = unicodedata.normalize("NFKD", str(payment_method or "")).encode("ascii", "ignore").decode().upper()
     return not normalized or "CONTANT" in normalized
@@ -2269,7 +2572,11 @@ def _calculate_dashboard_balances(
     }
 
 
-async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) -> Dict[str, float]:
+async def _dashboard_balances(
+    saldo_cassa: float,
+    totale_prelievi: float = 0,
+    latest_import_created_at: Any = None,
+) -> Dict[str, float]:
     # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
     # pagamento. Le vendite dell'app successive all'ultima data importata si
     # aggiungono allo storico; il filtro temporale impedisce doppi conteggi al
@@ -2278,43 +2585,40 @@ async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) ->
         db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
         db.vendite.find(
             {"canale": {"$regex": "^VENDING$", "$options": "i"}},
-            {"_id": 0, "data": 1, "importo": 1, "pagamento": 1},
+            {"_id": 0, "data": 1, "created_at": 1, "importo": 1, "pagamento": 1},
         ).to_list(None),
     )
     payments = _vending_payment_values(historical_docs, legacy_raw=True)
     cutoff = _latest_historical_vending_date(historical_docs)
     supplemental_app_docs = []
     for document in app_docs:
-        # Se uno storico legacy non espone alcuna data non possiamo separare
-        # con certezza vendite nuove e già importate: manteniamo lo storico
-        # come fonte unica, evitando un possibile doppio conteggio.
-        if historical_docs and cutoff is None:
+        if historical_docs and cutoff is None and not latest_import_created_at:
             continue
-        sale_day = _parse_sale_date(document.get("data"))
-        if cutoff and (sale_day is None or sale_day <= cutoff):
+        if not _is_sale_after_excel_import(document, cutoff, latest_import_created_at):
             continue
         supplemental_app_docs.append(document)
     payments.extend(_vending_payment_values(supplemental_app_docs, legacy_raw=False))
     return _calculate_dashboard_balances(payments, saldo_cassa, totale_prelievi)
 
 
-async def _supplemental_store_cash_sales(latest_imported_sale: Any) -> float:
+async def _supplemental_store_cash_sales(
+    latest_imported_sale: Any, latest_import_created_at: Any = None
+) -> float:
     """Somma gli incassi negozio registrati dopo lo storico incluso nell'Excel.
 
-    RIEP_VENDITA contiene un totale cumulativo: limitare le vendite dell'app ai
-    giorni successivi evita di contarle due volte dopo un nuovo import.
+    RIEP_VENDITA contiene un totale cumulativo: il timestamp di registrazione
+    separa le nuove vendite da quelle già comprese nell'ultimo import Excel.
     """
     cutoff = _parse_sale_date(latest_imported_sale)
     documents = await db.vendite.find(
-        {}, {"_id": 0, "data": 1, "canale": 1, "pagamento": 1, "importo": 1}
+        {}, {"_id": 0, "data": 1, "created_at": 1, "canale": 1, "pagamento": 1, "importo": 1}
     ).to_list(None)
     total = 0.0
     for document in documents:
         channel = str(document.get("canale") or "NEGOZIO").strip().upper()
         if channel == "VENDING" or not _is_cash_payment(document.get("pagamento")):
             continue
-        sale_day = _parse_sale_date(document.get("data"))
-        if cutoff and (sale_day is None or sale_day <= cutoff):
+        if not _is_sale_after_excel_import(document, cutoff, latest_import_created_at):
             continue
         try:
             total += float(document.get("importo") or 0)
@@ -2325,30 +2629,16 @@ async def _supplemental_store_cash_sales(latest_imported_sale: Any) -> float:
 
 async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
     """Restituisce l'andamento fino all'ultimo giorno di vendita disponibile."""
-    pipeline = [
-        {
-            "$project": {
-                "giorno": {"$substrBytes": [{"$toString": "$data"}, 0, 10]},
-                "importo": {"$ifNull": ["$importo", 0]},
-            }
-        },
-        {"$group": {"_id": "$giorno", "importo": {"$sum": "$importo"}}},
-    ]
+    # Il raggruppamento applicativo mantiene lo stesso risultato su MongoDB e
+    # sul database locale mongomock, che non implementa $substrBytes.
     app_sales, imported_sales = await asyncio.gather(
-        db.vendite.aggregate(pipeline).to_list(None),
-        db.db_storico_vend.aggregate(pipeline).to_list(None),
+        db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
+        db.db_storico_vend.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
     )
 
     totals_by_date: Dict[Any, float] = {}
     for sale in [*imported_sales, *app_sales]:
-        raw_day = str(sale.get("_id") or "")[:10]
-        parsed_day = None
-        for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
-            try:
-                parsed_day = datetime.strptime(raw_day, date_format).date()
-                break
-            except ValueError:
-                continue
+        parsed_day = _parse_sale_date(sale.get("data"))
         if parsed_day is None:
             continue
         try:
@@ -2415,12 +2705,19 @@ async def dashboard():
     versamenti, prelievi, venduto_negozio_app_contanti = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
-        _supplemental_store_cash_sales(ultima_vendita_importata),
+        _supplemental_store_cash_sales(
+            ultima_vendita_importata,
+            (ultimo_import or {}).get("created_at"),
+        ),
     )
     venduto_negozio_contabilizzato = round(venduto_negozio_excel + venduto_negozio_app_contanti, 2)
     liquidita_residua = round(venduto_negozio_contabilizzato - versamenti["totale"], 2)
     saldi, andamento_vendite = await asyncio.gather(
-        _dashboard_balances(liquidita_residua, prelievi["totale"]),
+        _dashboard_balances(
+            liquidita_residua,
+            prelievi["totale"],
+            (ultimo_import or {}).get("created_at"),
+        ),
         _dashboard_sales_trend(),
     )
     # vending

@@ -20,6 +20,10 @@ export default function Vendite() {
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
+  const [csvFile, setCsvFile] = useState(null);
+  const [csvPreview, setCsvPreview] = useState(null);
+  const [csvPreviewing, setCsvPreviewing] = useState(false);
+  const [csvImporting, setCsvImporting] = useState(false);
   const [prodMap, setProdMap] = useState(new Map());
 
   useEffect(() => {
@@ -77,8 +81,12 @@ export default function Vendite() {
       const step = raw.length % 5 === 0 ? 5 : 4;
       for (let i = 0; i < raw.length; i += step) groups.push(raw.slice(i, i + step));
     } else {
-      // Formato orizzontale classico (TSV/CSV)
-      for (const line of raw) groups.push(line.split(/\t|;|,/).map(x => x.trim()));
+      // Formato orizzontale classico. Excel usa TAB e mantiene la virgola
+      // decimale: scegliamo un solo delimitatore per non spezzare 6,00.
+      for (const line of raw) {
+        const delimiter = line.includes("\t") ? "\t" : (line.includes(";") ? ";" : ",");
+        groups.push(line.split(delimiter).map(x => x.trim()));
+      }
     }
 
     return groups.map((parts, idx) => {
@@ -127,6 +135,11 @@ export default function Vendite() {
     const stato = !trimmed ? "vuoto" : !known ? "sconosciuto" : (r.quantita <= 0 ? "qta zero" : (r.importo <= 0 ? "importo zero" : "ok"));
     return { ...r, _known: known, _stato: stato };
   }), [bulkRows, prodMap]);
+  const bulkTotals = useMemo(() => rowsWithStatus.reduce((acc, row) => {
+    if (row.quantita > 0) acc.pezzi += row.quantita;
+    if (row.importo > 0) acc.importo += row.importo;
+    return acc;
+  }, { pezzi: 0, importo: 0 }), [rowsWithStatus]);
 
   const updateBulkRow = (i, field, val) => {
     setBulkRows(rs => rs.map((r, idx) => idx === i ? { ...r, [field]: val } : r));
@@ -140,21 +153,62 @@ export default function Vendite() {
     setBulkResult(null);
   };
 
-  const uploadCsv = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
+  const previewCsv = async (file, defaultPayment = csvPag) => {
+    if (!file) return;
+    setCsvPreviewing(true);
+    setCsvPreview(null);
+    setCsvResult(null);
     const fd = new FormData();
-    fd.append("file", f);
+    fd.append("file", file);
     try {
-      const r = await fetch(`${API}/vendite/import-csv-vending?pagamento=${csvPag}`, { method: "POST", body: fd });
+      const r = await fetch(`${API}/vendite/preview-csv-vending?pagamento=${encodeURIComponent(defaultPayment)}`, { method: "POST", body: fd });
+      if (!r.ok) throw new Error((await r.text()) || r.statusText);
+      const j = await r.json();
+      setCsvPreview(j);
+      if (!j.righe) toast.error("Il file non contiene righe valide");
+    } catch (err) {
+      setCsvFile(null);
+      if (csvRef.current) csvRef.current.value = "";
+      toast.error(apiErrorMessage(err, "Impossibile leggere il CSV"));
+    } finally {
+      setCsvPreviewing(false);
+    }
+  };
+
+  const selectCsv = (e) => {
+    const file = e.target.files?.[0] || null;
+    setCsvFile(file);
+    if (file) previewCsv(file);
+  };
+
+  const changeCsvDefaultPayment = (value) => {
+    setCsvPag(value);
+    if (csvFile) previewCsv(csvFile, value);
+  };
+
+  const clearCsv = () => {
+    setCsvFile(null);
+    setCsvPreview(null);
+    if (csvRef.current) csvRef.current.value = "";
+  };
+
+  const uploadCsv = async () => {
+    if (!csvFile || !csvPreview?.righe) return;
+    setCsvImporting(true);
+    const fd = new FormData();
+    fd.append("file", csvFile);
+    try {
+      const r = await fetch(`${API}/vendite/import-csv-vending?pagamento=${encodeURIComponent(csvPag)}`, { method: "POST", body: fd });
+      if (!r.ok) throw new Error((await r.text()) || r.statusText);
       const j = await r.json();
       setCsvResult(j);
-      toast.success(`CSV vending: ${j.inseriti} righe importate`);
-      load();
+      toast.success(`CSV vending: ${j.inseriti} righe importate e vendite aggiornate`);
+      clearCsv();
+      await load();
     } catch (err) {
       toast.error(apiErrorMessage(err, "Errore import CSV"));
     } finally {
-      csvRef.current.value = "";
+      setCsvImporting(false);
     }
   };
 
@@ -230,6 +284,17 @@ export default function Vendite() {
           className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"
         />
 
+        <div data-testid="bulk-live-total" className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <div>
+            <div className="text-xs font-black uppercase tracking-wider text-emerald-800">Totale live</div>
+            <div className="mt-0.5 text-xs text-emerald-700">Si aggiorna mentre modifichi quantità, importi o righe.</div>
+          </div>
+          <div className="flex items-baseline gap-4 tabular-nums">
+            <span className="text-sm font-bold text-emerald-800">{formatNum(bulkTotals.pezzi)} PZ</span>
+            <span className="font-heading text-2xl font-black text-emerald-900">{formatEur(bulkTotals.importo)}</span>
+          </div>
+        </div>
+
         {rowsWithStatus.length > 0 && (
           <div className="mt-4">
             <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
@@ -274,10 +339,10 @@ export default function Vendite() {
                           <input value={r.descrizione} onChange={e => updateBulkRow(i, "descrizione", e.target.value)} className="border border-slate-200 rounded-md px-2 py-1 text-sm w-full bg-white" />
                         </td>
                         <td className="text-right">
-                          <input type="number" min={0} value={r.quantita} onChange={e => updateBulkRow(i, "quantita", parseInt(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-16 text-right bg-white" />
+                          <input data-testid={`bulk-row-${i}-quantita`} type="number" min={0} value={r.quantita} onChange={e => updateBulkRow(i, "quantita", parseInt(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-16 text-right bg-white" />
                         </td>
                         <td className="text-right">
-                          <input type="number" step="0.01" min={0} value={r.importo} onChange={e => updateBulkRow(i, "importo", parseFloat(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-20 text-right bg-white" />
+                          <input data-testid={`bulk-row-${i}-importo`} type="number" step="0.01" min={0} value={r.importo} onChange={e => updateBulkRow(i, "importo", parseFloat(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-20 text-right bg-white" />
                         </td>
                         <td><Badge tone={tone}>{label}</Badge></td>
                         <td className="text-right">
@@ -317,15 +382,87 @@ export default function Vendite() {
           Carica il file CSV esportato dal distributore. Colonne riconosciute (case-insensitive, separatore <code>,</code> <code>;</code> o TAB):<br/>
           <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">data · nome prodotto · prezzo · colonna · codice AAMS · categoria · pagamento</code>
         </p>
-        <div className="flex items-center gap-3">
-          <select data-testid="csv-pag" value={csvPag} onChange={e => setCsvPag(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-xs text-slate-500">
+            Pagamento predefinito se assente
+          </label>
+          <select data-testid="csv-pag" value={csvPag} onChange={e => changeCsvDefaultPayment(e.target.value)} disabled={csvPreviewing || csvImporting} className="border rounded-md px-3 py-2 text-sm">
             <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
           </select>
-          <input ref={csvRef} data-testid="csv-file" type="file" accept=".csv,text/csv" onChange={uploadCsv} className="text-sm" />
+          <input ref={csvRef} data-testid="csv-file" type="file" accept=".csv,text/csv" onChange={selectCsv} disabled={csvPreviewing || csvImporting} className="text-sm" />
+          {csvPreviewing && <span className="text-sm text-slate-500">Analisi file…</span>}
         </div>
+        {csvPreview && (
+          <div data-testid="csv-preview" className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-bold text-slate-900">Nuove vendite riconosciute: {formatNum(csvPreview.righe)}</div>
+                <div className="mt-1 text-sm text-slate-600">
+                  {formatEur(csvPreview.totale)} · dal {csvPreview.data_da || "—"} al {csvPreview.data_a || "—"}
+                </div>
+                {csvPreview.ultima_vendita_excel && (
+                  <div className="mt-1 text-xs text-slate-500">
+                    Dopo l'ultima vendita Excel del {new Date(csvPreview.ultima_vendita_excel).toLocaleString("it-IT")} · {formatNum(csvPreview.righe_gia_presenti || 0)} righe storiche escluse
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button data-testid="csv-cancel" onClick={clearCsv} disabled={csvImporting} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-100 disabled:opacity-40">Annulla</button>
+                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || !csvPreview.righe} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
+                  {csvImporting ? "Aggiornamento…" : "Conferma e aggiorna vendite"}
+                </button>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-bold uppercase tracking-wider text-slate-500">Pagamenti rilevati</span>
+              {Object.entries(csvPreview.pagamenti || {}).map(([payment, count]) => (
+                <Badge key={payment} tone={payment === "CONTANTI" ? "ok" : "info"}>{payment}: {formatNum(count)}</Badge>
+              ))}
+            </div>
+            {csvPreview.vendite?.length > 0 && (
+              <div className="mt-4 max-h-80 overflow-auto rounded-md border border-slate-200 bg-white">
+                <table className="w-full min-w-[760px] text-sm">
+                  <thead className="sticky top-0 bg-slate-100 text-left text-xs uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2">Data e ora</th>
+                      <th className="px-3 py-2">Prodotto</th>
+                      <th className="px-3 py-2">Codice</th>
+                      <th className="px-3 py-2">Colonna</th>
+                      <th className="px-3 py-2 text-right">Prezzo</th>
+                      <th className="px-3 py-2">Pagamento</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {csvPreview.vendite.map((sale, index) => (
+                      <tr key={`${sale.riga}-${index}`} data-testid={`csv-preview-row-${index}`}>
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{new Date(sale.data).toLocaleString("it-IT")}</td>
+                        <td className="px-3 py-2">{sale.nome || "—"}</td>
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{sale.codice || "—"}</td>
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{sale.colonna || "—"}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{formatEur(sale.prezzo)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">{sale.pagamento}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {csvPreview.righe === 0 && (
+              <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                Nessuna nuova vendita: il file è già interamente compreso nello storico Excel.
+              </div>
+            )}
+            {csvPreview.errori?.length > 0 && (
+              <div className="mt-3 text-xs text-red-700">{csvPreview.errori.length} righe con errori non verranno importate.</div>
+            )}
+          </div>
+        )}
         {csvResult && (
           <div className="mt-3 text-sm bg-slate-50 border border-slate-200 rounded-md p-3">
             <span className="font-bold text-emerald-700">{csvResult.inseriti}</span> righe · saltate {csvResult.saltati} · delimitatore <code>{csvResult.delimitatore}</code>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {Object.entries(csvResult.pagamenti || {}).map(([payment, count]) => <Badge key={payment} tone="info">{payment}: {formatNum(count)}</Badge>)}
+            </div>
             {csvResult.errori?.length > 0 && (
               <details className="mt-2"><summary className="text-red-600 cursor-pointer">Errori ({csvResult.errori.length})</summary>
                 <ul className="text-xs mt-2">{csvResult.errori.slice(0, 20).map((e, i) => <li key={`cr-${e.riga}-${i}`}>Riga {e.riga}: {e.errore}</li>)}</ul>

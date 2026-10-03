@@ -3,7 +3,7 @@ import Layout from "../components/Layout";
 import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatNum } from "../components/UI";
 import { toast } from "sonner";
-import { UploadSimple, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { UploadSimple, CheckCircle, WarningCircle, DownloadSimple } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -50,8 +50,10 @@ export default function Parametri() {
   const [history, setHistory] = useState([]);
   const [backups, setBackups] = useState([]);
   const [restoreTarget, setRestoreTarget] = useState(null);
+  const [restoreFile, setRestoreFile] = useState(null);
   const [workingBackup, setWorkingBackup] = useState(false);
   const fileRef = useRef(null);
+  const restoreFileRef = useRef(null);
 
   const load = async () => {
     const r = await api.get("/parametri");
@@ -106,14 +108,52 @@ export default function Parametri() {
     }
   };
 
+  const downloadBackup = async (backup) => {
+    const response = await api.get(`/backup/${backup.id}/download`, { responseType: "blob" });
+    const disposition = response.headers?.["content-disposition"] || "";
+    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `gestionale-backup-${backup.id}.json`;
+    const url = URL.createObjectURL(response.data);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const createBackup = async () => {
     setWorkingBackup(true);
     try {
-      await api.post("/backup/create", { label: "Backup manuale", reason: "manuale" });
-      toast.success("Backup manuale creato");
-      loadAudit();
+      const response = await api.post("/backup/create", { label: "Backup manuale", reason: "manuale" });
+      await downloadBackup(response.data);
+      toast.success("Backup creato e scaricato");
+      await loadAudit();
     } catch (err) {
       toast.error(apiErrorMessage(err, "Errore creazione backup"));
+    } finally {
+      setWorkingBackup(false);
+    }
+  };
+
+  const selectRestoreFile = (event) => {
+    const selected = event.target.files?.[0] || null;
+    setRestoreFile(selected);
+  };
+
+  const restoreBackupFile = async () => {
+    if (!restoreFile) return;
+    setWorkingBackup(true);
+    const formData = new FormData();
+    formData.append("file", restoreFile);
+    try {
+      const response = await api.post("/backup/restore-file", formData);
+      toast.success(`Backup ripristinato: ${formatNum(response.data.restored_docs)} documenti`);
+      setRestoreFile(null);
+      if (restoreFileRef.current) restoreFileRef.current.value = "";
+      await Promise.all([load(), loadAudit()]);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore ripristino file di backup"));
     } finally {
       setWorkingBackup(false);
     }
@@ -221,11 +261,24 @@ export default function Parametri() {
           <div className="flex items-start justify-between gap-3 mb-4">
             <div>
               <h2 className="font-heading font-black text-lg">Backup e ripristino</h2>
-              <p className="text-sm text-slate-600">Ogni import completo crea un backup automatico. Puoi crearne uno manuale prima di prove importanti.</p>
+              <p className="text-sm text-slate-600">Crea un file completo da conservare sul Mac. Per tornare indietro basta ricaricarlo qui.</p>
             </div>
-            <button onClick={createBackup} disabled={workingBackup} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
-              Backup ora
+            <button data-testid="backup-create-download" onClick={createBackup} disabled={workingBackup} className="flex items-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
+              <DownloadSimple size={16} /> Backup e scarica
             </button>
+          </div>
+          <div className="mb-4 rounded-md border border-blue-100 bg-blue-50 p-3">
+            <div className="text-xs font-bold uppercase tracking-wider text-blue-900">Ripristina da file</div>
+            <p className="mt-1 text-xs text-blue-800">Seleziona un file <code>gestionale-backup-….json</code>. Prima del ripristino verrà salvata automaticamente una copia dello stato attuale.</p>
+            <input
+              ref={restoreFileRef}
+              data-testid="backup-restore-file"
+              type="file"
+              accept=".json,application/json"
+              onChange={selectRestoreFile}
+              disabled={workingBackup}
+              className="mt-3 block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-2 file:font-semibold file:text-blue-900"
+            />
           </div>
           <div className="space-y-2">
             {backups.slice(0, 6).map(b => (
@@ -234,7 +287,10 @@ export default function Parametri() {
                   <div className="font-semibold truncate">{b.label}</div>
                   <div className="text-xs text-slate-500">{new Date(b.created_at).toLocaleString("it-IT")} · {formatNum(b.total_docs)} documenti · {b.reason}</div>
                 </div>
-                <button onClick={() => setRestoreTarget(b)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-50">Ripristina</button>
+                <div className="flex shrink-0 gap-2">
+                  <button onClick={() => downloadBackup(b).catch(err => toast.error(apiErrorMessage(err, "Download backup non riuscito")))} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50">Scarica</button>
+                  <button onClick={() => setRestoreTarget(b)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-50">Ripristina</button>
+                </div>
               </div>
             ))}
             {!backups.length && <div className="text-sm text-slate-400">Nessun backup registrato.</div>}
@@ -314,6 +370,21 @@ export default function Parametri() {
       >
         <p>Il database operativo verrà riportato allo stato del backup <b>{restoreTarget?.label}</b>.</p>
         <p className="mt-2 text-slate-600">Prima del ripristino verrà creato automaticamente un nuovo backup dello stato attuale.</p>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={Boolean(restoreFile)}
+        title="Ripristinare il backup dal file?"
+        confirmLabel="Ripristina dal file"
+        danger
+        loading={workingBackup}
+        onCancel={() => {
+          setRestoreFile(null);
+          if (restoreFileRef.current) restoreFileRef.current.value = "";
+        }}
+        onConfirm={restoreBackupFile}
+      >
+        <p>Verrà caricato <b>{restoreFile?.name}</b> e i dati operativi attuali saranno sostituiti.</p>
+        <p className="mt-2 text-slate-600">Il file viene controllato integralmente prima di modificare il database.</p>
       </ConfirmDialog>
     </Layout>
   );

@@ -30,12 +30,8 @@ class SalesCollection:
     def __init__(self, documents):
         self.documents = documents
 
-    def aggregate(self, _pipeline):
-        totals = {}
-        for item in self.documents:
-            day = str(item.get("data") or "")[:10]
-            totals[day] = totals.get(day, 0) + float(item.get("importo") or 0)
-        return FakeCursor([{"_id": day, "importo": amount} for day, amount in totals.items()])
+    def find(self, *_args):
+        return FakeCursor(self.documents)
 
 
 def historical_row(amount, payment, accounted="SI", outcome="OK", day="2026-08-31"):
@@ -126,6 +122,36 @@ def test_legacy_vending_history_without_dates_does_not_double_count_app_sales(mo
     result = asyncio.run(server._dashboard_balances(0))
 
     assert result["saldoVendingTotale"] == 100
+
+
+def test_same_day_csv_cash_created_after_excel_import_is_counted(monkeypatch):
+    historical = FakeCollection([historical_row(100, "Contanti", day="2026-10-03")])
+    app_sales = FakeCollection([
+        {
+            "data": "2026-10-03T12:00:00",
+            "created_at": "2026-10-03T10:05:00+00:00",
+            "importo": 25,
+            "pagamento": "CONTANTI",
+        },
+        {
+            "data": "2026-10-03T11:00:00",
+            "created_at": "2026-10-03T09:55:00+00:00",
+            "importo": 999,
+            "pagamento": "CONTANTI",
+        },
+    ])
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(db_storico_vending_ext=historical, vendite=app_sales),
+    )
+
+    result = asyncio.run(server._dashboard_balances(
+        0,
+        latest_import_created_at="2026-10-03T10:00:00+00:00",
+    ))
+
+    assert result["saldoVendingContanti"] == 125
 
 
 def test_empty_legacy_payment_uses_cash_default_without_losing_unknown_methods():

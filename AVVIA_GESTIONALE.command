@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_DIR="${0:A:h}"
-PORT="${PORT:-18080}"
+PORT="${PORT:-18085}"
 HOST="127.0.0.1"
 URL="http://${HOST}:${PORT}"
 FIXTURE_PATH="$PROJECT_DIR/backend/tests/fixtures/gods34.xlsm"
