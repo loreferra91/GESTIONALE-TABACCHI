@@ -157,6 +157,16 @@ def test_parse_sale_date_normalizes_italian_and_iso_dates():
     assert server._parse_sale_date("2026-10-03T08:30:00").isoformat() == "2026-10-03"
 
 
+def test_latest_sale_date_compares_mixed_formats_chronologically():
+    result = server._latest_sale_date([
+        {"data": "31/08/2026"},
+        {"data": "2026-10-02"},
+        {"data": "03/10/2026"},
+    ])
+
+    assert result.isoformat() == "2026-10-03"
+
+
 def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monkeypatch):
     monkeypatch.setattr(
         server,

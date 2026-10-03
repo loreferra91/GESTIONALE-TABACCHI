@@ -1089,9 +1089,9 @@ async def import_history(limit: int = 20):
 
 
 async def data_status_payload() -> Dict[str, Any]:
-    latest_app, latest_imported, counts, latest_import, latest_backup = await asyncio.gather(
-        db.vendite.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
-        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+    app_dates, imported_dates, counts, latest_import, latest_backup = await asyncio.gather(
+        db.vendite.find({}, {"_id": 0, "data": 1}).to_list(None),
+        db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
         asyncio.gather(*[db[name].count_documents({}) for name in BACKUP_COLLECTIONS]),
         db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
         db.backup_snapshots.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
@@ -1106,14 +1106,9 @@ async def data_status_payload() -> Dict[str, Any]:
         parsed = _parse_sale_date(value)
         return parsed.isoformat() if parsed else str(value)[:10]
 
-    latest_days = [
-        parsed
-        for parsed in [
-            _parse_sale_date((latest_app or {}).get("data")),
-            _parse_sale_date((latest_imported or {}).get("data")),
-        ]
-        if parsed
-    ]
+    latest_app = _latest_sale_date(app_dates)
+    latest_imported = _latest_sale_date(imported_dates)
+    latest_days = [parsed for parsed in [latest_app, latest_imported] if parsed]
     latest_sales_day = max(latest_days).isoformat() if latest_days else None
     delay = None
     if latest_sales_day:
@@ -2192,6 +2187,11 @@ def _parse_sale_date(value: Any):
     return None
 
 
+def _latest_sale_date(documents: List[Dict[str, Any]]):
+    parsed_dates = [_parse_sale_date(document.get("data")) for document in documents]
+    return max((parsed for parsed in parsed_dates if parsed), default=None)
+
+
 def _is_cash_payment(payment_method: Any) -> bool:
     normalized = unicodedata.normalize("NFKD", str(payment_method or "")).encode("ascii", "ignore").decode().upper()
     return not normalized or "CONTANT" in normalized
@@ -2364,10 +2364,11 @@ async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
 @api.get("/dashboard")
 async def dashboard():
     pv = await pivot()
-    ultimo_import, ultima_vendita_importata = await asyncio.gather(
+    ultimo_import, date_vendite_importate = await asyncio.gather(
         db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
-        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+        db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
     )
+    ultima_vendita_importata = _latest_sale_date(date_vendite_importate)
     import_totali = (ultimo_import or {}).get("totali", {})
     venduto_negozio_excel = float(import_totali.get("valore_venduto_negozio_excel") or 0)
     venduto_vending_excel = float(import_totali.get("valore_venduto_vending_excel") or 0)
@@ -2388,7 +2389,7 @@ async def dashboard():
     versamenti, prelievi, venduto_negozio_app_contanti = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
-        _supplemental_store_cash_sales((ultima_vendita_importata or {}).get("data")),
+        _supplemental_store_cash_sales(ultima_vendita_importata),
     )
     venduto_negozio_contabilizzato = round(venduto_negozio_excel + venduto_negozio_app_contanti, 2)
     liquidita_residua = round(venduto_negozio_contabilizzato - versamenti["totale"], 2)
