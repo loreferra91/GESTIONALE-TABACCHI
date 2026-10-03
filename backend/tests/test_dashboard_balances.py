@@ -38,8 +38,9 @@ class SalesCollection:
         return FakeCursor([{"_id": day, "importo": amount} for day, amount in totals.items()])
 
 
-def historical_row(amount, payment, accounted="SI", outcome="OK"):
+def historical_row(amount, payment, accounted="SI", outcome="OK", day="2026-08-31"):
     raw = [""] * 18
+    raw[2] = day
     raw[7] = str(amount)
     raw[11] = payment
     raw[15] = accounted
@@ -55,7 +56,11 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
         historical_row("999", "Contanti", accounted="NO"),
         historical_row("999", "Contanti", outcome="ANNULLATA"),
     ])
-    app_sales = FakeCollection([{"importo": 777, "pagamento": "CONTANTI"}])
+    app_sales = FakeCollection([
+        {"data": "2026-08-31", "importo": 777, "pagamento": "CONTANTI"},
+        {"data": "2026-09-01", "importo": 25, "pagamento": "CONTANTI"},
+        {"data": "02/09/2026", "importo": 10, "pagamento": "POS"},
+    ])
     monkeypatch.setattr(
         server,
         "db",
@@ -65,21 +70,21 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
     result = asyncio.run(server._dashboard_balances(1500))
 
     assert result == {
-        "saldoVendingTotale": 1500.0,
-        "saldoVendingContanti": 1200.0,
-        "saldoVendingElettronico": 300.0,
+        "saldoVendingTotale": 1535.0,
+        "saldoVendingContanti": 1225.0,
+        "saldoVendingElettronico": 310.0,
         "saldoCassa": 1500.0,
         "totalePrelievi": 0.0,
-        "differenzaCassaVendingContanti": 2700.0,
+        "differenzaCassaVendingContanti": 2725.0,
     }
-    assert app_sales.queries == []
+    assert len(app_sales.queries) == 1
 
 
 def test_uses_app_vending_sales_as_backward_compatible_fallback(monkeypatch):
     historical = FakeCollection([])
     app_sales = FakeCollection([
-        {"importo": 1200, "pagamento": "CONTANTI"},
-        {"importo": 200, "pagamento": "POS"},
+        {"data": "2026-09-01", "importo": 1200, "pagamento": "CONTANTI"},
+        {"data": "2026-09-01", "importo": 200, "pagamento": "POS"},
     ])
     monkeypatch.setattr(
         server,
@@ -95,6 +100,32 @@ def test_uses_app_vending_sales_as_backward_compatible_fallback(monkeypatch):
     assert result["differenzaCassaVendingContanti"] == 2200.0
     query = app_sales.queries[0][0]
     assert query["canale"]["$regex"] == "^VENDING$"
+
+
+def test_latest_historical_vending_date_uses_date_then_datetime_fallback():
+    row_with_date = historical_row(10, "Contanti", day="02/10/2026")
+    row_with_datetime = historical_row(10, "Contanti", day="")
+    row_with_datetime["raw"][1] = "2026-10-03 08:30:00"
+
+    result = server._latest_historical_vending_date([row_with_date, row_with_datetime])
+
+    assert result.isoformat() == "2026-10-03"
+
+
+def test_legacy_vending_history_without_dates_does_not_double_count_app_sales(monkeypatch):
+    historical = FakeCollection([historical_row(100, "Contanti", day="")])
+    app_sales = FakeCollection([
+        {"data": "2026-10-03", "importo": 100, "pagamento": "CONTANTI"},
+    ])
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(db_storico_vending_ext=historical, vendite=app_sales),
+    )
+
+    result = asyncio.run(server._dashboard_balances(0))
+
+    assert result["saldoVendingTotale"] == 100
 
 
 def test_empty_legacy_payment_uses_cash_default_without_losing_unknown_methods():

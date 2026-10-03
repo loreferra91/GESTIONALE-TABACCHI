@@ -2225,6 +2225,20 @@ def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -
     return values
 
 
+def _latest_historical_vending_date(documents: List[Dict[str, Any]]):
+    """Restituisce l'ultima data coperta dallo storico vending Excel."""
+    parsed_dates = []
+    for document in documents:
+        raw = document.get("raw") or []
+        # DB_STORICO_VENDING_EXT: DATA è la terza colonna; DATA_ORA è il
+        # fallback per file legacy che non valorizzano la colonna DATA.
+        value = raw[2] if len(raw) > 2 and raw[2] else (raw[1] if len(raw) > 1 else None)
+        parsed = _parse_sale_date(value)
+        if parsed:
+            parsed_dates.append(parsed)
+    return max(parsed_dates, default=None)
+
+
 def _calculate_dashboard_balances(
     vending_payments: List[tuple], saldo_cassa: float, totale_prelievi: float = 0
 ) -> Dict[str, float]:
@@ -2257,18 +2271,30 @@ def _calculate_dashboard_balances(
 
 async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) -> Dict[str, float]:
     # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
-    # pagamento. Le vendite dell'app sono il fallback per database/import meno
-    # recenti che non hanno ancora lo storico vending esteso.
-    historical_docs = await db.db_storico_vending_ext.find(
-        {}, {"_id": 0, "raw": 1}
-    ).to_list(None)
-    payments = _vending_payment_values(historical_docs, legacy_raw=True)
-    if not payments:
-        app_docs = await db.vendite.find(
+    # pagamento. Le vendite dell'app successive all'ultima data importata si
+    # aggiungono allo storico; il filtro temporale impedisce doppi conteggi al
+    # successivo import Excel.
+    historical_docs, app_docs = await asyncio.gather(
+        db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
+        db.vendite.find(
             {"canale": {"$regex": "^VENDING$", "$options": "i"}},
-            {"_id": 0, "importo": 1, "pagamento": 1},
-        ).to_list(None)
-        payments = _vending_payment_values(app_docs, legacy_raw=False)
+            {"_id": 0, "data": 1, "importo": 1, "pagamento": 1},
+        ).to_list(None),
+    )
+    payments = _vending_payment_values(historical_docs, legacy_raw=True)
+    cutoff = _latest_historical_vending_date(historical_docs)
+    supplemental_app_docs = []
+    for document in app_docs:
+        # Se uno storico legacy non espone alcuna data non possiamo separare
+        # con certezza vendite nuove e già importate: manteniamo lo storico
+        # come fonte unica, evitando un possibile doppio conteggio.
+        if historical_docs and cutoff is None:
+            continue
+        sale_day = _parse_sale_date(document.get("data"))
+        if cutoff and (sale_day is None or sale_day <= cutoff):
+            continue
+        supplemental_app_docs.append(document)
+    payments.extend(_vending_payment_values(supplemental_app_docs, legacy_raw=False))
     return _calculate_dashboard_balances(payments, saldo_cassa, totale_prelievi)
 
 
