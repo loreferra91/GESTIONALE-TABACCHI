@@ -1103,12 +1103,18 @@ async def data_status_payload() -> Dict[str, Any]:
         value = (raw or {}).get("data") if isinstance(raw, dict) else raw
         if not value:
             return None
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date().isoformat()
-        except ValueError:
-            return str(value)[:10]
+        parsed = _parse_sale_date(value)
+        return parsed.isoformat() if parsed else str(value)[:10]
 
-    latest_sales_day = max([d for d in [date_only(latest_app), date_only(latest_imported)] if d], default=None)
+    latest_days = [
+        parsed
+        for parsed in [
+            _parse_sale_date((latest_app or {}).get("data")),
+            _parse_sale_date((latest_imported or {}).get("data")),
+        ]
+        if parsed
+    ]
+    latest_sales_day = max(latest_days).isoformat() if latest_days else None
     delay = None
     if latest_sales_day:
         try:
@@ -2169,6 +2175,28 @@ async def pivot():
 
 
 # ------------------------- Dashboard KPIs -------------------------
+def _parse_sale_date(value: Any):
+    """Normalizza le date vendite ISO e italiane usate dalle due sorgenti."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+    for date_format in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
+        try:
+            return datetime.strptime(raw[:10], date_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _is_cash_payment(payment_method: Any) -> bool:
+    normalized = unicodedata.normalize("NFKD", str(payment_method or "")).encode("ascii", "ignore").decode().upper()
+    return not normalized or "CONTANT" in normalized
+
+
 def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -> List[tuple]:
     """Estrae importo e pagamento dalle due sorgenti vending compatibili."""
     values = []
@@ -2204,8 +2232,7 @@ def _calculate_dashboard_balances(
     cash = 0.0
     electronic = 0.0
     for amount, payment_method in vending_payments:
-        normalized_method = unicodedata.normalize("NFKD", payment_method).encode("ascii", "ignore").decode().upper()
-        if not normalized_method or "CONTANT" in normalized_method:
+        if _is_cash_payment(payment_method):
             cash += amount
         else:
             # Il modello prevede due soli bucket: ogni metodo non-contante
@@ -2243,6 +2270,31 @@ async def _dashboard_balances(saldo_cassa: float, totale_prelievi: float = 0) ->
         ).to_list(None)
         payments = _vending_payment_values(app_docs, legacy_raw=False)
     return _calculate_dashboard_balances(payments, saldo_cassa, totale_prelievi)
+
+
+async def _supplemental_store_cash_sales(latest_imported_sale: Any) -> float:
+    """Somma gli incassi negozio registrati dopo lo storico incluso nell'Excel.
+
+    RIEP_VENDITA contiene un totale cumulativo: limitare le vendite dell'app ai
+    giorni successivi evita di contarle due volte dopo un nuovo import.
+    """
+    cutoff = _parse_sale_date(latest_imported_sale)
+    documents = await db.vendite.find(
+        {}, {"_id": 0, "data": 1, "canale": 1, "pagamento": 1, "importo": 1}
+    ).to_list(None)
+    total = 0.0
+    for document in documents:
+        channel = str(document.get("canale") or "NEGOZIO").strip().upper()
+        if channel == "VENDING" or not _is_cash_payment(document.get("pagamento")):
+            continue
+        sale_day = _parse_sale_date(document.get("data"))
+        if cutoff and (sale_day is None or sale_day <= cutoff):
+            continue
+        try:
+            total += float(document.get("importo") or 0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
 
 
 async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
@@ -2312,7 +2364,10 @@ async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
 @api.get("/dashboard")
 async def dashboard():
     pv = await pivot()
-    ultimo_import = await db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+    ultimo_import, ultima_vendita_importata = await asyncio.gather(
+        db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
+        db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+    )
     import_totali = (ultimo_import or {}).get("totali", {})
     venduto_negozio_excel = float(import_totali.get("valore_venduto_negozio_excel") or 0)
     venduto_vending_excel = float(import_totali.get("valore_venduto_vending_excel") or 0)
@@ -2330,9 +2385,13 @@ async def dashboard():
         {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
-    versamenti = await _versamenti_summary()
-    prelievi = await _prelievi_vending_summary()
-    liquidita_residua = round(venduto_negozio_excel - versamenti["totale"], 2)
+    versamenti, prelievi, venduto_negozio_app_contanti = await asyncio.gather(
+        _versamenti_summary(),
+        _prelievi_vending_summary(),
+        _supplemental_store_cash_sales((ultima_vendita_importata or {}).get("data")),
+    )
+    venduto_negozio_contabilizzato = round(venduto_negozio_excel + venduto_negozio_app_contanti, 2)
+    liquidita_residua = round(venduto_negozio_contabilizzato - versamenti["totale"], 2)
     saldi, andamento_vendite = await asyncio.gather(
         _dashboard_balances(liquidita_residua, prelievi["totale"]),
         _dashboard_sales_trend(),
@@ -2345,6 +2404,9 @@ async def dashboard():
         "vendite_oggi": {"importo": round(v_oggi.get("tot") or 0, 2), "pezzi": v_oggi.get("pezzi") or 0},
         "totale_versamenti": versamenti["totale"],
         "totale_prelievi": prelievi["totale"],
+        "venduto_negozio_excel": round(venduto_negozio_excel, 2),
+        "venduto_negozio_app_contanti": venduto_negozio_app_contanti,
+        "venduto_negozio_contabilizzato": venduto_negozio_contabilizzato,
         "liquidita_residua": liquidita_residua,
         "saldo_cassa": liquidita_residua,
         "saldi": saldi,

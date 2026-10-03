@@ -127,6 +127,36 @@ def test_cash_difference_subtracts_vending_withdrawals():
     assert result["differenzaCassaVendingContanti"] == 1334.68
 
 
+def test_supplemental_store_cash_sales_only_counts_new_unimported_cash(monkeypatch):
+    sales = FakeCollection([
+        {"data": "31/08/2026", "canale": "NEGOZIO", "pagamento": "CONTANTI", "importo": 50},
+        {"data": "2026-09-01", "canale": "NEGOZIO", "pagamento": "CONTANTI", "importo": 100},
+        {"data": "2026-09-02", "canale": "NEGOZIO", "pagamento": "POS", "importo": 20},
+        {"data": "03/09/2026", "canale": "VENDING", "pagamento": "CONTANTI", "importo": 30},
+        {"data": "03/10/2026", "canale": "NEGOZIO", "pagamento": "CONTANTI", "importo": 329.60},
+    ])
+    monkeypatch.setattr(server, "db", SimpleNamespace(vendite=sales))
+
+    result = asyncio.run(server._supplemental_store_cash_sales("2026-08-31T00:00:00"))
+
+    assert result == 429.60
+
+
+def test_supplemental_store_cash_sales_counts_all_when_no_import_exists(monkeypatch):
+    sales = FakeCollection([
+        {"data": "2026-10-03", "canale": "NEGOZIO", "pagamento": "", "importo": 10},
+        {"data": "2026-10-03", "canale": "VENDING", "pagamento": "CONTANTI", "importo": 5},
+    ])
+    monkeypatch.setattr(server, "db", SimpleNamespace(vendite=sales))
+
+    assert asyncio.run(server._supplemental_store_cash_sales(None)) == 10
+
+
+def test_parse_sale_date_normalizes_italian_and_iso_dates():
+    assert server._parse_sale_date("03/10/2026").isoformat() == "2026-10-03"
+    assert server._parse_sale_date("2026-10-03T08:30:00").isoformat() == "2026-10-03"
+
+
 def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monkeypatch):
     monkeypatch.setattr(
         server,

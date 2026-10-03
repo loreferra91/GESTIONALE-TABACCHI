@@ -6,7 +6,7 @@ import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
 export default function Versamenti() {
-  const [data, setData] = useState({ movimenti: [], totaleVendutoNegozioExcel: 0, totaleVersamenti: 0, liquiditaResidua: 0 });
+  const [data, setData] = useState({ movimenti: [], totaleVendutoNegozio: 0, totaleVersamenti: 0, liquiditaResidua: 0 });
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, importo: 0, descrizione: "", operatore: "" });
 
@@ -17,16 +17,17 @@ export default function Versamenti() {
 
   const load = async () => {
     try {
-      const importHistory = await api.get("/import/history");
-      const lastImport = importHistory.data[0];
-      const versamenti = await api.get("/versamenti");
-      const totaleVersamenti = versamenti.data.movimenti.reduce((sum, m) => sum + m.importo, 0);
-      const vendutoNegozio = lastImport?.totali?.valore_venduto_negozio_excel || 0;
+      const [dashboard, versamenti] = await Promise.all([
+        api.get("/dashboard"),
+        api.get("/versamenti"),
+      ]);
+      const totaleVersamenti = dashboard.data?.totale_versamenti || 0;
+      const vendutoNegozio = dashboard.data?.venduto_negozio_contabilizzato || 0;
       setData({
         movimenti: versamenti.data.movimenti,
-        totaleVendutoNegozioExcel: vendutoNegozio,
+        totaleVendutoNegozio: vendutoNegozio,
         totaleVersamenti: totaleVersamenti,
-        liquiditaResidua: vendutoNegozio - totaleVersamenti,
+        liquiditaResidua: dashboard.data?.liquidita_residua || 0,
       });
     } catch {
       toast.error("Impossibile caricare i versamenti");
@@ -52,7 +53,7 @@ export default function Versamenti() {
   return (
     <Layout title="Versamenti" subtitle="registrazione versamenti">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <KpiCard label="Venduto Negozio (Excel)" value={formatEur(data.totaleVendutoNegozioExcel)} tone="info" />
+        <KpiCard label="Venduto Negozio contabilizzato" value={formatEur(data.totaleVendutoNegozio)} tone="info" />
         <KpiCard label="Totale Versamenti" value={formatEur(data.totaleVersamenti)} />
         <KpiCard label="Liquidità Residua" value={formatEur(data.liquiditaResidua)} tone={data.liquiditaResidua < 0 ? "danger" : "success"} />
       </div>
