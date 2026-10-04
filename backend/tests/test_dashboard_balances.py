@@ -211,7 +211,7 @@ def test_vending_cash_inventory_withdrawals_and_receipts_are_exposed_separately(
     assert result["prelieviContantiCassaVending"] == 450.0
     assert result["giacenzaAttualeCassaVending"] == 600.0
     assert result["cassaVending"] == 600.0
-    assert result["saldoCassaNegozioEVending"] == 750.0
+    assert result["saldoCassaNegozioEVending"] == 700.0
 
 
 def test_supplemental_store_cash_sales_only_counts_new_unimported_cash(monkeypatch):

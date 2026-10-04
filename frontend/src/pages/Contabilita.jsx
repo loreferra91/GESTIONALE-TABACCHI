@@ -69,7 +69,7 @@ export default function Contabilita() {
       ? venditeVendingContanti - giacenzaVending + scontriniVending
       : undefined);
   const saldoCasse = prelievoVending !== undefined && balances.saldoCassa !== undefined
-    ? prelievoVending + balances.saldoCassa
+    ? prelievoVending + balances.saldoCassa - scontriniVending
     : balances.saldoCassaNegozioEVending ?? balances.differenzaCassaVendingContanti;
 
   return (

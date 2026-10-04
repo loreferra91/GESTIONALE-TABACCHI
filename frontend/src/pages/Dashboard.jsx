@@ -104,12 +104,13 @@ export default function Dashboard() {
   const giacenzaVending = balances.scontriniVending !== undefined
     ? balances.giacenzaVendingContanti
     : balances.totalePrelievi;
+  const scontriniVending = balances.scontriniVending ?? 0;
   const prelievoVending = balances.prelievoVending
     ?? (venditeVendingContanti !== undefined && giacenzaVending !== undefined
-      ? venditeVendingContanti - giacenzaVending
+      ? venditeVendingContanti - giacenzaVending + scontriniVending
       : undefined);
   const saldoCasse = prelievoVending !== undefined && balances.saldoCassa !== undefined
-    ? prelievoVending + balances.saldoCassa
+    ? prelievoVending + balances.saldoCassa - scontriniVending
     : balances.saldoCassaNegozioEVending ?? balances.differenzaCassaVendingContanti;
   const chartData = sales.serie || [];
   const vendingToLoad = data?.vending_da_caricare || 0;
