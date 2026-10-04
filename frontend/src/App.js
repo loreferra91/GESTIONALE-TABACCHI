@@ -12,6 +12,7 @@ import Ordini from "./pages/Ordini";
 import Cassa from "./pages/Cassa";
 import Versamenti from "./pages/Versamenti";
 import PrelieviVending from "./pages/PrelieviVending";
+import ScontriniVending from "./pages/ScontriniVending";
 import Parametri from "./pages/Parametri";
 import CassaRapida from "./pages/CassaRapida";
 import Carico from "./pages/Carico";
@@ -39,6 +40,7 @@ function App() {
           <Route path="/cassa" element={<Cassa />} />
           <Route path="/versamenti" element={<Versamenti />} />
           <Route path="/prelievi-vending" element={<PrelieviVending />} />
+          <Route path="/scontrini-vending" element={<ScontriniVending />} />
           <Route path="/cassa-rapida" element={<CassaRapida />} />
           <Route path="/parametri" element={<Parametri />} />
         </Routes>

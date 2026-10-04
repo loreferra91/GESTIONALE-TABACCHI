@@ -100,7 +100,17 @@ export default function Dashboard() {
   const sales = data?.andamento_vendite || {};
   const balances = data?.saldi || {};
   const variation = sales.variazione_pct;
-  const difference = balances.differenzaCassaVendingContanti;
+  const venditeVendingContanti = balances.venditeVendingContanti ?? balances.saldoVendingContanti;
+  const giacenzaVending = balances.scontriniVending !== undefined
+    ? balances.giacenzaVendingContanti
+    : balances.totalePrelievi;
+  const prelievoVending = balances.prelievoVending
+    ?? (venditeVendingContanti !== undefined && giacenzaVending !== undefined
+      ? venditeVendingContanti - giacenzaVending
+      : undefined);
+  const saldoCasse = prelievoVending !== undefined && balances.saldoCassa !== undefined
+    ? prelievoVending + balances.saldoCassa
+    : balances.saldoCassaNegozioEVending ?? balances.differenzaCassaVendingContanti;
   const chartData = sales.serie || [];
   const vendingToLoad = data?.vending_da_caricare || 0;
   const vendingTotal = data?.vending_totale || 0;
@@ -131,12 +141,12 @@ export default function Dashboard() {
       <section className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2" aria-label="Riepilogo e attività">
         <Card className="flex min-h-[214px] flex-col p-5 lg:p-6">
           <div className="overline">Cassa &amp; Vending</div>
-          <div className="mt-7 text-sm text-slate-500">Differenza cassa / vending</div>
+          <div className="mt-7 text-sm text-slate-500">Saldo cassa negozio e vending</div>
           <div
-            className={`kpi-value mt-2 text-[clamp(2rem,3vw,2.8rem)] leading-none ${difference < 0 ? "text-red-600" : "text-emerald-700"}`}
-            data-testid="differenza-cassa-vending"
+            className={`kpi-value mt-2 text-[clamp(2rem,3vw,2.8rem)] leading-none ${saldoCasse < 0 ? "text-red-600" : "text-emerald-700"}`}
+            data-testid="saldo-cassa-negozio-vending"
           >
-            {formatSignedEur(difference)}
+            {formatSignedEur(saldoCasse)}
           </div>
           <Link
             to="/contabilita"

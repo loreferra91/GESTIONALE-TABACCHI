@@ -225,6 +225,22 @@ class PrelievoVendingIn(BaseModel):
     operatore: Optional[str] = ""
 
 
+class ScontrinoVending(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    data: str
+    importo: float
+    descrizione: str = ""
+    operatore: str = ""
+
+
+class ScontrinoVendingIn(BaseModel):
+    data: str
+    importo: float
+    descrizione: Optional[str] = ""
+    operatore: Optional[str] = ""
+
+
 class Parametro(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -248,6 +264,8 @@ BACKUP_COLLECTIONS = [
     "vendite",
     "versamenti",
     "prelievi_vending",
+    "scontrini_vending",
+    "cassa_vending_stato",
     "cassa",
     "ordini_fornitore",
     "ordini_fornitore_righe",
@@ -257,6 +275,7 @@ BACKUP_COLLECTIONS = [
 
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
+OPTIONAL_BACKUP_COLLECTIONS = {"scontrini_vending", "cassa_vending_stato"}
 
 
 # ------------------------- Seed -------------------------
@@ -370,6 +389,8 @@ async def on_start():
             db.prodotti.create_index("ultimo_import_id"),
             db.versamenti.create_index("data"),
             db.prelievi_vending.create_index("data"),
+            db.scontrini_vending.create_index("data"),
+            db.cassa_vending_stato.create_index("id", unique=True),
             db.listino_adm.create_index("adm_codice"),
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
@@ -1072,7 +1093,10 @@ def _validate_backup_file(payload: Any) -> Dict[str, List[Dict[str, Any]]]:
     collections = payload.get("collections")
     if not isinstance(collections, dict):
         raise HTTPException(422, "Il backup non contiene le collezioni dati")
-    missing = [name for name in BACKUP_COLLECTIONS if name not in collections]
+    missing = [
+        name for name in BACKUP_COLLECTIONS
+        if name not in collections and name not in OPTIONAL_BACKUP_COLLECTIONS
+    ]
     unknown = [name for name in collections if name not in BACKUP_COLLECTIONS]
     if missing:
         raise HTTPException(422, f"Backup incompleto: mancano {', '.join(missing)}")
@@ -1116,7 +1140,10 @@ async def backup_download(snapshot_id: str):
     if not meta:
         raise HTTPException(404, "backup non trovato")
     backed_up_names = list((meta.get("counts") or {}).keys())
-    missing = [name for name in BACKUP_COLLECTIONS if name not in backed_up_names]
+    missing = [
+        name for name in BACKUP_COLLECTIONS
+        if name not in backed_up_names and name not in OPTIONAL_BACKUP_COLLECTIONS
+    ]
     if missing:
         raise HTTPException(
             409,
@@ -1474,6 +1501,44 @@ async def _prepare_csv_vending_import(raw: str, pagamento: str) -> tuple[Dict[st
     return parsed, cutoff, len(all_rows)
 
 
+VENDING_CASH_STATE_ID = "saldo"
+
+
+async def _vending_cash_balance() -> float:
+    """Restituisce la giacenza cash, inizializzandola dai dati legacy una volta."""
+    state = await db.cassa_vending_stato.find_one({"id": VENDING_CASH_STATE_ID}, {"_id": 0})
+    if state:
+        return round(float(state.get("giacenza") or 0), 2)
+
+    legacy_docs = await db.prelievi_vending.find({}, {"_id": 0, "importo": 1}).to_list(10000)
+    legacy_balance = round(sum(float(doc.get("importo") or 0) for doc in legacy_docs), 2)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.cassa_vending_stato.update_one(
+        {"id": VENDING_CASH_STATE_ID},
+        {"$setOnInsert": {
+            "id": VENDING_CASH_STATE_ID,
+            "giacenza": legacy_balance,
+            "initialized_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    state = await db.cassa_vending_stato.find_one({"id": VENDING_CASH_STATE_ID}, {"_id": 0})
+    return round(float((state or {}).get("giacenza") or 0), 2)
+
+
+async def _adjust_vending_cash_balance(amount: float) -> float:
+    await _vending_cash_balance()
+    await db.cassa_vending_stato.update_one(
+        {"id": VENDING_CASH_STATE_ID},
+        {
+            "$inc": {"giacenza": round(float(amount or 0), 2)},
+            "$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
+        },
+    )
+    return await _vending_cash_balance()
+
+
 @api.post("/vendite/preview-csv-vending")
 async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
     """Mostra solo le vendite successive allo storico vending importato da Excel."""
@@ -1508,6 +1573,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
     raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
     inserted = 0
+    imported_cash = 0.0
     errors = list(parsed["errori"])
     payment_counts: Dict[str, int] = {}
     for csv_row in parsed["righe"]:
@@ -1565,14 +1631,19 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 ).model_dump())
             inserted += 1
             payment_counts[pag] = payment_counts.get(pag, 0) + 1
+            if _is_cash_payment(pag):
+                imported_cash += prezzo_f
         except Exception as exc:
             errors.append({"riga": csv_row["riga"], "errore": str(exc)})
+    if imported_cash:
+        await _adjust_vending_cash_balance(imported_cash)
     return {
         "inseriti": inserted,
         "saltati": parsed["saltati"],
         "errori": errors,
         "delimitatore": parsed["delimitatore"],
         "pagamenti": payment_counts,
+        "contanti_aggiunti_giacenza": round(imported_cash, 2),
         "righe_file": file_rows,
         "righe_gia_presenti": file_rows - len(parsed["righe"]),
         "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
@@ -1871,14 +1942,48 @@ async def list_prelievi_vending(limit: int = 500):
 async def add_prelievo_vending(m: PrelievoVendingIn):
     if m.importo <= 0:
         raise HTTPException(422, "L'importo del prelievo deve essere positivo")
+    await _vending_cash_balance()
     prelievo = PrelievoVending(**m.model_dump())
     await db.prelievi_vending.insert_one(prelievo.model_dump())
+    await _adjust_vending_cash_balance(-m.importo)
     return prelievo.model_dump()
 
 
 @api.delete("/prelievi-vending/{m_id}")
 async def del_prelievo_vending(m_id: str):
+    await _vending_cash_balance()
+    prelievo = await db.prelievi_vending.find_one({"id": m_id}, {"_id": 0})
     await db.prelievi_vending.delete_one({"id": m_id})
+    if prelievo:
+        await _adjust_vending_cash_balance(float(prelievo.get("importo") or 0))
+    return {"ok": True}
+
+
+async def _scontrini_vending_summary(limit: int = 500) -> Dict[str, Any]:
+    capped_limit = _cap(limit)
+    docs = await db.scontrini_vending.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
+    all_docs = await db.scontrini_vending.find({}, {"_id": 0}).to_list(10000)
+    totale = sum(float(d.get("importo") or 0) for d in all_docs)
+    return {"movimenti": docs, "totale": round(totale, 2)}
+
+
+@api.get("/scontrini-vending")
+async def list_scontrini_vending(limit: int = 500):
+    return await _scontrini_vending_summary(limit)
+
+
+@api.post("/scontrini-vending")
+async def add_scontrino_vending(m: ScontrinoVendingIn):
+    if m.importo <= 0:
+        raise HTTPException(422, "L'importo dello scontrino deve essere positivo")
+    scontrino = ScontrinoVending(**m.model_dump())
+    await db.scontrini_vending.insert_one(scontrino.model_dump())
+    return scontrino.model_dump()
+
+
+@api.delete("/scontrini-vending/{m_id}")
+async def del_scontrino_vending(m_id: str):
+    await db.scontrini_vending.delete_one({"id": m_id})
     return {"ok": True}
 
 
@@ -2543,9 +2648,17 @@ def _latest_historical_vending_date(documents: List[Dict[str, Any]]):
 
 
 def _calculate_dashboard_balances(
-    vending_payments: List[tuple], saldo_cassa: float, totale_prelievi: float = 0
+    vending_payments: List[tuple],
+    saldo_cassa: float,
+    giacenza_vending: float = 0,
+    totale_scontrini: float = 0,
 ) -> Dict[str, float]:
-    """Calcola in un solo punto i saldi monetari esposti dalla dashboard."""
+    """Calcola in un solo punto i saldi monetari esposti dalla dashboard.
+
+    Il CSV incrementa sia le vendite cash sia la giacenza fisica. I prelievi
+    sono la differenza tra vendite cash e giacenza, più gli scontrini. Il saldo
+    complessivo somma questo valore al saldo cassa conservandone il segno.
+    """
     cash = 0.0
     electronic = 0.0
     for amount, payment_method in vending_payments:
@@ -2561,20 +2674,36 @@ def _calculate_dashboard_balances(
     electronic = round(electronic, 2)
     total = round(cash + electronic, 2)
     saldo_cassa = round(float(saldo_cassa or 0), 2)
-    totale_prelievi = round(float(totale_prelievi or 0), 2)
+    giacenza_vending = round(float(giacenza_vending or 0), 2)
+    totale_scontrini = round(float(totale_scontrini or 0), 2)
+    prelievo_vending = round(cash - giacenza_vending + totale_scontrini, 2)
+    saldo_casse = round(prelievo_vending + saldo_cassa, 2)
     return {
         "saldoVendingTotale": total,
+        "venditeVendingContanti": cash,
+        "giacenzaVendingContanti": giacenza_vending,
+        "prelievoVending": prelievo_vending,
+        "scontriniVending": totale_scontrini,
+        "prelievoDaVending": prelievo_vending,
+        "prelieviContantiDaVending": prelievo_vending,
+        "prelieviContantiCassaVending": prelievo_vending,
+        "cassaVending": giacenza_vending,
+        "giacenzaAttualeCassaVending": giacenza_vending,
+        "prelieviVending": prelievo_vending,
+        "saldoCassaNegozioEVending": saldo_casse,
+        # Alias mantenuti per compatibilità con client meno recenti.
         "saldoVendingContanti": cash,
         "saldoVendingElettronico": electronic,
         "saldoCassa": saldo_cassa,
-        "totalePrelievi": totale_prelievi,
-        "differenzaCassaVendingContanti": round(cash + saldo_cassa - totale_prelievi, 2),
+        "totalePrelievi": prelievo_vending,
+        "differenzaCassaVendingContanti": saldo_casse,
     }
 
 
 async def _dashboard_balances(
     saldo_cassa: float,
-    totale_prelievi: float = 0,
+    giacenza_vending: float = 0,
+    totale_scontrini: float = 0,
     latest_import_created_at: Any = None,
 ) -> Dict[str, float]:
     # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
@@ -2598,7 +2727,7 @@ async def _dashboard_balances(
             continue
         supplemental_app_docs.append(document)
     payments.extend(_vending_payment_values(supplemental_app_docs, legacy_raw=False))
-    return _calculate_dashboard_balances(payments, saldo_cassa, totale_prelievi)
+    return _calculate_dashboard_balances(payments, saldo_cassa, giacenza_vending, totale_scontrini)
 
 
 async def _supplemental_store_cash_sales(
@@ -2702,9 +2831,11 @@ async def dashboard():
         {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
-    versamenti, prelievi, venduto_negozio_app_contanti = await asyncio.gather(
+    versamenti, prelievi, scontrini, giacenza_vending, venduto_negozio_app_contanti = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
+        _scontrini_vending_summary(),
+        _vending_cash_balance(),
         _supplemental_store_cash_sales(
             ultima_vendita_importata,
             (ultimo_import or {}).get("created_at"),
@@ -2715,7 +2846,8 @@ async def dashboard():
     saldi, andamento_vendite = await asyncio.gather(
         _dashboard_balances(
             liquidita_residua,
-            prelievi["totale"],
+            giacenza_vending,
+            scontrini["totale"],
             (ultimo_import or {}).get("created_at"),
         ),
         _dashboard_sales_trend(),
@@ -2728,6 +2860,8 @@ async def dashboard():
         "vendite_oggi": {"importo": round(v_oggi.get("tot") or 0, 2), "pezzi": v_oggi.get("pezzi") or 0},
         "totale_versamenti": versamenti["totale"],
         "totale_prelievi": prelievi["totale"],
+        "totale_scontrini_vending": scontrini["totale"],
+        "giacenza_vending_contanti": giacenza_vending,
         "venduto_negozio_excel": round(venduto_negozio_excel, 2),
         "venduto_negozio_app_contanti": venduto_negozio_app_contanti,
         "venduto_negozio_contabilizzato": venduto_negozio_contabilizzato,
