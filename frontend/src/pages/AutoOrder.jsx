@@ -69,11 +69,12 @@ export default function AutoOrder() {
     }
   };
 
-  const downloadPdf = async () => {
-    const fornitore = window.prompt("Nome fornitore per il PDF:", "Fornitore") || "Fornitore";
+  const downloadOrder = (format) => {
+    const label = format === "excel" ? "Excel" : "PDF";
+    const fornitore = window.prompt(`Nome fornitore per il file ${label}:`, "Fornitore") || "Fornitore";
     const params = new URLSearchParams({ fornitore });
     if (categoria) params.set("categoria", categoria);
-    const url = `${API}/auto-order/pdf?${params.toString()}`;
+    const url = `${API}/auto-order/${format}?${params.toString()}`;
     window.open(url, "_blank");
   };
 
@@ -82,7 +83,7 @@ export default function AutoOrder() {
       <div className="mb-5 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 text-sm md:grid-cols-4">
         <div><b>1. Import Excel</b><br/><span className="text-slate-500">Aggiorna dati in Parametri.</span></div>
         <div><b>2. Anomalie</b><br/><span className="text-slate-500">Controlla stock e codici.</span></div>
-        <div><b>3. Ordine</b><br/><span className="text-slate-500">PDF o conferma fornitore.</span></div>
+        <div><b>3. Ordine</b><br/><span className="text-slate-500">PDF, Excel o conferma fornitore.</span></div>
         <div><b>4. Carico</b><br/><span className="text-slate-500">Aggiorna magazzino quando arriva.</span></div>
       </div>
 
@@ -95,8 +96,11 @@ export default function AutoOrder() {
 
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={load} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={downloadPdf} disabled={!ordiniCategoria.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF {categoria ? "selezione" : "fornitore"}
+        </button>
+        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+          Esporta Excel {categoria ? "selezione" : "fornitore"}
         </button>
         <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Conferma..." : alreadyConfirmed ? "Ordine confermato" : "Conferma tutti gli ordini"}

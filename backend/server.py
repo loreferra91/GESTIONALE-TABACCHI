@@ -2358,7 +2358,7 @@ async def conferma_auto_order(
     return {"ok": True, **batch, "duplicate": False}
 
 
-# ------------------------- Auto-Order PDF -------------------------
+# ------------------------- Auto-Order export -------------------------
 @api.get("/auto-order/pdf")
 async def auto_order_pdf(
     fornitore: Optional[str] = "Fornitore",
@@ -2457,6 +2457,114 @@ async def auto_order_pdf(
     return StreamingResponse(
         buf,
         media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={fname}",
+            "X-Auto-Order-Category": categoria_filtro or "TUTTE",
+            "X-Auto-Order-Rows": str(len(righe)),
+        },
+    )
+
+
+@api.get("/auto-order/excel")
+async def auto_order_excel(
+    fornitore: Optional[str] = "Fornitore",
+    categoria: Optional[str] = None,
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    fornitore_testo = (fornitore or "Fornitore").strip()[:120] or "Fornitore"
+    categoria_filtro = (categoria or "").strip()[:120]
+
+    ao = await auto_order()
+    righe = ao["righe"]
+    if categoria_filtro:
+        righe = [r for r in righe if r.get("categoria") == categoria_filtro]
+    totale = round(sum(float(r.get("totale", 0) or 0) for r in righe), 2)
+
+    def excel_text(value: Any) -> str:
+        """Mantiene i campi testuali come testo anche con prefissi da formula."""
+        text = str(value or "")
+        return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ordine fornitore"
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A5"
+
+    dark_fill = PatternFill("solid", fgColor="0F172A")
+    light_fill = PatternFill("solid", fgColor="F1F5F9")
+    white_bold = Font(color="FFFFFF", bold=True)
+
+    ws.merge_cells("A1:D1")
+    ws["A1"] = "ORDINE FORNITORE - GOD SERVICES"
+    ws["A1"].font = Font(size=16, bold=True, color="0F172A")
+    ws["A1"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 26
+
+    data_ordine = datetime.now(timezone.utc).date()
+    ws["A2"] = "Destinatario"
+    ws["B2"] = excel_text(fornitore_testo)
+    ws["C2"] = "Data"
+    ws["D2"] = data_ordine
+    ws["D2"].number_format = "dd/mm/yyyy"
+    ws["A3"] = "Selezione"
+    ws["B3"] = excel_text(categoria_filtro or "Tutte le categorie")
+    ws["C3"] = "Righe"
+    ws["D3"] = len(righe)
+    for cell in (ws["A2"], ws["C2"], ws["A3"], ws["C3"]):
+        cell.font = Font(bold=True, color="475569")
+
+    header_row = 4
+    headers = ["CODICE", "ARTICOLO", "QTA", "TOTALE"]
+    for column, label in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=column, value=label)
+        cell.fill = dark_fill
+        cell.font = white_bold
+        cell.alignment = Alignment(horizontal="right" if column >= 3 else "left")
+
+    first_data_row = header_row + 1
+    for row_index, row in enumerate(righe, start=first_data_row):
+        ws.cell(row=row_index, column=1, value=excel_text(row.get("codice")))
+        ws.cell(row=row_index, column=2, value=excel_text(row.get("descrizione")))
+        ws.cell(row=row_index, column=3, value=int(row.get("qta_da_ordinare") or 0))
+        total_cell = ws.cell(row=row_index, column=4, value=float(row.get("totale") or 0))
+        total_cell.number_format = '€ #,##0.00'
+        ws.cell(row=row_index, column=3).alignment = Alignment(horizontal="right")
+        total_cell.alignment = Alignment(horizontal="right")
+
+    total_row = first_data_row + len(righe)
+    ws.cell(row=total_row, column=3, value="TOTALE")
+    ws.cell(row=total_row, column=4, value=totale)
+    for column in range(1, 5):
+        cell = ws.cell(row=total_row, column=column)
+        cell.fill = light_fill
+        cell.font = Font(bold=True, color="0F172A")
+    ws.cell(row=total_row, column=4).number_format = '€ #,##0.00'
+    ws.cell(row=total_row, column=3).alignment = Alignment(horizontal="right")
+    ws.cell(row=total_row, column=4).alignment = Alignment(horizontal="right")
+
+    last_filter_row = max(header_row, total_row - 1)
+    ws.auto_filter.ref = f"A{header_row}:D{last_filter_row}"
+    widths = {1: 20, 2: 55, 3: 14, 4: 18}
+    for column, width in widths.items():
+        ws.column_dimensions[get_column_letter(column)].width = width
+
+    wb.properties.title = "Ordine fornitore"
+    wb.properties.subject = categoria_filtro or "Tutte le categorie"
+    wb.properties.creator = "God Services Gestionale"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    categoria_slug = re.sub(r"[^a-z0-9]+", "_", categoria_filtro.lower()).strip("_")
+    suffisso = f"_{categoria_slug}" if categoria_slug else ""
+    fname = f"ordine{suffisso}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f"attachment; filename={fname}",
             "X-Auto-Order-Category": categoria_filtro or "TUTTE",

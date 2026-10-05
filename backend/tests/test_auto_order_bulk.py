@@ -7,6 +7,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 import backend.server as server
+import openpyxl
 import pdfplumber
 from fastapi.testclient import TestClient
 
@@ -230,3 +231,52 @@ def test_auto_order_pdf_filters_selected_category(monkeypatch):
     assert all(label not in text for label in ("TIPO", "MAG.", "V10/30", "COP.", "MOTIVO"))
     assert "SIG1" in text
     assert "ACC1" not in text
+
+
+def test_auto_order_excel_filters_category_and_keeps_numeric_values(monkeypatch):
+    async def fake_auto_order():
+        base = {
+            "qta_da_ordinare": 10,
+            "lotto_ordine": 10,
+            "prezzo": 5,
+            "totale": 50,
+            "motivo": "TEST",
+        }
+        return {
+            "righe": [
+                {**base, "codice": "SIG1", "descrizione": "=Articolo test", "categoria": "SIGARETTE"},
+                {**base, "codice": "ACC1", "descrizione": "Altro articolo", "categoria": "ACCESSORI"},
+            ],
+            "totale": 100,
+            "n_righe": 2,
+        }
+
+    monkeypatch.setattr(server, "auto_order", fake_auto_order)
+    response = TestClient(server.app).get(
+        "/api/auto-order/excel",
+        params={"fornitore": "=Test", "categoria": "SIGARETTE"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert response.headers["x-auto-order-category"] == "SIGARETTE"
+    assert response.headers["x-auto-order-rows"] == "1"
+    assert "ordine_sigarette_" in response.headers["content-disposition"]
+
+    workbook = openpyxl.load_workbook(io.BytesIO(response.content), data_only=False)
+    sheet = workbook["Ordine fornitore"]
+    assert [sheet.cell(4, column).value for column in range(1, 5)] == [
+        "CODICE", "ARTICOLO", "QTA", "TOTALE",
+    ]
+    assert [sheet.cell(5, column).value for column in range(1, 5)] == [
+        "SIG1", "'=Articolo test", 10, 50,
+    ]
+    assert sheet["B2"].data_type == "s"
+    assert sheet["B5"].data_type == "s"
+    assert sheet["C6"].value == "TOTALE"
+    assert sheet["D6"].value == 50
+    assert sheet["D5"].number_format == '€ #,##0.00'
+    assert sheet.freeze_panes == "A5"
+    assert "ACC1" not in [cell.value for cell in sheet["A"]]
