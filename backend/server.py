@@ -1732,17 +1732,17 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
         raise HTTPException(409, "Colonna già alla capacità massima")
     if disponibile <= 0:
         raise HTTPException(409, "Magazzino negozio esaurito: impossibile ricaricare la vending")
-    if disponibile < fabbisogno:
+    if qta > disponibile:
         raise HTTPException(
             409,
-            f"Magazzino insufficiente: servono {fabbisogno} pezzi per riempire la colonna, disponibili {disponibile}",
+            f"Magazzino insufficiente: richiesti {qta} pezzi, disponibili {disponibile}",
         )
-    if qta < fabbisogno:
+    if qta > fabbisogno:
         raise HTTPException(
             422,
-            f"La ricarica vending deve arrivare alla capacità massima: inserisci almeno {fabbisogno} pezzi",
+            f"La quantità supera la capacità della colonna: puoi caricare al massimo {fabbisogno} pezzi",
         )
-    qta_caricata = fabbisogno
+    qta_caricata = qta
     nuovo = giacenza + qta_caricata
     await db.vending.update_one({"id": v_id}, {"$set": {"giacenza": nuovo}})
     # scala dal magazzino negozio
@@ -1754,6 +1754,127 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
         "nuova_giacenza": nuovo,
         "quantita_caricata": qta_caricata,
         "giacenza_magazzino_residua": disponibile - qta_caricata,
+    }
+
+
+@api.post("/vending/ricarica-completa")
+async def ricarica_vending_completa(body: Dict[str, Any]):
+    righe_input = body.get("righe")
+    if not isinstance(righe_input, list) or not righe_input:
+        raise HTTPException(422, "Nessuna riga da caricare")
+    if len(righe_input) > 500:
+        raise HTTPException(422, "Sono consentite al massimo 500 righe per caricamento")
+
+    quantita_per_id: Dict[str, int] = {}
+    for item in righe_input:
+        if not isinstance(item, dict):
+            raise HTTPException(422, "Formato riga non valido")
+        v_id = str(item.get("id") or "").strip()
+        if not v_id:
+            raise HTTPException(422, "ID colonna mancante")
+        if v_id in quantita_per_id:
+            raise HTTPException(422, f"Colonna duplicata nel caricamento: {v_id}")
+        try:
+            quantita = int(item.get("quantita", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"Quantità non valida per la colonna {v_id}")
+        if quantita <= 0:
+            raise HTTPException(422, f"La quantità della colonna {v_id} deve essere maggiore di zero")
+        quantita_per_id[v_id] = quantita
+
+    ids = list(quantita_per_id)
+    vending_docs = await db.vending.find({"id": {"$in": ids}}).to_list(500)
+    vending_per_id = {str(doc.get("id")): doc for doc in vending_docs}
+    mancanti = [v_id for v_id in ids if v_id not in vending_per_id]
+    if mancanti:
+        raise HTTPException(404, f"Colonne vending non trovate: {', '.join(mancanti)}")
+
+    codici = sorted({doc.get("codice") for doc in vending_docs if doc.get("codice")})
+    prodotti = await db.prodotti.find({"codice": {"$in": codici}}).to_list(5000)
+    prodotti_per_codice = {str(doc.get("codice")): doc for doc in prodotti}
+    preparate = []
+    richiesto_per_codice: Dict[str, int] = {}
+
+    for v_id in ids:
+        v = vending_per_id[v_id]
+        quantita = quantita_per_id[v_id]
+        giacenza = int(v.get("giacenza", 0) or 0)
+        capacita = int(v.get("capacita_max", 0) or 0)
+        fabbisogno = max(0, capacita - giacenza)
+        codice = str(v.get("codice") or "")
+        colonna = str(v.get("colonna") or v_id)
+        if fabbisogno <= 0:
+            raise HTTPException(409, f"Colonna {colonna} già alla capacità massima")
+        if quantita > fabbisogno:
+            raise HTTPException(
+                422,
+                f"Colonna {colonna}: puoi caricare al massimo {fabbisogno} pezzi",
+            )
+        if not codice or codice not in prodotti_per_codice:
+            raise HTTPException(409, f"Prodotto non trovato per la colonna {colonna}")
+        preparate.append({
+            "id": v_id,
+            "colonna": colonna,
+            "codice": codice,
+            "giacenza": giacenza,
+            "quantita": quantita,
+        })
+        richiesto_per_codice[codice] = richiesto_per_codice.get(codice, 0) + quantita
+
+    for codice, richiesto in richiesto_per_codice.items():
+        disponibile = max(0, int(prodotti_per_codice[codice].get("giacenza_negozio", 0) or 0))
+        if richiesto > disponibile:
+            raise HTTPException(
+                409,
+                f"Magazzino insufficiente per {codice}: richiesti {richiesto} pezzi, disponibili {disponibile}",
+            )
+
+    vending_applicate = []
+    prodotti_applicati = []
+    try:
+        for item in preparate:
+            result = await db.vending.update_one(
+                {"id": item["id"], "giacenza": item["giacenza"]},
+                {"$inc": {"giacenza": item["quantita"]}},
+            )
+            if result.matched_count == 0:
+                raise RuntimeError(f"La colonna {item['colonna']} è cambiata durante il caricamento")
+            vending_applicate.append(item)
+
+        for codice, quantita in richiesto_per_codice.items():
+            result = await db.prodotti.update_one(
+                {"codice": codice, "giacenza_negozio": {"$gte": quantita}},
+                {"$inc": {"giacenza_negozio": -quantita, "giacenza_vending": quantita}},
+            )
+            if result.matched_count == 0:
+                raise RuntimeError(f"La disponibilità di {codice} è cambiata durante il caricamento")
+            prodotti_applicati.append((codice, quantita))
+    except Exception as exc:
+        for codice, quantita in reversed(prodotti_applicati):
+            await db.prodotti.update_one(
+                {"codice": codice},
+                {"$inc": {"giacenza_negozio": quantita, "giacenza_vending": -quantita}},
+            )
+        for item in reversed(vending_applicate):
+            await db.vending.update_one(
+                {"id": item["id"]},
+                {"$inc": {"giacenza": -item["quantita"]}},
+            )
+        raise HTTPException(409, f"Caricamento annullato: {exc}")
+
+    return {
+        "ok": True,
+        "colonne_caricate": len(preparate),
+        "pezzi_caricati": sum(item["quantita"] for item in preparate),
+        "righe": [
+            {
+                "id": item["id"],
+                "colonna": item["colonna"],
+                "quantita_caricata": item["quantita"],
+                "nuova_giacenza": item["giacenza"] + item["quantita"],
+            }
+            for item in preparate
+        ],
     }
 
 
