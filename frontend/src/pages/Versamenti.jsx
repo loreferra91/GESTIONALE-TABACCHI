@@ -62,13 +62,14 @@ export default function Versamenti() {
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <input data-testid="versamento-data" type="date" value={form.data} onChange={e => setForm({...form, data: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
           <input data-testid="versamento-importo" type="number" step="0.01" placeholder="Importo €" value={form.importo} onChange={e => setForm({...form, importo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
-          <input data-testid="versamento-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm md:col-span-2" />
+          <input data-testid="versamento-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
+          <input data-testid="versamento-operatore" placeholder="Operatore" value={form.operatore} onChange={e => setForm({...form, operatore: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
           <button data-testid="versamento-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors">Registra</button>
         </div>
       </Card>
 
       <div className="flex items-center gap-3 mb-4">
-        <SearchBar data-testid="versamenti-search" value={query} onChange={setQuery} placeholder="Cerca descrizione..." className="flex-1 max-w-md" />
+        <SearchBar data-testid="versamenti-search" value={query} onChange={setQuery} placeholder="Cerca descrizione o operatore..." className="flex-1 max-w-md" />
         <span className="text-sm text-slate-500">{data.movimenti.length} versamenti</span>
       </div>
 

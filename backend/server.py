@@ -170,9 +170,15 @@ class OrdineIn(BaseModel):
     file_sorgente: Optional[str] = "manuale"
 
 
+class AutoOrderRigaIn(BaseModel):
+    codice: str
+    quantita: int = Field(gt=0, le=100000)
+
+
 class AutoOrderConfermaIn(BaseModel):
     idempotency_key: Optional[str] = None
     batch_key: Optional[str] = None
+    righe: Optional[List[AutoOrderRigaIn]] = None
 
 
 class MovimentoCassa(BaseModel):
@@ -271,11 +277,12 @@ BACKUP_COLLECTIONS = [
     "ordini_fornitore_righe",
     "import_history",
     "adm_sync",
+    "anomalie_ignorate",
 ]
 
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
-OPTIONAL_BACKUP_COLLECTIONS = {"scontrini_vending", "cassa_vending_stato"}
+OPTIONAL_BACKUP_COLLECTIONS = {"scontrini_vending", "cassa_vending_stato", "anomalie_ignorate"}
 
 
 # ------------------------- Seed -------------------------
@@ -395,6 +402,7 @@ async def on_start():
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
             db.app_migrations.create_index("id", unique=True),
+            db.anomalie_ignorate.create_index("key", unique=True),
         )
         aliases_merged = await reconcile_adm_product_aliases()
         if aliases_merged:
@@ -1330,6 +1338,12 @@ async def anomalie():
             "messaggio": f"Ultima vendita disponibile: {status.get('latest_sales_day')} ({status['sales_data_delay_days']} giorni fa)",
             "azione": "Importa Excel aggiornato prima di confermare ordini",
         })
+    for item in items:
+        item["id"] = hashlib.sha256(
+            f"{item.get('tipo', '')}\0{item.get('codice', '')}".encode("utf-8")
+        ).hexdigest()[:24]
+    ignored = set(await db.anomalie_ignorate.distinct("key"))
+    items = [item for item in items if item["id"] not in ignored]
     summary = {
         "alta": sum(1 for i in items if i["severita"] == "alta"),
         "media": sum(1 for i in items if i["severita"] == "media"),
@@ -1337,6 +1351,32 @@ async def anomalie():
         "totale": len(items),
     }
     return {"summary": summary, "items": items}
+
+
+@api.delete("/anomalie")
+async def dismiss_all_anomalies():
+    current = await anomalie()
+    now = datetime.now(timezone.utc).isoformat()
+    keys = [item["id"] for item in current["items"]]
+    if keys:
+        existing = set(await db.anomalie_ignorate.distinct("key", {"key": {"$in": keys}}))
+        missing = [{"key": key, "dismissed_at": now} for key in keys if key not in existing]
+        if missing:
+            await db.anomalie_ignorate.insert_many(missing)
+    return {"ok": True, "eliminate": len(keys)}
+
+
+@api.delete("/anomalie/{item_key}")
+async def dismiss_anomaly(item_key: str):
+    current = await anomalie()
+    if item_key not in {item["id"] for item in current["items"]}:
+        raise HTTPException(404, "Anomalia non trovata")
+    await db.anomalie_ignorate.update_one(
+        {"key": item_key},
+        {"$set": {"key": item_key, "dismissed_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    return {"ok": True}
 
 
 @api.get("/report/giornaliero")
@@ -2408,6 +2448,55 @@ async def auto_order():
     return response
 
 
+def _auto_order_selected_rows(
+    ao: Dict[str, Any], requested: Optional[List[AutoOrderRigaIn]] = None
+) -> List[Dict[str, Any]]:
+    """Applica una selezione utente usando descrizioni e prezzi calcolati dal server."""
+    if requested is None:
+        return [
+            dict(row) for row in ao["righe"]
+            if not row.get("anomalia")
+            and int(row.get("qta_da_ordinare") or 0) > 0
+        ]
+    if not requested:
+        raise HTTPException(422, "Aggiungi almeno un articolo all'ordine")
+
+    available = {
+        row["codice"]: row
+        for row in [*ao.get("righe", []), *ao.get("esclusi", [])]
+        if row.get("codice") and not row.get("anomalia")
+    }
+    seen = set()
+    selected = []
+    for item in requested:
+        codice = item.codice.strip()
+        if codice in seen:
+            raise HTTPException(422, f"Articolo duplicato nella selezione: {codice}")
+        row = available.get(codice)
+        if not row:
+            raise HTTPException(422, f"Articolo non ordinabile: {codice}")
+        seen.add(codice)
+        quantity = int(item.quantita)
+        selected.append({
+            **row,
+            "stato": "ORDINA ORA",
+            "qta_da_ordinare": quantity,
+            "totale": round(quantity * float(row.get("prezzo") or 0), 2),
+        })
+    return selected
+
+
+def _auto_order_rows_from_query(ao: Dict[str, Any], selection: Optional[str]) -> List[Dict[str, Any]]:
+    if not selection:
+        return _auto_order_selected_rows(ao)
+    try:
+        raw = json.loads(selection)
+        requested = [AutoOrderRigaIn.model_validate(item) for item in raw]
+    except Exception as exc:
+        raise HTTPException(422, "Selezione Auto-Order non valida") from exc
+    return _auto_order_selected_rows(ao, requested)
+
+
 @api.post("/auto-order/conferma")
 async def conferma_auto_order(
     body: Optional[AutoOrderConfermaIn] = None,
@@ -2419,18 +2508,22 @@ async def conferma_auto_order(
     storico_ordini e incrementa giacenza/acquistati quando il carico arriva.
     """
     ao = await auto_order()
+    requested_rows = body.righe if body else None
+    righe = _auto_order_selected_rows(ao, requested_rows)
+    selection_key = hashlib.sha256(json.dumps(
+        [{"codice": r["codice"], "quantita": r["qta_da_ordinare"]} for r in righe],
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()[:24]
     header_key = idempotency_key if isinstance(idempotency_key, str) else None
-    batch_key = (header_key or (body.idempotency_key if body else None) or (body.batch_key if body else None) or ao["snapshot_key"]).strip()
+    default_key = f"{ao['snapshot_key']}:selezione:{selection_key}" if requested_rows is not None else ao["snapshot_key"]
+    batch_key = (header_key or (body.idempotency_key if body else None) or (body.batch_key if body else None) or default_key).strip()
     if not batch_key:
         batch_key = ao["snapshot_key"]
     existing = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
     if existing:
         return {**existing, "duplicate": True}
 
-    righe = [
-        r for r in ao["righe"]
-        if r.get("stato") == "ORDINA ORA" and not r.get("anomalia") and int(r.get("qta_da_ordinare") or 0) > 0
-    ]
     oggi = datetime.now(timezone.utc).isoformat()
     batch = {
         "id": str(uuid.uuid4()),
@@ -2446,7 +2539,9 @@ async def conferma_auto_order(
     inserted_ids = []
     try:
         try:
-            await db.ordini_fornitore.insert_one(batch)
+            # Motor aggiunge ``_id`` al dizionario ricevuto. Inseriamo una copia
+            # per mantenere serializzabile l'oggetto restituito dalla API.
+            await db.ordini_fornitore.insert_one(batch.copy())
         except DuplicateKeyError:
             existing = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
             if existing:
@@ -2484,6 +2579,7 @@ async def conferma_auto_order(
 async def auto_order_pdf(
     fornitore: Optional[str] = "Fornitore",
     categoria: Optional[str] = None,
+    selezione: Optional[str] = None,
 ):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
@@ -2498,7 +2594,7 @@ async def auto_order_pdf(
     categoria_safe = xml_escape(categoria_filtro)
 
     ao = await auto_order()
-    righe = ao["righe"]
+    righe = _auto_order_rows_from_query(ao, selezione)
     if categoria_filtro:
         righe = [r for r in righe if r.get("categoria") == categoria_filtro]
     totale = round(sum(r.get("totale", 0) or 0 for r in righe), 2)
@@ -2590,6 +2686,7 @@ async def auto_order_pdf(
 async def auto_order_excel(
     fornitore: Optional[str] = "Fornitore",
     categoria: Optional[str] = None,
+    selezione: Optional[str] = None,
 ):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -2599,7 +2696,7 @@ async def auto_order_excel(
     categoria_filtro = (categoria or "").strip()[:120]
 
     ao = await auto_order()
-    righe = ao["righe"]
+    righe = _auto_order_rows_from_query(ao, selezione)
     if categoria_filtro:
         righe = [r for r in righe if r.get("categoria") == categoria_filtro]
     totale = round(sum(float(r.get("totale", 0) or 0) for r in righe), 2)

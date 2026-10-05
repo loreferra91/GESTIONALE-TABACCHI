@@ -60,6 +60,12 @@ class FakeBatchCollection:
         self.docs.pop(query["batch_key"], None)
 
 
+class MutatingFakeBatchCollection(FakeBatchCollection):
+    async def insert_one(self, doc):
+        await super().insert_one(doc)
+        doc["_id"] = object()
+
+
 class FakeRowsCollection:
     def __init__(self, fail_on=None):
         self.docs = []
@@ -211,7 +217,10 @@ async def fake_ao_two_rows():
             {"codice": "A", "descrizione": "A", "categoria": "ACCESSORI", "stato": "ORDINA ORA", "anomalia": False, "qta_da_ordinare": 2, "prezzo": 3, "totale": 6, "motivo": "TEST"},
             {"codice": "B", "descrizione": "B", "categoria": "ACCESSORI", "stato": "ORDINA ORA", "anomalia": False, "qta_da_ordinare": 1, "prezzo": 4, "totale": 4, "motivo": "TEST"},
         ],
-        "esclusi": [{"codice": "X", "stato": "ANOMALIA", "anomalia": True, "qta_da_ordinare": 0}],
+        "esclusi": [
+            {"codice": "X", "descrizione": "X", "categoria": "ACCESSORI", "stato": "ANOMALIA", "anomalia": True, "qta_da_ordinare": 0, "prezzo": 9, "totale": 0, "motivo": "TEST"},
+            {"codice": "Y", "descrizione": "Y", "categoria": "ACCESSORI", "stato": "NESSUN ORDINE", "anomalia": False, "qta_da_ordinare": 0, "prezzo": 2, "totale": 0, "motivo": "TEST"},
+        ],
         "totale": 10,
         "parametri": {},
         "data_riferimento_domanda": "2026-09-28",
@@ -249,3 +258,59 @@ def test_partial_confirmation_failure_rolls_back(monkeypatch):
     assert rows.docs == []
     assert batches.deleted == [{"batch_key": "key-rollback"}]
     assert rows.deleted
+
+
+def test_confirmation_uses_custom_quantities_and_allows_safe_excluded_rows(monkeypatch):
+    batches = FakeBatchCollection()
+    rows = FakeRowsCollection()
+    monkeypatch.setattr(server, "auto_order", fake_ao_two_rows)
+    monkeypatch.setattr(server, "db", SimpleNamespace(
+        ordini_fornitore=batches,
+        ordini_fornitore_righe=rows,
+        prodotti=FakeProducts([]),
+    ))
+
+    body = server.AutoOrderConfermaIn(righe=[
+        server.AutoOrderRigaIn(codice="A", quantita=5),
+        server.AutoOrderRigaIn(codice="Y", quantita=3),
+    ])
+    result = asyncio.run(server.conferma_auto_order(body))
+
+    assert result["ordinati"] == 2
+    assert result["totale"] == 21
+    assert [(row["codice"], row["quantita"], row["totale"]) for row in rows.docs] == [
+        ("A", 5, 15),
+        ("Y", 3, 6),
+    ]
+
+
+def test_confirmation_rejects_anomalous_manual_row(monkeypatch):
+    monkeypatch.setattr(server, "auto_order", fake_ao_two_rows)
+    monkeypatch.setattr(server, "db", SimpleNamespace(
+        ordini_fornitore=FakeBatchCollection(),
+        ordini_fornitore_righe=FakeRowsCollection(),
+        prodotti=FakeProducts([]),
+    ))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(server.conferma_auto_order(server.AutoOrderConfermaIn(
+            righe=[server.AutoOrderRigaIn(codice="X", quantita=1)]
+        )))
+
+    assert exc.value.status_code == 422
+
+
+def test_confirmation_response_is_not_mutated_by_mongo_insert(monkeypatch):
+    batches = MutatingFakeBatchCollection()
+    monkeypatch.setattr(server, "auto_order", fake_ao_two_rows)
+    monkeypatch.setattr(server, "db", SimpleNamespace(
+        ordini_fornitore=batches,
+        ordini_fornitore_righe=FakeRowsCollection(),
+        prodotti=FakeProducts([]),
+    ))
+
+    result = asyncio.run(server.conferma_auto_order(server.AutoOrderConfermaIn(
+        righe=[server.AutoOrderRigaIn(codice="A", quantita=2)]
+    )))
+
+    assert "_id" not in result

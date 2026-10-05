@@ -5,6 +5,7 @@ import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { Plus, Trash2 } from "lucide-react";
 
 export default function AutoOrder() {
   const [data, setData] = useState(null);
@@ -15,18 +16,24 @@ export default function AutoOrder() {
   const [confirming, setConfirming] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmedKeys, setConfirmedKeys] = useState(() => new Set());
-  const allRighe = data?.righe || [];
+  const [draftRows, setDraftRows] = useState([]);
+  const [selectedToAdd, setSelectedToAdd] = useState("");
+  const allRighe = draftRows;
   const allEsclusi = data?.esclusi || [];
   const categorieDisponibili = Array.from(new Set([...allRighe, ...allEsclusi].map(r => r.categoria).filter(Boolean))).sort();
   const ordiniCategoria = categoria ? allRighe.filter(r => r.categoria === categoria) : allRighe;
-  const esclusiCategoria = categoria ? allEsclusi.filter(r => r.categoria === categoria) : allEsclusi;
+  const draftCodes = new Set(allRighe.map(r => r.codice));
+  const esclusiDisponibili = allEsclusi.filter(r => !draftCodes.has(r.codice));
+  const esclusiCategoria = categoria ? esclusiDisponibili.filter(r => r.categoria === categoria) : esclusiDisponibili;
   const righeCategoria = mostraEsclusi ? [...ordiniCategoria, ...esclusiCategoria] : ordiniCategoria;
   const totaleCategoria = ordiniCategoria.reduce((totale, r) => totale + (r.totale || 0), 0);
   const coperturaMin = data?.parametri?.GIORNI_COPERTURA_MIN || 7;
   const breveGg = data?.finestra_breve_gg || 10;
   const lungoGg = data?.finestra_lunga_gg || 30;
   const snapshotKey = data?.snapshot_key || "";
-  const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(snapshotKey));
+  const draftSignature = JSON.stringify(allRighe.map(r => [r.codice, r.qta_da_ordinare]).sort((a, b) => a[0].localeCompare(b[0])));
+  const confirmationKey = `${snapshotKey}:${draftSignature}`;
+  const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(confirmationKey));
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
     : null;
@@ -41,6 +48,7 @@ export default function AutoOrder() {
     try {
       const r = await api.get("/auto-order", { timeout: 20000 });
       setData(r.data);
+      setDraftRows(r.data.righe || []);
     } catch (err) {
       const timedOut = err.code === "ECONNABORTED";
       const message = timedOut
@@ -57,11 +65,12 @@ export default function AutoOrder() {
   const conferma = async () => {
     setConfirming(true);
     try {
-      const r = await api.post("/auto-order/conferma", { idempotency_key: snapshotKey });
-      if (snapshotKey) setConfirmedKeys(keys => new Set(keys).add(snapshotKey));
+      const r = await api.post("/auto-order/conferma", {
+        righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare })),
+      });
+      if (snapshotKey) setConfirmedKeys(keys => new Set(keys).add(confirmationKey));
       toast.success(`${r.data.ordinati} righe ordine fornitore ${r.data.duplicate ? "gia presenti" : "create"}`);
       setConfirmOpen(false);
-      load();
     } catch (err) {
       toast.error(apiErrorMessage(err, "Errore durante la conferma Auto-Order"));
     } finally {
@@ -74,9 +83,37 @@ export default function AutoOrder() {
     const fornitore = window.prompt(`Nome fornitore per il file ${label}:`, "Fornitore") || "Fornitore";
     const params = new URLSearchParams({ fornitore });
     if (categoria) params.set("categoria", categoria);
+    params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare }))));
     const url = `${API}/auto-order/${format}?${params.toString()}`;
     window.open(url, "_blank");
   };
+
+  const changeQuantity = (codice, value) => {
+    const quantity = Math.max(1, Math.floor(Number(value) || 1));
+    setDraftRows(rows => rows.map(row => row.codice === codice
+      ? { ...row, qta_da_ordinare: quantity, totale: Math.round(quantity * (row.prezzo || 0) * 100) / 100 }
+      : row));
+  };
+
+  const removeRow = (codice) => {
+    setDraftRows(rows => rows.filter(row => row.codice !== codice));
+  };
+
+  const addRow = (codice = selectedToAdd) => {
+    const row = allEsclusi.find(item => item.codice === codice);
+    if (!row || row.anomalia || draftCodes.has(row.codice)) return;
+    const quantity = Math.max(1, Number(row.lotto_ordine) || 1);
+    setDraftRows(rows => [...rows, {
+      ...row,
+      stato: "ORDINA ORA",
+      motivo: `AGGIUNTO MANUALMENTE · ${row.motivo}`,
+      qta_da_ordinare: quantity,
+      totale: Math.round(quantity * (row.prezzo || 0) * 100) / 100,
+    }]);
+    setSelectedToAdd("");
+  };
+
+  const addableRows = allEsclusi.filter(row => !row.anomalia && !draftCodes.has(row.codice));
 
   return (
     <Layout title="Auto-Order" subtitle="fabbisogno reale basato sulle vendite recenti">
@@ -109,6 +146,19 @@ export default function AutoOrder() {
           {mostraEsclusi ? "Nascondi esclusi" : `Mostra esclusi (${esclusiCategoria.length})`}
         </button>
       </div>
+
+      <Card className="mb-4 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <label htmlFor="ao-add-product" className="text-sm font-semibold text-slate-700">Aggiungi articolo</label>
+          <select id="ao-add-product" data-testid="ao-add-product" value={selectedToAdd} onChange={e => setSelectedToAdd(e.target.value)} className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm">
+            <option value="">Seleziona un articolo escluso dal calcolo…</option>
+            {addableRows.map(row => <option key={row.codice} value={row.codice}>{row.codice} · {row.descrizione}</option>)}
+          </select>
+          <button data-testid="ao-add-product-btn" onClick={() => addRow()} disabled={!selectedToAdd} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-40">
+            <Plus size={16} /> Aggiungi
+          </button>
+        </div>
+      </Card>
 
       {error && (
         <div data-testid="ao-error" role="alert" className="mb-4 flex items-center justify-between gap-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -157,10 +207,11 @@ export default function AutoOrder() {
                 <Th sortKey="totale" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Totale</Th>
                 <Th sortKey="stato" currentKey={sortKey} dir={sortDir} onClick={toggle}>Stato</Th>
                 <Th sortKey="motivo" currentKey={sortKey} dir={sortDir} onClick={toggle}>Calcolo</Th>
+                <th className="w-20">Azioni</th>
               </tr>
             </thead>
             <tbody>
-              {loading && !data && <tr><td colSpan={17} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
+              {loading && !data && <tr><td colSpan={18} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
               {righe.map(r => (
                 <tr key={r.codice} data-testid={`ao-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
@@ -176,13 +227,22 @@ export default function AutoOrder() {
                   <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
-                  <td className="font-mono text-right font-bold">{r.qta_da_ordinare || "—"}</td>
+                  <td className="text-right">
+                    {draftCodes.has(r.codice) ? <input data-testid={`ao-quantity-${r.codice}`} type="number" min="1" step="1" value={r.qta_da_ordinare} onChange={e => changeQuantity(r.codice, e.target.value)} className="w-20 rounded border border-slate-300 px-2 py-1 text-right font-mono font-bold" aria-label={`Quantità ${r.descrizione}`} /> : "—"}
+                  </td>
                   <td className="font-mono text-right font-semibold">{r.totale ? formatEur(r.totale) : "—"}</td>
                   <td className="space-x-1"><Badge tone={r.stato === "ORDINA ORA" ? "error" : r.stato === "MONITORA" || r.stato === "CONTROLLO MANUALE" ? "warning" : r.stato === "ANOMALIA" ? "error" : "info"}>{r.stato}</Badge>{r.anomalia && r.stato !== "ANOMALIA" ? <Badge tone="error">ANOMALIA STOCK</Badge> : null}</td>
                   <td className="min-w-64 text-xs">{r.motivo}</td>
+                  <td className="text-right">
+                    {draftCodes.has(r.codice) ? (
+                      <button data-testid={`ao-remove-${r.codice}`} onClick={() => removeRow(r.codice)} className="rounded p-2 text-red-600 hover:bg-red-50" aria-label={`Rimuovi ${r.descrizione}`} title="Rimuovi dall'ordine"><Trash2 size={16} /></button>
+                    ) : (
+                      <button data-testid={`ao-add-${r.codice}`} onClick={() => addRow(r.codice)} disabled={r.anomalia} className="rounded p-2 text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-30" aria-label={`Aggiungi ${r.descrizione}`} title={r.anomalia ? "Stock anomalo: articolo non ordinabile" : "Aggiungi all'ordine"}><Plus size={16} /></button>
+                    )}
+                  </td>
                 </tr>
               ))}
-              {!loading && !error && righe.length === 0 && <tr><td colSpan={17} className="text-center py-8 text-slate-400">{categoria ? "Nessun ordine necessario per la categoria selezionata." : "Nessun ordine necessario in base alle vendite recenti."}</td></tr>}
+              {!loading && !error && righe.length === 0 && <tr><td colSpan={18} className="text-center py-8 text-slate-400">{categoria ? "Nessun articolo nella categoria selezionata." : "Nessun articolo nella bozza d'ordine."}</td></tr>}
             </tbody>
           </table>
         </div>
@@ -195,7 +255,7 @@ export default function AutoOrder() {
         onCancel={() => setConfirmOpen(false)}
         onConfirm={conferma}
       >
-        <p>Verranno create <b>{formatNum(data?.n_righe)}</b> righe ordine fornitore per un totale di <b>{formatEur(data?.totale)}</b>.</p>
+        <p>Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
         <p className="mt-2 text-slate-600">Questa azione non carica il magazzino: le giacenze aumentano solo dalla pagina <b>Carico Merce</b> quando la merce arriva fisicamente.</p>
       </ConfirmDialog>
     </Layout>

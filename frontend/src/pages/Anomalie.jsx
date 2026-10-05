@@ -4,6 +4,7 @@ import { api, apiErrorMessage } from "../lib/api";
 import { Badge, Card, KpiCard, formatNum } from "../components/UI";
 import { useSortSearch, SearchBar, Th } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { Trash2 } from "lucide-react";
 
 const toneBySeverity = { alta: "danger", media: "warning", bassa: "default" };
 const badgeBySeverity = { alta: "error", media: "warning", bassa: "info" };
@@ -27,6 +28,28 @@ export default function Anomalie() {
   };
 
   useEffect(() => { load(); }, []);
+
+  const removeOne = async (item) => {
+    if (!window.confirm(`Eliminare l'anomalia ${item.codice || item.tipo}?`)) return;
+    try {
+      await api.delete(`/anomalie/${item.id}`);
+      toast.success("Anomalia eliminata");
+      load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile eliminare l'anomalia"));
+    }
+  };
+
+  const removeAll = async () => {
+    if (!data.items?.length || !window.confirm(`Eliminare tutte le ${data.items.length} anomalie?`)) return;
+    try {
+      await api.delete("/anomalie");
+      toast.success("Tutte le anomalie sono state eliminate");
+      load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile eliminare le anomalie"));
+    }
+  };
 
   const filtered = (data.items || []).filter(item => (!severity || item.severita === severity) && (!type || item.tipo === type));
   const types = Array.from(new Set((data.items || []).map(i => i.tipo))).sort();
@@ -60,6 +83,9 @@ export default function Anomalie() {
         <button onClick={load} disabled={loading} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-50 disabled:opacity-40">
           {loading ? "Controllo..." : "Ricontrolla"}
         </button>
+        <button data-testid="anomalie-delete-all" onClick={removeAll} disabled={loading || !data.items?.length} className="inline-flex items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40">
+          <Trash2 size={16} /> Elimina tutte
+        </button>
       </div>
 
       <Card className="overflow-hidden">
@@ -73,10 +99,11 @@ export default function Anomalie() {
                 <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Articolo</Th>
                 <th>Problema</th>
                 <th>Azione consigliata</th>
+                <th className="w-12"><span className="sr-only">Elimina</span></th>
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Controllo anomalie...</td></tr>}
+              {loading && <tr><td colSpan={7} className="text-center py-8 text-slate-400">Controllo anomalie...</td></tr>}
               {!loading && rows.map((item, idx) => (
                 <tr key={`${item.tipo}-${item.codice}-${idx}`}>
                   <td><Badge tone={badgeBySeverity[item.severita] || "info"}>{item.severita}</Badge></td>
@@ -85,9 +112,14 @@ export default function Anomalie() {
                   <td className="max-w-xs truncate">{item.descrizione || "—"}</td>
                   <td className="min-w-64 whitespace-normal">{item.messaggio}</td>
                   <td className="min-w-64 whitespace-normal font-semibold text-slate-700">{item.azione}</td>
+                  <td className="text-right">
+                    <button data-testid={`anomalia-delete-${item.id}`} onClick={() => removeOne(item)} className="rounded p-2 text-red-600 hover:bg-red-50" aria-label={`Elimina anomalia ${item.codice || item.tipo}`} title="Elimina anomalia">
+                      <Trash2 size={16} />
+                    </button>
+                  </td>
                 </tr>
               ))}
-              {!loading && rows.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nessuna anomalia con i filtri attuali.</td></tr>}
+              {!loading && rows.length === 0 && <tr><td colSpan={7} className="text-center py-8 text-slate-400">Nessuna anomalia con i filtri attuali.</td></tr>}
             </tbody>
           </table>
         </div>
