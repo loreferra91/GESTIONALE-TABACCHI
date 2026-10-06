@@ -11,7 +11,7 @@ function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, bus
       <div>
         <div className="text-sm font-bold text-amber-950">{title}</div>
         <div className="mt-0.5 text-xs text-amber-800">
-          {createdAt ? new Date(createdAt).toLocaleString("it-IT") : "Appena completato"} · {description}
+          {createdAt ? `${new Date(createdAt).toLocaleString("it-IT")} · ` : ""}{description}
         </div>
       </div>
       <button
@@ -42,9 +42,9 @@ export default function Vendite() {
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkRows, setBulkRows] = useState([]); // canonical editable rows for preview
   const [bulkImporting, setBulkImporting] = useState(false);
-  const [lastBulkImport, setLastBulkImport] = useState(null);
+  const [lastBulkImport, setLastBulkImport] = useState(undefined);
   const [bulkUndoing, setBulkUndoing] = useState(false);
-  const [lastManualSale, setLastManualSale] = useState(null);
+  const [lastManualSale, setLastManualSale] = useState(undefined);
   const [manualUndoing, setManualUndoing] = useState(false);
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
@@ -53,7 +53,7 @@ export default function Vendite() {
   const [csvPreview, setCsvPreview] = useState(null);
   const [csvPreviewing, setCsvPreviewing] = useState(false);
   const [csvImporting, setCsvImporting] = useState(false);
-  const [lastCsvImport, setLastCsvImport] = useState(null);
+  const [lastCsvImport, setLastCsvImport] = useState(undefined);
   const [csvUndoing, setCsvUndoing] = useState(false);
   const [prodMap, setProdMap] = useState(new Map());
 
@@ -373,17 +373,22 @@ export default function Vendite() {
             <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
           </select>
         </div>
-        {lastManualSale && (
-          <UndoLastPanel
-            testId="manual-last-sale"
-            title={`Ultima vendita manuale: ${lastManualSale.codice} · ${formatEur(lastManualSale.importo)}`}
-            createdAt={lastManualSale.created_at}
-            description="Rimuove solo questa vendita e ripristina la relativa scorta."
-            buttonLabel="Annulla ultima vendita"
-            busy={manualUndoing}
-            onUndo={undoLastManualSale}
-          />
-        )}
+        <UndoLastPanel
+          testId="manual-last-sale"
+          title={lastManualSale === undefined
+            ? "Verifica dell'ultima vendita…"
+            : lastManualSale
+              ? `Ultima vendita manuale: ${lastManualSale.codice} · ${formatEur(lastManualSale.importo)}`
+              : "Nessuna vendita manuale annullabile"}
+          createdAt={lastManualSale?.created_at}
+          description={lastManualSale
+            ? "Rimuove solo questa vendita e ripristina la relativa scorta."
+            : "Il comando sarà disponibile dopo la prossima vendita manuale."}
+          buttonLabel="Annulla ultima vendita"
+          busy={manualUndoing}
+          disabled={!lastManualSale}
+          onUndo={undoLastManualSale}
+        />
       </Card>
       )}
 
@@ -513,18 +518,22 @@ export default function Vendite() {
           </div>
         )}
 
-        {lastBulkImport && (
-          <UndoLastPanel
-            testId="bulk-last-import"
-            title={`Ultimo caricamento: ${formatNum(lastBulkImport.inseriti || 0)} ${(lastBulkImport.inseriti || 0) === 1 ? "vendita" : "vendite"}`}
-            createdAt={lastBulkImport.created_at}
-            description="Rimuove solo questo invio e ripristina le scorte."
-            buttonLabel="Annulla ultimo caricamento"
-            busy={bulkUndoing}
-            disabled={bulkImporting}
-            onUndo={undoLastBulkImport}
-          />
-        )}
+        <UndoLastPanel
+          testId="bulk-last-import"
+          title={lastBulkImport === undefined
+            ? "Verifica dell'ultimo caricamento…"
+            : lastBulkImport
+              ? `Ultimo caricamento: ${formatNum(lastBulkImport.inseriti || 0)} ${(lastBulkImport.inseriti || 0) === 1 ? "vendita" : "vendite"}`
+              : "Nessun caricamento annullabile"}
+          createdAt={lastBulkImport?.created_at}
+          description={lastBulkImport
+            ? "Rimuove solo questo invio e ripristina le scorte."
+            : "Il comando sarà disponibile dopo il prossimo caricamento. I caricamenti precedenti all'aggiornamento non possono essere annullati in blocco in sicurezza."}
+          buttonLabel="Annulla ultimo caricamento"
+          busy={bulkUndoing}
+          disabled={!lastBulkImport || bulkImporting}
+          onUndo={undoLastBulkImport}
+        />
       </Card>
       )}
 
@@ -623,18 +632,22 @@ export default function Vendite() {
             )}
           </div>
         )}
-        {lastCsvImport && (
-          <UndoLastPanel
-            testId="csv-last-import"
-            title={`Ultimo CSV Vending: ${formatNum(lastCsvImport.inseriti || 0)} ${(lastCsvImport.inseriti || 0) === 1 ? "vendita" : "vendite"}`}
-            createdAt={lastCsvImport.created_at}
-            description="Ripristina vendite, scorte vending e cassa contanti di questo file."
-            buttonLabel="Annulla ultimo CSV"
-            busy={csvUndoing}
-            disabled={csvImporting}
-            onUndo={undoLastCsvImport}
-          />
-        )}
+        <UndoLastPanel
+          testId="csv-last-import"
+          title={lastCsvImport === undefined
+            ? "Verifica dell'ultimo caricamento…"
+            : lastCsvImport
+              ? `Ultimo CSV Vending: ${formatNum(lastCsvImport.inseriti || 0)} ${(lastCsvImport.inseriti || 0) === 1 ? "vendita" : "vendite"}`
+              : "Nessun caricamento CSV annullabile"}
+          createdAt={lastCsvImport?.created_at}
+          description={lastCsvImport
+            ? "Ripristina vendite, scorte vending e cassa contanti di questo file."
+            : "Il comando sarà disponibile dopo il prossimo CSV. I caricamenti precedenti all'aggiornamento non possono essere annullati in blocco in sicurezza."}
+          buttonLabel="Annulla ultimo caricamento"
+          busy={csvUndoing}
+          disabled={!lastCsvImport || csvImporting}
+          onUndo={undoLastCsvImport}
+        />
       </Card>
       )}
 
