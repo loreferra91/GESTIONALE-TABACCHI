@@ -77,7 +77,7 @@ def isolated_db(monkeypatch):
     return database
 
 
-def test_smart_venue_uses_excel_values_and_current_product_stock(monkeypatch):
+def test_smart_venue_uses_product_acquired_and_stock_with_excel_smart_value(monkeypatch):
     database = isolated_db(monkeypatch)
 
     async def seed_and_list():
@@ -100,7 +100,7 @@ def test_smart_venue_uses_excel_values_and_current_product_stock(monkeypatch):
     assert len(rows) == 1
     assert rows[0]["codice"] == "P1"
     assert rows[0]["descrizione"] == "Descrizione Excel"
-    assert rows[0]["acquistati"] == 1080
+    assert rows[0]["acquistati"] == 10
     assert rows[0]["rimanenze"] == 29
     assert rows[0]["smart_venue"] == 43
     assert rows[0]["differenza"] == 14

@@ -3662,7 +3662,6 @@ async def _import_smart_venue(ws) -> Dict[str, int]:
                 "id": f"smart-venue:{code}",
                 "codice": code,
                 "descrizione": str(row[1] or "").strip(),
-                "acquistati": int(row[2] or 0),
                 "smart_venue": int(row[5] or 0) if len(row) > 5 else 0,
                 "codice_smart": str(row[4] or "").strip() if len(row) > 4 else "",
                 "riga_excel": row_number,
@@ -3701,7 +3700,9 @@ async def list_smart_venue():
             "id": row_id,
             "codice": code,
             "descrizione": str(smart_row.get("descrizione") or product.get("descrizione") or ""),
-            "acquistati": int(smart_row.get("acquistati", 0) or 0),
+            # Acquistati e giacenze appartengono al prodotto reale. Il foglio
+            # SMART VENUE fornisce soltanto la sua fotografia di confronto.
+            "acquistati": int(product.get("acquistati", 0) or 0),
             "rimanenze": rimanenze,
             "smart_venue": smart_venue,
             "differenza": smart_venue - rimanenze,
