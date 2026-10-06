@@ -131,6 +131,10 @@ class SmartVenueProductIn(BaseModel):
     smart_venue: int = 0
 
 
+class SmartVenueBarcodeIn(BaseModel):
+    barcode: str = ""
+
+
 class ListinoItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -3775,7 +3779,9 @@ async def list_smart_venue():
             "acquistati": int(product.get("acquistati", 0) or 0),
             "rimanenze": rimanenze,
             "smart_venue": smart_venue,
-            "barcode": str(smart_row.get("barcode") or smart_row.get("codice_smart") or ""),
+            "barcode": str(
+                smart_row.get("barcode", smart_row.get("codice_smart", "")) or ""
+            ),
             "differenza": smart_venue - rimanenze,
         })
     return rows
@@ -3831,6 +3837,23 @@ async def create_smart_venue_product(body: SmartVenueProductIn):
         "rimanenze": rimanenze,
         "differenza": body.smart_venue - rimanenze,
     }
+
+
+@api.put("/smart-venue/{row_id}/barcode")
+async def update_smart_venue_barcode(row_id: str, body: SmartVenueBarcodeIn):
+    barcode = str(body.barcode or "").strip()
+    if len(barcode) > 100:
+        raise HTTPException(422, "Barcode troppo lungo")
+    result = await db.smart_venue.update_one(
+        {"id": row_id},
+        {"$set": {
+            "barcode": barcode,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Riga SMARTV VENUE non trovata")
+    return {"ok": True, "id": row_id, "barcode": barcode}
 
 
 def _parse_smart_venue_quantity(value: Any) -> int:

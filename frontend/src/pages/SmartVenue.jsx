@@ -25,7 +25,9 @@ export default function SmartVenue() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [insertionDrafts, setInsertionDrafts] = useState({});
+  const [barcodeDrafts, setBarcodeDrafts] = useState({});
   const [confirmingId, setConfirmingId] = useState(null);
+  const [savingBarcodeId, setSavingBarcodeId] = useState(null);
   const [productForm, setProductForm] = useState(EMPTY_PRODUCT);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -97,6 +99,39 @@ export default function SmartVenue() {
       toast.error(apiErrorMessage(err, "Impossibile eliminare la riga"));
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const saveBarcode = async row => {
+    if (barcodeDrafts[row.id] === undefined) return;
+    const barcode = barcodeDrafts[row.id].trim();
+    if (barcode === (row.barcode || "")) {
+      setBarcodeDrafts(current => {
+        const next = { ...current };
+        delete next[row.id];
+        return next;
+      });
+      return;
+    }
+    setSavingBarcodeId(row.id);
+    try {
+      const response = await api.put(
+        `/smart-venue/${encodeURIComponent(row.id)}/barcode`,
+        { barcode },
+      );
+      setAllRows(current => current.map(item => item.id === row.id
+        ? { ...item, barcode: response.data.barcode }
+        : item));
+      setBarcodeDrafts(current => {
+        const next = { ...current };
+        delete next[row.id];
+        return next;
+      });
+      toast.success(`Barcode aggiornato per ${row.codice}`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile aggiornare il barcode"));
+    } finally {
+      setSavingBarcodeId(null);
     }
   };
 
@@ -234,7 +269,24 @@ export default function SmartVenue() {
                       className="w-24 rounded-md border border-slate-300 px-2 py-1 text-right font-mono text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
                     />
                   </td>
-                  <td className="font-mono">{row.barcode || "—"}</td>
+                  <td>
+                    <input
+                      data-testid={`smart-venue-barcode-${row.codice}`}
+                      aria-label={`Barcode ${row.codice}`}
+                      type="text"
+                      inputMode="text"
+                      maxLength={100}
+                      placeholder="Barcode"
+                      value={barcodeDrafts[row.id] ?? row.barcode ?? ""}
+                      onChange={event => setBarcodeDrafts(current => ({ ...current, [row.id]: event.target.value }))}
+                      onBlur={() => saveBarcode(row)}
+                      onKeyDown={event => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                      disabled={savingBarcodeId === row.id}
+                      className="w-32 rounded-md border border-slate-300 px-2 py-1 font-mono text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
+                    />
+                  </td>
                   <td className={`text-right font-mono font-bold ${row.differenza > 0 ? "text-emerald-700" : row.differenza < 0 ? "text-red-700" : "text-slate-400"}`}>
                     {row.differenza > 0 ? "+" : ""}{formatNum(row.differenza)}
                   </td>

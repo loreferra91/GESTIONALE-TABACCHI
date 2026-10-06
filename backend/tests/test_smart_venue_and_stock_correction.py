@@ -188,6 +188,29 @@ def test_smart_venue_blank_insertion_uses_difference(monkeypatch):
     assert stored["smart_venue"] == 10
 
 
+def test_smart_venue_barcode_can_be_edited_and_cleared(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def seed_edit_and_clear():
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "codice_smart": "OLD-BARCODE",
+        })
+        edited = await server.update_smart_venue_barcode(
+            "smart-venue:P1", server.SmartVenueBarcodeIn(barcode="  NEW-BARCODE  ")
+        )
+        cleared = await server.update_smart_venue_barcode(
+            "smart-venue:P1", server.SmartVenueBarcodeIn(barcode="")
+        )
+        rows = await server.list_smart_venue()
+        return edited, cleared, rows
+
+    edited, cleared, rows = asyncio.run(seed_edit_and_clear())
+
+    assert edited["barcode"] == "NEW-BARCODE"
+    assert cleared["barcode"] == ""
+    assert rows[0]["barcode"] == ""
+
+
 def test_smart_venue_manual_insertion_decreases_smart_value(monkeypatch):
     database = isolated_db(monkeypatch)
 
