@@ -167,6 +167,7 @@ class VenditaGiornaliera(BaseModel):
     pagamento: str = "CONTANTI"
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     sorgente: str = "MANUALE"
+    batch_id: Optional[str] = None
 
 
 class VenditaIn(BaseModel):
@@ -297,6 +298,7 @@ BACKUP_COLLECTIONS = [
     "db_storico_vend",
     "db_storico_vending_ext",
     "vendite",
+    "vendite_bulk_imports",
     "versamenti",
     "prelievi_vending",
     "scontrini_vending",
@@ -315,6 +317,7 @@ BACKUP_COLLECTIONS = [
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
 OPTIONAL_BACKUP_COLLECTIONS = {
+    "vendite_bulk_imports",
     "scontrini_vending",
     "cassa_vending_stato",
     "anomalie_ignorate",
@@ -1064,6 +1067,8 @@ class BulkVenditaIn(BaseModel):
 @api.post("/vendite/bulk")
 async def bulk_vendite(body: BulkVenditaIn):
     """Bulk paste da Excel: rows with data, codice, descrizione, quantita, importo."""
+    batch_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
     inserted = 0
     skipped = 0
     errors = []
@@ -1095,12 +1100,93 @@ async def bulk_vendite(body: BulkVenditaIn):
                 canale=body.canale,
                 pagamento=body.pagamento,
                 sorgente="BULK",
+                batch_id=batch_id,
             )
             await db.vendite.insert_one(v.model_dump())
             inserted += 1
         except Exception as e:
             errors.append({"riga": i + 1, "errore": str(e)})
-    return {"inseriti": inserted, "saltati": skipped, "errori": errors}
+    if inserted:
+        await db.vendite_bulk_imports.insert_one({
+            "id": batch_id,
+            "created_at": created_at,
+            "canale": body.canale,
+            "pagamento": body.pagamento,
+            "inseriti": inserted,
+            "saltati": skipped,
+            "status": "active",
+        })
+    return {
+        "inseriti": inserted,
+        "saltati": skipped,
+        "errori": errors,
+        "batch_id": batch_id if inserted else None,
+        "created_at": created_at if inserted else None,
+        "canale": body.canale,
+        "pagamento": body.pagamento,
+    }
+
+
+@api.get("/vendite/bulk/ultimo")
+async def ultimo_bulk_vendite():
+    """Restituisce l'ultimo caricamento bulk ancora annullabile."""
+    return await db.vendite_bulk_imports.find_one(
+        {"status": "active"},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+
+@api.post("/vendite/bulk/{batch_id}/annulla")
+async def annulla_bulk_vendite(batch_id: str):
+    """Annulla un singolo caricamento bulk e ripristina le scorte coinvolte."""
+    claim = await db.vendite_bulk_imports.update_one(
+        {"id": batch_id, "status": "active"},
+        {"$set": {"status": "annulling"}},
+    )
+    if claim.modified_count != 1:
+        raise HTTPException(404, "Caricamento non trovato o già annullato")
+
+    removed = 0
+    try:
+        sales = await db.vendite.find(
+            {"batch_id": batch_id, "sorgente": "BULK"},
+            {"_id": 0},
+        ).to_list(None)
+        for sale in sales:
+            field = "giacenza_vending" if sale.get("canale") == "VENDING" else "giacenza_negozio"
+            vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
+            quantity = int(sale.get("quantita") or 0)
+            stock_update = await db.prodotti.update_one(
+                {"codice": sale.get("codice")},
+                {"$inc": {field: quantity, vend_field: -quantity}},
+            )
+            deletion = await db.vendite.delete_one({"id": sale.get("id"), "batch_id": batch_id})
+            if deletion.deleted_count != 1:
+                if stock_update.modified_count == 1:
+                    await db.prodotti.update_one(
+                        {"codice": sale.get("codice")},
+                        {"$inc": {field: -quantity, vend_field: quantity}},
+                    )
+                raise RuntimeError("Una vendita del caricamento non è stata eliminata")
+            removed += 1
+
+        await db.vendite_bulk_imports.update_one(
+            {"id": batch_id},
+            {"$set": {
+                "status": "annulled",
+                "annulled_at": datetime.now(timezone.utc).isoformat(),
+                "rimossi": removed,
+            }},
+        )
+    except Exception as exc:
+        await db.vendite_bulk_imports.update_one(
+            {"id": batch_id, "status": "annulling"},
+            {"$set": {"status": "active"}},
+        )
+        raise HTTPException(500, f"Impossibile annullare il caricamento: {exc}") from exc
+
+    return {"ok": True, "batch_id": batch_id, "rimossi": removed}
 
 
 async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> bytes:

@@ -3,7 +3,7 @@ import Layout from "../components/Layout";
 import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
-import { ArrowClockwise, Trash } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
 
 export default function Vendite() {
   const [rows, setRows] = useState([]);
@@ -18,6 +18,8 @@ export default function Vendite() {
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkRows, setBulkRows] = useState([]); // canonical editable rows for preview
   const [bulkImporting, setBulkImporting] = useState(false);
+  const [lastBulkImport, setLastBulkImport] = useState(null);
+  const [bulkUndoing, setBulkUndoing] = useState(false);
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
@@ -40,6 +42,17 @@ export default function Vendite() {
     setRows(r.data);
   }, [giorno]);
   useEffect(() => { load(); }, [load]);
+
+  const loadLastBulkImport = useCallback(async () => {
+    try {
+      const r = await api.get("/vendite/bulk/ultimo");
+      setLastBulkImport(r.data || null);
+    } catch (error) {
+      console.error("loadLastBulkImport failed:", error);
+      setLastBulkImport(null);
+    }
+  }, []);
+  useEffect(() => { loadLastBulkImport(); }, [loadLastBulkImport]);
 
   const save = async () => {
     if (!form.codice || !form.importo) { toast.error("Compila codice e importo"); return; }
@@ -108,13 +121,14 @@ export default function Vendite() {
   };
 
   const submitBulk = async () => {
-    if (bulkImporting) return;
+    if (bulkImporting || bulkUndoing) return;
     const righe = bulkRows.filter(r => r.codice && r.quantita > 0);
     if (!righe.length) return toast.error("Nessuna riga valida");
     setBulkImporting(true);
     try {
       const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) });
       setBulkResult(r.data);
+      if (r.data.batch_id) setLastBulkImport({ id: r.data.batch_id, ...r.data, status: "active" });
       setBulkText("");
       setBulkRows([]);
       await load();
@@ -123,6 +137,23 @@ export default function Vendite() {
       toast.error(apiErrorMessage(e, "Errore bulk"));
     } finally {
       setBulkImporting(false);
+    }
+  };
+
+  const undoLastBulkImport = async () => {
+    if (!lastBulkImport?.id || bulkUndoing || bulkImporting) return;
+    const count = lastBulkImport.inseriti || 0;
+    if (!window.confirm(`Annullare l'ultimo caricamento di ${count} vendite? Le quantità di magazzino verranno ripristinate.`)) return;
+    setBulkUndoing(true);
+    try {
+      const r = await api.post(`/vendite/bulk/${lastBulkImport.id}/annulla`);
+      setBulkResult(null);
+      await Promise.all([load(), loadLastBulkImport()]);
+      toast.success(`Caricamento annullato: ${r.data.rimossi} vendite rimosse e scorte ripristinate`);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile annullare il caricamento"));
+    } finally {
+      setBulkUndoing(false);
     }
   };
 
@@ -280,7 +311,7 @@ export default function Vendite() {
             type="button"
             data-testid="bulk-submit"
             onClick={submitBulk}
-            disabled={!bulkText.trim() || bulkImporting}
+            disabled={!bulkText.trim() || bulkImporting || bulkUndoing}
             aria-busy={bulkImporting}
             className="inline-flex items-center justify-center gap-2 bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
           >
@@ -383,6 +414,30 @@ export default function Vendite() {
                 <ul className="text-xs mt-2">{bulkResult.errori.slice(0, 20).map((e, i) => <li key={`br-${e.riga}-${i}`}>Riga {e.riga}: {e.errore}</li>)}</ul>
               </details>
             )}
+          </div>
+        )}
+
+        {lastBulkImport && (
+          <div data-testid="bulk-last-import" className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+            <div>
+              <div className="text-sm font-bold text-amber-950">
+                Ultimo caricamento: {formatNum(lastBulkImport.inseriti || 0)} vendite
+              </div>
+              <div className="mt-0.5 text-xs text-amber-800">
+                {lastBulkImport.created_at ? new Date(lastBulkImport.created_at).toLocaleString("it-IT") : "Appena completato"} · L'annullamento rimuove solo questo invio e ripristina le scorte.
+              </div>
+            </div>
+            <button
+              type="button"
+              data-testid="bulk-undo"
+              onClick={undoLastBulkImport}
+              disabled={bulkUndoing || bulkImporting}
+              aria-busy={bulkUndoing}
+              className="inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-bold text-red-700 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <ArrowCounterClockwise size={17} className={bulkUndoing ? "animate-spin" : ""} aria-hidden="true" />
+              {bulkUndoing ? "Annullamento…" : "Annulla ultimo caricamento"}
+            </button>
           </div>
         )}
       </Card>
