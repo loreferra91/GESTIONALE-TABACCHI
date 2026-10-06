@@ -1256,13 +1256,21 @@ async def backup_restore_file(file: UploadFile = File(...)):
     }
 
 
+def _import_includes_accounting(report: Dict[str, Any]) -> bool:
+    """Indica se l'import contiene la fotografia contabile RIEP_VENDITA."""
+    return "RIEP_VENDITA" in (report.get("fogli_trovati") or [])
+
+
 async def record_import_history(file_name: str, report: Dict[str, Any], backup_id: Optional[str] = None):
     totals = report.get("totali", {})
+    includes_accounting = _import_includes_accounting(report)
     doc = {
         "id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "file": file_name,
         "backup_id": backup_id,
+        "tipo_import": "completo" if includes_accounting else "giacenze",
+        "contabilita_inclusa": includes_accounting,
         "fogli_trovati": report.get("fogli_trovati", []),
         "fogli_mancanti": report.get("fogli_mancanti", []),
         "totali": totals,
@@ -1270,6 +1278,24 @@ async def record_import_history(file_name: str, report: Dict[str, Any], backup_i
     }
     await db.import_history.insert_one(doc)
     return doc
+
+
+async def _latest_accounting_import():
+    """Trova l'ultimo import completo, ignorando gli upload di sole giacenze.
+
+    La condizione sul nome del foglio mantiene compatibili gli import storici,
+    creati prima dell'introduzione del flag ``contabilita_inclusa``.
+    """
+    return await db.import_history.find_one(
+        {
+            "$or": [
+                {"contabilita_inclusa": True},
+                {"fogli_trovati": "RIEP_VENDITA"},
+            ]
+        },
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
 
 
 @api.get("/import/history")
@@ -3229,12 +3255,12 @@ async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
 @api.get("/dashboard")
 async def dashboard():
     pv = await pivot()
-    ultimo_import, date_vendite_importate = await asyncio.gather(
-        db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
+    ultimo_import_contabile, date_vendite_importate = await asyncio.gather(
+        _latest_accounting_import(),
         db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
     )
     ultima_vendita_importata = _latest_sale_date(date_vendite_importate)
-    import_totali = (ultimo_import or {}).get("totali", {})
+    import_totali = (ultimo_import_contabile or {}).get("totali", {})
     venduto_negozio_excel = float(import_totali.get("valore_venduto_negozio_excel") or 0)
     venduto_vending_excel = float(import_totali.get("valore_venduto_vending_excel") or 0)
     venduto_totale_excel = float(import_totali.get("valore_venduto_totale_excel") or 0)
@@ -3258,7 +3284,7 @@ async def dashboard():
         _vending_cash_balance(),
         _supplemental_store_cash_sales(
             ultima_vendita_importata,
-            (ultimo_import or {}).get("created_at"),
+            (ultimo_import_contabile or {}).get("created_at"),
         ),
     )
     venduto_negozio_contabilizzato = round(venduto_negozio_excel + venduto_negozio_app_contanti, 2)
@@ -3268,7 +3294,7 @@ async def dashboard():
             liquidita_residua,
             giacenza_vending,
             scontrini["totale"],
-            (ultimo_import or {}).get("created_at"),
+            (ultimo_import_contabile or {}).get("created_at"),
         ),
         _dashboard_sales_trend(),
     )
@@ -3527,7 +3553,11 @@ async def _import_product_stock_sheet(
     columns: Dict[str, int],
     adm_aliases: Optional[Dict[str, List[Dict[str, str]]]] = None,
 ) -> Dict[str, int]:
-    """Importa acquistati e giacenze da un foglio con intestazioni esplicite."""
+    """Importa soltanto le giacenze da un foglio con intestazioni esplicite.
+
+    ACQUISTATI viene usato esclusivamente per riconoscere il formato del file:
+    un aggiornamento inventariale non deve mai alterare la contabilità.
+    """
     adm_aliases = adm_aliases or {}
     rows_by_code: Dict[str, Dict[str, Any]] = {}
     errors = 0
@@ -3543,7 +3573,6 @@ async def _import_product_stock_sheet(
             rows_by_code[code] = {
                 "codice": code,
                 "descrizione": description,
-                "acquistati": int(row[columns["acquistati"]] or 0),
                 "giacenza_negozio": int(row[columns["giacenza_negozio"]] or 0),
                 "giacenza_vending": int(row[columns["giacenza_vending"]] or 0),
             }
@@ -4072,6 +4101,8 @@ async def import_excel_full(
         "ok": True,
         "file": file.filename,
         "backup_id": backup["id"],
+        "tipo_import": "completo" if "RIEP_VENDITA" in fogli_trovati else "giacenze",
+        "contabilita_inclusa": "RIEP_VENDITA" in fogli_trovati,
         "fogli_trovati": fogli_trovati,
         "fogli_mancanti": fogli_mancanti,
         "dettaglio": report,
