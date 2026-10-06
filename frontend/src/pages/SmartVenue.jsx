@@ -11,6 +11,7 @@ import { PRODUCT_CATEGORIES } from "../lib/categories";
 const EMPTY_PRODUCT = {
   codice: "",
   descrizione: "",
+  barcode: "",
   categoria: "ACCESSORI",
   prezzo: "",
   acquistati: "",
@@ -38,7 +39,7 @@ export default function SmartVenue() {
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRows, {
     initial: "codice",
     dir: "asc",
-    searchFields: ["codice", "descrizione"],
+    searchFields: ["codice", "descrizione", "barcode"],
   });
 
   const purchased = allRows.reduce((total, row) => total + (row.acquistati || 0), 0);
@@ -136,7 +137,7 @@ export default function SmartVenue() {
       data.append("file", file);
       const response = await api.post("/smart-venue/import-excel", data);
       await load();
-      toast.success(`${response.data.totali.smart_venue_righe} righe SMART VENUE aggiornate dalla colonna F`);
+      toast.success(`${response.data.totali.smart_venue_righe} righe aggiornate dalle colonne E/F`);
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile importare SMART VENUE"));
     } finally {
@@ -154,13 +155,14 @@ export default function SmartVenue() {
               <p className="text-xs text-slate-500">Il prodotto viene creato anche nell’anagrafica generale.</p>
             </div>
             <label className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${importing ? "pointer-events-none opacity-50" : "hover:bg-slate-50"}`}>
-              <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa colonna F da Excel"}
+              <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa colonne E/F da Excel"}
               <input data-testid="smart-venue-import" type="file" accept=".xlsx,.xlsm" className="hidden" onChange={importSmartVenue} disabled={importing} />
             </label>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <input data-testid="smart-venue-new-code" required placeholder="Codice" value={productForm.codice} onChange={event => setProductForm(current => ({ ...current, codice: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
             <input data-testid="smart-venue-new-description" required placeholder="Descrizione" value={productForm.descrizione} onChange={event => setProductForm(current => ({ ...current, descrizione: event.target.value }))} className="rounded-md border px-3 py-2 text-sm lg:col-span-2" />
+            <input data-testid="smart-venue-new-barcode" type="text" inputMode="text" placeholder="Barcode" value={productForm.barcode} onChange={event => setProductForm(current => ({ ...current, barcode: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
             <select data-testid="smart-venue-new-category" value={productForm.categoria} onChange={event => setProductForm(current => ({ ...current, categoria: event.target.value }))} className="rounded-md border px-3 py-2 text-sm">
               {PRODUCT_CATEGORIES.map(category => <option key={category} value={category}>{category}</option>)}
             </select>
@@ -186,7 +188,7 @@ export default function SmartVenue() {
           data-testid="smart-venue-search"
           value={query}
           onChange={setQuery}
-          placeholder="Cerca codice o descrizione…"
+          placeholder="Cerca codice, descrizione o barcode…"
           className="max-w-lg flex-1"
         />
         <span className="text-sm text-slate-500">{rows.length} risultati</span>
@@ -203,6 +205,7 @@ export default function SmartVenue() {
                 <Th sortKey="rimanenze" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Rimanenze</Th>
                 <Th sortKey="smart_venue" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Smart Venue</Th>
                 <th className="text-right">Inserimento Smart Venue</th>
+                <Th sortKey="barcode" currentKey={sortKey} dir={sortDir} onClick={toggle}>Barcode</Th>
                 <Th sortKey="differenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Differenza</Th>
                 <th aria-label="Azioni"></th>
               </tr>
@@ -231,6 +234,7 @@ export default function SmartVenue() {
                       className="w-24 rounded-md border border-slate-300 px-2 py-1 text-right font-mono text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
                     />
                   </td>
+                  <td className="font-mono">{row.barcode || "—"}</td>
                   <td className={`text-right font-mono font-bold ${row.differenza > 0 ? "text-emerald-700" : row.differenza < 0 ? "text-red-700" : "text-slate-400"}`}>
                     {row.differenza > 0 ? "+" : ""}{formatNum(row.differenza)}
                   </td>
@@ -258,7 +262,7 @@ export default function SmartVenue() {
               ))}
               {!rows.length && (
                 <tr>
-                  <td colSpan="8" className="py-10 text-center text-slate-500">
+                  <td colSpan="9" className="py-10 text-center text-slate-500">
                     Nessun prodotto disponibile nel gestionale.
                   </td>
                 </tr>

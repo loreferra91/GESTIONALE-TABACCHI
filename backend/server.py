@@ -122,6 +122,7 @@ PRODUCT_CATEGORIES = {
 class SmartVenueProductIn(BaseModel):
     codice: str
     descrizione: str
+    barcode: str = ""
     categoria: str = "ACCESSORI"
     prezzo: float = 0
     acquistati: int = 0
@@ -3669,9 +3670,10 @@ async def _import_vending(ws) -> Dict[str, int]:
 async def _import_smart_venue(ws) -> Dict[str, int]:
     """Importa la fotografia SMART VENUE dal relativo foglio Excel.
 
-    Il foglio usa la colonna F (RIMANENZE4) come quantità presente in
-    SMART VENUE. Le rimanenze del gestionale non vengono importate da qui:
-    vengono sempre calcolate dai prodotti al momento della lettura.
+    Il foglio usa la colonna E (codice2) come barcode e la colonna F
+    (RIMANENZE4) come quantità presente in SMART VENUE. Le rimanenze del
+    gestionale non vengono importate da qui: vengono sempre calcolate dai
+    prodotti al momento della lettura.
     """
     rows_by_code: Dict[str, Dict[str, Any]] = {}
     errors = 0
@@ -3688,7 +3690,7 @@ async def _import_smart_venue(ws) -> Dict[str, int]:
                 "descrizione": str(row[1] or "").strip(),
                 "smart_venue": int(row[5] or 0) if len(row) > 5 else 0,
                 "origine": "EXCEL",
-                "codice_smart": str(row[4] or "").strip() if len(row) > 4 else "",
+                "barcode": str(row[4] or "").strip() if len(row) > 4 else "",
                 "riga_excel": row_number,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -3711,7 +3713,7 @@ async def _import_smart_venue(ws) -> Dict[str, int]:
 
 @api.post("/smart-venue/import-excel")
 async def import_smart_venue_excel(file: UploadFile = File(...)):
-    """Aggiorna soltanto SMART VENUE dalla colonna F del relativo foglio."""
+    """Aggiorna barcode e SMART VENUE dalle colonne E/F del relativo foglio."""
     try:
         import openpyxl
     except Exception:
@@ -3773,6 +3775,7 @@ async def list_smart_venue():
             "acquistati": int(product.get("acquistati", 0) or 0),
             "rimanenze": rimanenze,
             "smart_venue": smart_venue,
+            "barcode": str(smart_row.get("barcode") or smart_row.get("codice_smart") or ""),
             "differenza": smart_venue - rimanenze,
         })
     return rows
@@ -3813,6 +3816,7 @@ async def create_smart_venue_product(body: SmartVenueProductIn):
         "id": row_id,
         "codice": code,
         "descrizione": description,
+        "barcode": str(body.barcode or "").strip(),
         "smart_venue": body.smart_venue,
         "origine": "MANUALE",
         "updated_at": datetime.now(timezone.utc).isoformat(),

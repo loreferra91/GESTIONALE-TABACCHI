@@ -89,7 +89,7 @@ def test_smart_venue_uses_product_acquired_and_stock_with_excel_smart_value(monk
         await database.smart_venue.insert_many([
             {
                 "id": "smart-venue:P1", "codice": "P1", "descrizione": "Descrizione Excel",
-                "acquistati": 1080, "smart_venue": 43,
+                "acquistati": 1080, "smart_venue": 43, "codice_smart": "0012345",
             },
             {"id": "smart-venue:P2", "codice": "P2", "descrizione": "Prodotto nascosto"},
         ])
@@ -104,6 +104,7 @@ def test_smart_venue_uses_product_acquired_and_stock_with_excel_smart_value(monk
     assert rows[0]["acquistati"] == 10
     assert rows[0]["rimanenze"] == 29
     assert rows[0]["smart_venue"] == 43
+    assert rows[0]["barcode"] == "0012345"
     assert rows[0]["differenza"] == 14
 
 
@@ -129,6 +130,7 @@ def test_smart_venue_import_uses_column_f_and_preserves_manual_rows(monkeypatch)
 
     assert result["inseriti"] == 2
     assert rows["AMMS9"]["smart_venue"] == 43
+    assert rows["AMMS9"]["barcode"] == "87248265"
     assert rows["AMMS9"]["origine"] == "EXCEL"
     assert rows["MAN1"]["smart_venue"] == 7
 
@@ -140,6 +142,7 @@ def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):
         response = await server.create_smart_venue_product(server.SmartVenueProductIn(
             codice="new1",
             descrizione="Nuovo prodotto",
+            barcode="00998877",
             categoria="SIGARI",
             prezzo=5.5,
             acquistati=10,
@@ -156,6 +159,8 @@ def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):
     assert product["categoria"] == "SIGARI"
     assert product["acquistati"] == 10
     assert smart_row["origine"] == "MANUALE"
+    assert smart_row["barcode"] == "00998877"
+    assert response["barcode"] == "00998877"
     assert response["rimanenze"] == 5
     assert response["smart_venue"] == 8
     assert response["differenza"] == 3
