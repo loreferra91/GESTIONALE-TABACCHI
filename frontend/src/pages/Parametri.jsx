@@ -115,8 +115,8 @@ export default function Parametri() {
         headers: { "X-Import-Job-ID": jobId },
       });
       if (!r.ok) {
-        const err = await r.text();
-        throw new Error(err || r.statusText);
+        const body = await r.json().catch(() => null);
+        throw new Error(body?.detail || r.statusText || "File Excel non importabile");
       }
       const j = await r.json();
       setImportReport(j);
@@ -127,8 +127,9 @@ export default function Parametri() {
       load();
       loadAudit();
     } catch (err) {
-      setImportProgress({ status: "failed", message: apiErrorMessage(err, "Errore import Excel"), percent: 100 });
-      toast.error(apiErrorMessage(err, "Errore import Excel"));
+      const message = err?.message || apiErrorMessage(err, "Errore import Excel");
+      setImportProgress({ status: "failed", message, percent: 100 });
+      toast.error(message);
     } finally {
       window.clearInterval(progressTimer);
       window.clearInterval(elapsedTimer);
@@ -218,6 +219,7 @@ export default function Parametri() {
             <p className="text-sm text-slate-600 mb-3">
               Carica un file <code>.xlsm/.xlsx</code>: la web app legge automaticamente i fogli
               <b> RIEP_VENDITA, (SMART VENUE), LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, DB_STORICO_VEND, PARAMETRI</b> e allinea il DB con l'Excel (Excel = fonte di verità).
+              <br/><span className="text-xs text-slate-500">Puoi anche caricare un file giacenze separato con le colonne <b>CODICE, DESCRIZIONE, ACQUISTATI, GIACENZA NEGOZIO e GIACENZA VENDING</b>, indipendentemente dal nome del foglio.</span>
               <br/><span className="text-xs text-slate-500">Le righe presenti nel DB ma NON nell'Excel vengono conservate. I parametri custom (es. AGGIO_PCT) sono preservati.</span>
             </p>
             <div className="flex items-center gap-3">

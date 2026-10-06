@@ -3489,6 +3489,82 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
     return result
 
 
+def _excel_header_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_text = text.encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]", "", ascii_text)
+
+
+def _find_product_stock_sheet(wb):
+    """Trova un foglio tabellare con le colonne della fotografia giacenze."""
+    aliases = {
+        "codice": {"codice", "cod", "code"},
+        "descrizione": {"descrizione", "descr", "prodotto"},
+        "acquistati": {"acquistati", "acquisti"},
+        "giacenza_negozio": {"giacenzanegozio", "giacnegozio", "rimanenzenegozio"},
+        "giacenza_vending": {"giacenzavending", "giacvending", "rimanenzevending"},
+    }
+    required = set(aliases)
+    for ws in wb.worksheets:
+        for row_number, row in enumerate(
+            ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True),
+            start=1,
+        ):
+            columns: Dict[str, int] = {}
+            for index, value in enumerate(row):
+                key = _excel_header_key(value)
+                for field, names in aliases.items():
+                    if key in names and field not in columns:
+                        columns[field] = index
+            if required.issubset(columns):
+                return ws, row_number, columns
+    return None
+
+
+async def _import_product_stock_sheet(
+    ws,
+    header_row: int,
+    columns: Dict[str, int],
+    adm_aliases: Optional[Dict[str, List[Dict[str, str]]]] = None,
+) -> Dict[str, int]:
+    """Importa acquistati e giacenze da un foglio con intestazioni esplicite."""
+    adm_aliases = adm_aliases or {}
+    rows_by_code: Dict[str, Dict[str, Any]] = {}
+    errors = 0
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        try:
+            raw_code = row[columns["codice"]] if len(row) > columns["codice"] else None
+            if raw_code in (None, ""):
+                continue
+            description = str(row[columns["descrizione"]] or "").strip()
+            code = _canonical_product_code(raw_code, description, adm_aliases)
+            if not code:
+                continue
+            rows_by_code[code] = {
+                "codice": code,
+                "descrizione": description,
+                "acquistati": int(row[columns["acquistati"]] or 0),
+                "giacenza_negozio": int(row[columns["giacenza_negozio"]] or 0),
+                "giacenza_vending": int(row[columns["giacenza_vending"]] or 0),
+            }
+        except (IndexError, TypeError, ValueError):
+            errors += 1
+
+    operations = []
+    for code, data in rows_by_code.items():
+        insert_defaults = Prodotto(codice=code, descrizione=data["descrizione"]).model_dump()
+        insert_defaults = {key: value for key, value in insert_defaults.items() if key not in data}
+        operations.append(UpdateOne(
+            {"codice": code},
+            {"$set": data, "$setOnInsert": insert_defaults},
+            upsert=True,
+        ))
+    result = await _bulk_upsert(db.prodotti, operations)
+    result["errori"] += errors
+    result["righe_lette"] = len(rows_by_code)
+    return result
+
+
 async def _import_listino(ws) -> Dict[str, int]:
     operations = []
     err = 0
@@ -3877,6 +3953,19 @@ async def import_excel_full(
     except Exception as e:
         raise HTTPException(422, f"File non leggibile: {e}")
 
+    expected_sheets = {
+        "RIEP_VENDITA", "(SMART VENUE)", "LISTINO ADM", "RICARICA VENDING",
+        "STORICO_ORDINI", "PARAMETRI", "DB_STORICO_VEND", "DB_STORICO_VENDING_EXT",
+    }
+    stock_sheet = None if "RIEP_VENDITA" in wb.sheetnames else _find_product_stock_sheet(wb)
+    if not expected_sheets.intersection(wb.sheetnames) and stock_sheet is None:
+        message = (
+            "Nessun foglio importabile trovato. Usa il file gestionale completo oppure un foglio "
+            "con le colonne CODICE, DESCRIZIONE, ACQUISTATI, GIACENZA NEGOZIO e GIACENZA VENDING."
+        )
+        _set_import_progress(import_job_id, "failed", message, 10, 10)
+        raise HTTPException(422, message)
+
     _set_import_progress(import_job_id, "running", "Creazione del backup di sicurezza", 2, 10)
     backup = await create_backup_snapshot(
         f"Prima import {file.filename or 'Excel'}",
@@ -3919,7 +4008,40 @@ async def import_excel_full(
     if "LISTINO ADM" in wb.sheetnames:
         adm_aliases = _adm_alias_index(wb["LISTINO ADM"].iter_rows(min_row=2, values_only=True))
 
-    await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
+    if "RIEP_VENDITA" in wb.sheetnames:
+        await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
+        product_report_key = "RIEP_VENDITA"
+    elif stock_sheet is not None:
+        stock_ws, stock_header_row, stock_columns = stock_sheet
+        product_report_key = stock_ws.title
+        _set_import_progress(
+            import_job_id,
+            "running",
+            f"Aggiornamento giacenze dal foglio {stock_ws.title}",
+            2,
+            10,
+            sheet=stock_ws.title,
+        )
+        fogli_trovati.append(stock_ws.title)
+        report[product_report_key] = await _import_product_stock_sheet(
+            stock_ws,
+            stock_header_row,
+            stock_columns,
+            adm_aliases,
+        )
+        completed_steps += 1
+        _set_import_progress(
+            import_job_id,
+            "running",
+            f"Giacenze dal foglio {stock_ws.title} completate",
+            3,
+            10,
+            sheet=stock_ws.title,
+            result=report[product_report_key],
+        )
+    else:
+        await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
+        product_report_key = "RIEP_VENDITA"
     await _run("(SMART VENUE)", _import_smart_venue)
     await _run("LISTINO ADM", _import_listino)
     await _run("RICARICA VENDING", _import_vending)
@@ -3929,8 +4051,8 @@ async def import_excel_full(
     await _run("DB_STORICO_VENDING_EXT", _import_db_storico_vending_ext)
 
     totali = {
-        "prodotti_inseriti": report.get("RIEP_VENDITA", {}).get("inseriti", 0),
-        "prodotti_aggiornati": report.get("RIEP_VENDITA", {}).get("aggiornati", 0),
+        "prodotti_inseriti": report.get(product_report_key, {}).get("inseriti", 0),
+        "prodotti_aggiornati": report.get(product_report_key, {}).get("aggiornati", 0),
         "listino_inseriti": report.get("LISTINO ADM", {}).get("inseriti", 0),
         "listino_aggiornati": report.get("LISTINO ADM", {}).get("aggiornati", 0),
         "vending_inseriti": report.get("RICARICA VENDING", {}).get("inseriti", 0),
