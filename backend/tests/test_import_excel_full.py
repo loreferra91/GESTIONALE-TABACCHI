@@ -64,7 +64,7 @@ def test_import_excel_full_happy_path(s, prepare):
     assert j.get("ok") is True
     expected_sheets = {
         "RIEP_VENDITA", "LISTINO ADM", "RICARICA VENDING", "STORICO_ORDINI",
-        "PARAMETRI", "DB_STORICO_VEND", "DB_STORICO_VENDING_EXT",
+        "PARAMETRI", "DB_STORICO_VEND", "DB_STORICO_VENDING_EXT", "(SMART VENUE)",
     }
     assert set(j["fogli_trovati"]) == expected_sheets, f"got {j['fogli_trovati']}"
     assert j["fogli_mancanti"] == []

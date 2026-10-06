@@ -278,11 +278,50 @@ BACKUP_COLLECTIONS = [
     "import_history",
     "adm_sync",
     "anomalie_ignorate",
+    "smart_venue",
+    "smart_venue_hidden",
+    "smart_venue_values",
 ]
 
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
-OPTIONAL_BACKUP_COLLECTIONS = {"scontrini_vending", "cassa_vending_stato", "anomalie_ignorate"}
+OPTIONAL_BACKUP_COLLECTIONS = {
+    "scontrini_vending",
+    "cassa_vending_stato",
+    "anomalie_ignorate",
+    "smart_venue",
+    "smart_venue_hidden",
+    "smart_venue_values",
+}
+
+
+# Stato effimero degli import in corso. Serve soltanto a mostrare alla UI la
+# fase realmente raggiunta dal processo; i risultati definitivi restano nello
+# storico import salvato su MongoDB.
+IMPORT_PROGRESS: Dict[str, Dict[str, Any]] = {}
+
+
+def _set_import_progress(
+    job_id: Optional[str],
+    status: str,
+    message: str,
+    current: int = 0,
+    total: int = 1,
+    **extra: Any,
+) -> None:
+    if not job_id:
+        return
+    safe_total = max(1, total)
+    IMPORT_PROGRESS[job_id] = {
+        "job_id": job_id,
+        "status": status,
+        "message": message,
+        "current": current,
+        "total": safe_total,
+        "percent": min(100, max(0, round(current / safe_total * 100))),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        **extra,
+    }
 
 
 # ------------------------- Seed -------------------------
@@ -1739,6 +1778,60 @@ async def list_vending():
         d["esito"] = esito
         out.append(d)
     return out
+
+
+async def _sync_product_vending_stock(codice: str) -> None:
+    """Allinea il totale prodotto alla somma delle colonne vending reali."""
+    if not codice:
+        return
+    columns = await db.vending.find(
+        {"codice": codice},
+        {"_id": 0, "giacenza": 1},
+    ).to_list(500)
+    totale = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in columns)
+    await db.prodotti.update_one({"codice": codice}, {"$set": {"giacenza_vending": totale}})
+
+
+@api.put("/vending/{v_id}/giacenza")
+async def update_vending_giacenza(v_id: str, body: Dict[str, Any]):
+    """Corregge la fotografia fisica della vending senza muovere il magazzino."""
+    raw_value = body.get("giacenza")
+    try:
+        giacenza = int(raw_value)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Giacenza non valida")
+    if isinstance(raw_value, float) and not raw_value.is_integer():
+        raise HTTPException(422, "La giacenza deve essere un numero intero")
+    if giacenza < 0:
+        raise HTTPException(422, "La giacenza non può essere negativa")
+
+    current = await db.vending.find_one({"id": v_id})
+    if not current:
+        raise HTTPException(404, "Colonna vending non trovata")
+    capacita = int(current.get("capacita_max", 0) or 0)
+    if capacita > 0 and giacenza > capacita:
+        raise HTTPException(422, f"La giacenza supera la capacità della colonna ({capacita})")
+
+    old_value = int(current.get("giacenza", 0) or 0)
+    result = await db.vending.update_one(
+        {"id": v_id, "giacenza": current.get("giacenza", 0)},
+        {"$set": {
+            "giacenza": giacenza,
+            "giacenza_aggiornata_il": datetime.now(timezone.utc).isoformat(),
+            "giacenza_sorgente": "CORREZIONE_MANUALE",
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(409, "La giacenza è cambiata nel frattempo: aggiorna la pagina e riprova")
+
+    await _sync_product_vending_stock(str(current.get("codice") or ""))
+    return {
+        "ok": True,
+        "id": v_id,
+        "colonna": current.get("colonna"),
+        "giacenza_precedente": old_value,
+        "giacenza": giacenza,
+    }
 
 
 @api.put("/vending/{v_id}")
@@ -3444,6 +3537,142 @@ async def _import_vending(ws) -> Dict[str, int]:
     return result
 
 
+async def _import_smart_venue(ws) -> Dict[str, int]:
+    """Importa la fotografia SMART VENUE dal relativo foglio Excel.
+
+    Il foglio usa la colonna F (RIMANENZE4) come quantità presente in
+    SMART VENUE. Le rimanenze del gestionale non vengono importate da qui:
+    vengono sempre calcolate dai prodotti al momento della lettura.
+    """
+    rows_by_code: Dict[str, Dict[str, Any]] = {}
+    errors = 0
+    for row_number, row in enumerate(ws.iter_rows(min_row=3, values_only=True), start=3):
+        try:
+            if not row or not row[0]:
+                continue
+            code = _product_code_text(row[0])
+            if not code:
+                continue
+            rows_by_code[code] = {
+                "id": f"smart-venue:{code}",
+                "codice": code,
+                "descrizione": str(row[1] or "").strip(),
+                "acquistati": int(row[2] or 0),
+                "smart_venue": int(row[5] or 0) if len(row) > 5 else 0,
+                "codice_smart": str(row[4] or "").strip() if len(row) > 4 else "",
+                "riga_excel": row_number,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except (TypeError, ValueError):
+            errors += 1
+
+    await db.smart_venue.delete_many({})
+    if rows_by_code:
+        await db.smart_venue.insert_many(list(rows_by_code.values()))
+    return {"inseriti": len(rows_by_code), "aggiornati": 0, "errori": errors}
+
+
+@api.get("/smart-venue")
+async def list_smart_venue():
+    hidden_rows, smart_rows, products = await asyncio.gather(
+        db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000),
+        db.smart_venue.find({}, {"_id": 0}).sort("codice", 1).to_list(5000),
+        db.prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(5000),
+    )
+    hidden_ids = {str(row.get("product_id")) for row in hidden_rows if row.get("product_id")}
+    products_by_code = {str(row.get("codice") or ""): row for row in products}
+    rows = []
+    for smart_row in smart_rows:
+        row_id = str(smart_row.get("id") or f"smart-venue:{smart_row.get('codice', '')}")
+        if row_id in hidden_ids:
+            continue
+        code = str(smart_row.get("codice") or "")
+        product = products_by_code.get(code, {})
+        giacenza_negozio = int(product.get("giacenza_negozio", 0) or 0)
+        giacenza_vending = int(product.get("giacenza_vending", 0) or 0)
+        rimanenze = giacenza_negozio + giacenza_vending
+        smart_venue = int(smart_row.get("smart_venue", smart_row.get("rimanenze_smart", 0)) or 0)
+        rows.append({
+            "id": row_id,
+            "codice": code,
+            "descrizione": str(smart_row.get("descrizione") or product.get("descrizione") or ""),
+            "acquistati": int(smart_row.get("acquistati", 0) or 0),
+            "rimanenze": rimanenze,
+            "smart_venue": smart_venue,
+            "differenza": smart_venue - rimanenze,
+        })
+    return rows
+
+
+def _parse_smart_venue_quantity(value: Any) -> int:
+    if isinstance(value, bool):
+        raise HTTPException(422, "Inserimento Smart Venue non valido")
+    try:
+        quantity = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Inserimento Smart Venue non valido")
+    if isinstance(value, float) and not value.is_integer():
+        raise HTTPException(422, "Inserimento Smart Venue deve essere un numero intero")
+    if quantity < 0:
+        raise HTTPException(422, "Inserimento Smart Venue non può essere negativo")
+    return quantity
+
+
+async def _smart_venue_row_and_stock(row_id: str) -> tuple[Dict[str, Any], int]:
+    smart_row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0})
+    if not smart_row:
+        raise HTTPException(404, "Riga SMARTV VENUE non trovata")
+    product = await db.prodotti.find_one({"codice": smart_row.get("codice")}, {"_id": 0}) or {}
+    rimanenze = int(product.get("giacenza_negozio", 0) or 0) + int(product.get("giacenza_vending", 0) or 0)
+    return smart_row, rimanenze
+
+
+@api.post("/smart-venue/{row_id}/conferma")
+async def confirm_smart_venue_difference(row_id: str, body: Optional[Dict[str, Any]] = None):
+    smart_row, rimanenze = await _smart_venue_row_and_stock(row_id)
+    current_smart_venue = int(smart_row.get("smart_venue", smart_row.get("rimanenze_smart", 0)) or 0)
+    difference = current_smart_venue - rimanenze
+    requested = (body or {}).get("inserimento_smart_venue")
+    quantity = difference if requested in (None, "") else _parse_smart_venue_quantity(requested)
+    if quantity < 0:
+        raise HTTPException(422, "La differenza è negativa: inserisci una quantità manuale")
+    if quantity > current_smart_venue:
+        raise HTTPException(422, "Inserimento Smart Venue superiore alla quantità disponibile")
+
+    updated_smart_venue = current_smart_venue - quantity
+    await db.smart_venue.update_one(
+        {"id": row_id},
+        {"$set": {
+            "smart_venue": updated_smart_venue,
+            "ultimo_inserimento_smart_venue": quantity,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    return {
+        "ok": True,
+        "id": row_id,
+        "rimanenze": rimanenze,
+        "smart_venue": updated_smart_venue,
+        "inserimento_smart_venue": quantity,
+        "differenza": updated_smart_venue - rimanenze,
+    }
+
+
+@api.delete("/smart-venue/{row_id}")
+async def delete_smart_venue_row(row_id: str):
+    smart_row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0, "id": 1, "codice": 1})
+    if not smart_row:
+        raise HTTPException(404, "Riga SMARTV VENUE non trovata")
+    if not await db.smart_venue_hidden.find_one({"product_id": row_id}):
+        await db.smart_venue_hidden.insert_one({
+            "id": str(uuid.uuid4()),
+            "product_id": row_id,
+            "codice": smart_row.get("codice"),
+            "hidden_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return {"ok": True, "id": row_id}
+
+
 async def _import_storico(ws) -> Dict[str, int]:
     ins = 0
     err = 0
@@ -3620,9 +3849,20 @@ async def _import_db_storico_vending_ext(ws) -> Dict[str, int]:
     return {"inseriti": ins, "aggiornati": 0, "errori": err}
 
 
+@api.get("/import/excel-full/status/{job_id}")
+async def import_excel_full_status(job_id: str):
+    progress = IMPORT_PROGRESS.get(job_id)
+    if not progress:
+        raise HTTPException(404, "Import non ancora avviato")
+    return progress
+
+
 @api.post("/import/excel-full")
-async def import_excel_full(file: UploadFile = File(...)):
-    """Import multi-sheet: RIEP_VENDITA + LISTINO ADM + RICARICA VENDING + STORICO_ORDINI + PARAMETRI.
+async def import_excel_full(
+    file: UploadFile = File(...),
+    import_job_id: Optional[str] = Header(None, alias="X-Import-Job-ID"),
+):
+    """Import multi-sheet: prodotti, SMART VENUE, listino, vending e storici.
     Excel = fonte di verità (upsert). Righe DB non presenti nell'Excel sono conservate.
     Parametri custom (non presenti nel foglio PARAMETRI) sono preservati.
     """
@@ -3630,12 +3870,14 @@ async def import_excel_full(file: UploadFile = File(...)):
         import openpyxl
     except Exception:
         raise HTTPException(500, "openpyxl non installato")
+    _set_import_progress(import_job_id, "running", "Ricezione e controllo del file Excel", 1, 10)
     content = await _read_capped(file)
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
     except Exception as e:
         raise HTTPException(422, f"File non leggibile: {e}")
 
+    _set_import_progress(import_job_id, "running", "Creazione del backup di sicurezza", 2, 10)
     backup = await create_backup_snapshot(
         f"Prima import {file.filename or 'Excel'}",
         "pre-import",
@@ -3645,18 +3887,40 @@ async def import_excel_full(file: UploadFile = File(...)):
     fogli_mancanti: List[str] = []
     report: Dict[str, Any] = {}
 
+    completed_steps = 0
+
     async def _run(name: str, importer):
+        nonlocal completed_steps
+        _set_import_progress(
+            import_job_id,
+            "running",
+            f"Aggiornamento foglio {name}",
+            2 + completed_steps,
+            10,
+            sheet=name,
+        )
         if name in wb.sheetnames:
             fogli_trovati.append(name)
             report[name] = await importer(wb[name])
         else:
             fogli_mancanti.append(name)
+        completed_steps += 1
+        _set_import_progress(
+            import_job_id,
+            "running",
+            f"Foglio {name} completato",
+            2 + completed_steps,
+            10,
+            sheet=name,
+            result=report.get(name),
+        )
 
     adm_aliases = {}
     if "LISTINO ADM" in wb.sheetnames:
         adm_aliases = _adm_alias_index(wb["LISTINO ADM"].iter_rows(min_row=2, values_only=True))
 
     await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
+    await _run("(SMART VENUE)", _import_smart_venue)
     await _run("LISTINO ADM", _import_listino)
     await _run("RICARICA VENDING", _import_vending)
     await _run("STORICO_ORDINI", _import_storico)
@@ -3671,6 +3935,7 @@ async def import_excel_full(file: UploadFile = File(...)):
         "listino_aggiornati": report.get("LISTINO ADM", {}).get("aggiornati", 0),
         "vending_inseriti": report.get("RICARICA VENDING", {}).get("inseriti", 0),
         "vending_aggiornati": report.get("RICARICA VENDING", {}).get("aggiornati", 0),
+        "smart_venue_righe": report.get("(SMART VENUE)", {}).get("inseriti", 0),
         "storico_ricreato": report.get("STORICO_ORDINI", {}).get("inseriti", 0),
         "parametri_aggiornati": report.get("PARAMETRI", {}).get("aggiornati", 0),
         "parametri_saltati": report.get("PARAMETRI", {}).get("saltati", 0),
@@ -3691,6 +3956,14 @@ async def import_excel_full(file: UploadFile = File(...)):
         "totali": totali,
     }
     await record_import_history(file.filename or "Excel", response, backup["id"])
+    _set_import_progress(
+        import_job_id,
+        "completed",
+        "Aggiornamento completato",
+        10,
+        10,
+        totals=totali,
+    )
     return response
 
 

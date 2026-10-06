@@ -3,7 +3,7 @@ import { useState } from "react";
 import {
   ChartBar, Package, ListChecks, Storefront, Receipt,
   ShoppingCart, ClockCounterClockwise, Calculator, Gear, GridFour, Lightning, Truck,
-  WarningCircle, FileText, List, X,
+  WarningCircle, FileText, List, X, ArrowsLeftRight,
 } from "@phosphor-icons/react";
 
 const NAV = [
@@ -13,6 +13,7 @@ const NAV = [
   { to: "/listino", label: "Listino ADM", icon: ListChecks, testid: "nav-listino" },
   { to: "/magazzino", label: "Magazzino / Pivot", icon: GridFour, testid: "nav-magazzino" },
   { to: "/vending", label: "Vending", icon: Storefront, testid: "nav-vending" },
+  { to: "/smart-venue", label: "SMARTV VENUE", icon: ArrowsLeftRight, testid: "nav-smart-venue" },
   { to: "/vendite", label: "Vendite giornaliere", icon: Receipt, testid: "nav-vendite" },
   { to: "/auto-order", label: "Auto-Order", icon: ShoppingCart, testid: "nav-auto-order" },
   { to: "/anomalie", label: "Anomalie", icon: WarningCircle, testid: "nav-anomalie" },

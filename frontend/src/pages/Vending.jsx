@@ -4,7 +4,7 @@ import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, KpiCard } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
-import { CheckCircle, Printer } from "@phosphor-icons/react";
+import { CheckCircle, FloppyDisk, Printer } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
 
 export default function Vending() {
@@ -13,6 +13,8 @@ export default function Vending() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [bulkLoading, setBulkLoading] = useState(false);
+  const [giacenzeManuali, setGiacenzeManuali] = useState({});
+  const [savingGiacenza, setSavingGiacenza] = useState(null);
 
   const load = async () => {
     const r = await api.get("/vending");
@@ -32,6 +34,29 @@ export default function Vending() {
 
   const setQuantitaManuale = (id, value) => {
     setQuantitaManuali(current => ({ ...current, [id]: value }));
+  };
+
+  const salvaGiacenza = async (v) => {
+    const value = Number(giacenzeManuali[v.id] ?? v.giacenza);
+    if (!Number.isInteger(value) || value < 0 || value > v.capacita_max) {
+      toast.error(`Inserisci una giacenza intera tra 0 e ${v.capacita_max} per la colonna ${v.colonna}`);
+      return;
+    }
+    setSavingGiacenza(v.id);
+    try {
+      const response = await api.put(`/vending/${v.id}/giacenza`, { giacenza: value });
+      toast.success(`Colonna ${v.colonna}: giacenza corretta da ${response.data.giacenza_precedente} a ${response.data.giacenza}`);
+      setGiacenzeManuali(current => {
+        const next = { ...current };
+        delete next[v.id];
+        return next;
+      });
+      await load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile correggere la giacenza"));
+    } finally {
+      setSavingGiacenza(null);
+    }
   };
 
   const rica = async (v) => {
@@ -150,7 +175,7 @@ export default function Vending() {
                 <Th sortKey="colonna" currentKey={sortKey} dir={sortDir} onClick={toggle}>Colonna</Th>
                 <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
                 <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
-                <Th sortKey="giacenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giacenza</Th>
+                <Th sortKey="giacenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giacenza reale</Th>
                 <Th sortKey="giacenza_magazzino" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Magazzino</Th>
                 <Th sortKey="capacita_max" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Capacità</Th>
                 <Th sortKey="soglia_minima" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Soglia</Th>
@@ -166,7 +191,35 @@ export default function Vending() {
                   <td className="font-mono font-bold">{r.colonna}</td>
                   <td className="font-mono">{r.codice}</td>
                   <td className="max-w-sm truncate">{r.descrizione}</td>
-                  <td className="font-mono text-right">{r.giacenza}</td>
+                  <td className="text-right">
+                    <div className="inline-flex items-center gap-1">
+                      <input
+                        data-testid={`vending-stock-${r.colonna}`}
+                        aria-label={`Giacenza reale colonna ${r.colonna}`}
+                        type="number"
+                        inputMode="numeric"
+                        min="0"
+                        max={r.capacita_max}
+                        step="1"
+                        value={giacenzeManuali[r.id] ?? r.giacenza}
+                        onChange={e => setGiacenzeManuali(current => ({ ...current, [r.id]: e.target.value }))}
+                        disabled={savingGiacenza === r.id || bulkLoading}
+                        className="w-16 rounded-md border border-slate-300 px-2 py-1 text-right font-mono text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
+                      />
+                      {Number(giacenzeManuali[r.id]) !== Number(r.giacenza) && giacenzeManuali[r.id] !== undefined && (
+                        <button
+                          data-testid={`vending-stock-save-${r.colonna}`}
+                          onClick={() => salvaGiacenza(r)}
+                          disabled={savingGiacenza === r.id}
+                          className="rounded-md bg-blue-600 p-1.5 text-white hover:bg-blue-700 disabled:opacity-40"
+                          title={`Salva giacenza reale colonna ${r.colonna}`}
+                          aria-label={`Salva giacenza reale colonna ${r.colonna}`}
+                        >
+                          <FloppyDisk size={14} weight="bold" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
                   <td className={`font-mono text-right ${r.giacenza_magazzino <= 0 ? "text-red-600 font-bold" : ""}`}>{r.giacenza_magazzino}</td>
                   <td className="font-mono text-right">{r.capacita_max}</td>
                   <td className="font-mono text-right">{r.soglia_minima}</td>

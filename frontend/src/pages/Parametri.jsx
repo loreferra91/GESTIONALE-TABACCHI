@@ -47,6 +47,9 @@ export default function Parametri() {
   const [rows, setRows] = useState([]);
   const [importing, setImporting] = useState(false);
   const [importReport, setImportReport] = useState(null);
+  const [importProgress, setImportProgress] = useState(null);
+  const [importElapsed, setImportElapsed] = useState(0);
+  const [importFileName, setImportFileName] = useState("");
   const [history, setHistory] = useState([]);
   const [backups, setBackups] = useState([]);
   const [restoreTarget, setRestoreTarget] = useState(null);
@@ -83,26 +86,52 @@ export default function Parametri() {
   const upload = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    const jobId = globalThis.crypto?.randomUUID?.() || `import-${Date.now()}`;
+    const startedAt = Date.now();
+    let progressTimer;
+    let elapsedTimer;
     setImporting(true);
     setImportReport(null);
+    setImportFileName(f.name);
+    setImportElapsed(0);
+    setImportProgress({ status: "running", message: "Caricamento del file Excel", percent: 2 });
     const fd = new FormData();
     fd.append("file", f);
+    progressTimer = window.setInterval(async () => {
+      try {
+        const response = await api.get(`/import/excel-full/status/${jobId}`);
+        setImportProgress(response.data);
+      } catch (err) {
+        if (err?.response?.status !== 404) console.warn("Stato import non disponibile", err);
+      }
+    }, 500);
+    elapsedTimer = window.setInterval(() => {
+      setImportElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
     try {
-      const r = await fetch(`${API}/import/excel-full`, { method: "POST", body: fd });
+      const r = await fetch(`${API}/import/excel-full`, {
+        method: "POST",
+        body: fd,
+        headers: { "X-Import-Job-ID": jobId },
+      });
       if (!r.ok) {
         const err = await r.text();
         throw new Error(err || r.statusText);
       }
       const j = await r.json();
       setImportReport(j);
+      setImportProgress({ status: "completed", message: "Aggiornamento completato", percent: 100 });
       const t = j.totali;
       const tot = (t.prodotti_inseriti || 0) + (t.prodotti_aggiornati || 0) + (t.listino_inseriti || 0) + (t.listino_aggiornati || 0) + (t.vending_inseriti || 0) + (t.vending_aggiornati || 0);
       toast.success(`Import completato: ${tot} righe aggiornate su ${j.fogli_trovati.length} fogli. Backup creato.`);
       load();
       loadAudit();
     } catch (err) {
+      setImportProgress({ status: "failed", message: apiErrorMessage(err, "Errore import Excel"), percent: 100 });
       toast.error(apiErrorMessage(err, "Errore import Excel"));
     } finally {
+      window.clearInterval(progressTimer);
+      window.clearInterval(elapsedTimer);
       setImporting(false);
       if (fileRef.current) fileRef.current.value = "";
     }
@@ -188,7 +217,7 @@ export default function Parametri() {
             <h2 className="font-heading font-black text-lg mb-1">Sincronizzazione da Excel</h2>
             <p className="text-sm text-slate-600 mb-3">
               Carica un file <code>.xlsm/.xlsx</code>: la web app legge automaticamente i fogli
-              <b> RIEP_VENDITA, LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, DB_STORICO_VEND, PARAMETRI</b> e allinea il DB con l'Excel (Excel = fonte di verità).
+              <b> RIEP_VENDITA, (SMART VENUE), LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, DB_STORICO_VEND, PARAMETRI</b> e allinea il DB con l'Excel (Excel = fonte di verità).
               <br/><span className="text-xs text-slate-500">Le righe presenti nel DB ma NON nell'Excel vengono conservate. I parametri custom (es. AGGIO_PCT) sono preservati.</span>
             </p>
             <div className="flex items-center gap-3">
@@ -201,8 +230,32 @@ export default function Parametri() {
                 disabled={importing}
                 className="text-sm block file:mr-3 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-slate-900 file:text-white file:font-medium file:cursor-pointer hover:file:bg-slate-800 disabled:opacity-40"
               />
-              {importing && <span className="text-sm text-slate-500 flex items-center gap-2"><div className="w-3 h-3 border-2 border-slate-400 border-t-slate-900 rounded-full animate-spin" /> Elaborazione…</span>}
+              {importing && <span className="text-sm text-slate-500">File selezionato: {importFileName}</span>}
             </div>
+            {importProgress && (
+              <div
+                data-testid="import-progress"
+                className={`mt-4 rounded-md border p-4 ${importProgress.status === "failed" ? "border-red-200 bg-red-50" : importProgress.status === "completed" ? "border-emerald-200 bg-emerald-50" : "border-blue-200 bg-blue-50"}`}
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="flex items-center gap-2 font-bold text-slate-900">
+                    {importing && <span className="h-3 w-3 animate-spin rounded-full border-2 border-blue-300 border-t-blue-700" />}
+                    {importProgress.message}
+                  </span>
+                  <span className="font-mono text-xs text-slate-600">{importProgress.percent || 0}% · {importElapsed}s</span>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/80">
+                  <div
+                    data-testid="import-progress-bar"
+                    className={`h-full transition-all duration-300 ${importProgress.status === "failed" ? "bg-red-500" : "bg-blue-600"}`}
+                    style={{ width: `${importProgress.percent || 0}%` }}
+                  />
+                </div>
+                {importProgress.sheet && <div className="mt-2 text-xs text-slate-600">Foglio in lavorazione: <b>{importProgress.sheet}</b></div>}
+              </div>
+            )}
           </div>
         </div>
 
@@ -224,6 +277,7 @@ export default function Parametri() {
               <ReportCard label="Listino ADM aggiornati" value={T.listino_aggiornati} tone="info" />
               <ReportCard label="Vending nuove col." value={T.vending_inseriti} tone="ok" />
               <ReportCard label="Vending aggiornate" value={T.vending_aggiornati} tone="info" />
+              <ReportCard label="Righe Smart Venue" value={T.smart_venue_righe} tone="info" />
               <ReportCard label="Storico ordini" value={T.storico_ricreato} tone="info" />
               <ReportCard label="Vendite storiche" value={T.db_storico_vend_righe} tone="info" />
               <ReportCard label="Parametri aggiornati" value={T.parametri_aggiornati} tone="info" />
