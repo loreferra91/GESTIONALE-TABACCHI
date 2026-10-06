@@ -3,7 +3,7 @@ import Layout from "../components/Layout";
 import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
-import { Trash } from "@phosphor-icons/react";
+import { ArrowClockwise, Trash } from "@phosphor-icons/react";
 
 export default function Vendite() {
   const [rows, setRows] = useState([]);
@@ -17,6 +17,7 @@ export default function Vendite() {
   const [bulkData, setBulkData] = useState(today);
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkRows, setBulkRows] = useState([]); // canonical editable rows for preview
+  const [bulkImporting, setBulkImporting] = useState(false);
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
@@ -107,17 +108,21 @@ export default function Vendite() {
   };
 
   const submitBulk = async () => {
+    if (bulkImporting) return;
     const righe = bulkRows.filter(r => r.codice && r.quantita > 0);
     if (!righe.length) return toast.error("Nessuna riga valida");
+    setBulkImporting(true);
     try {
       const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) });
       setBulkResult(r.data);
-      toast.success(`Bulk: ${r.data.inseriti} inserite, ${r.data.saltati} saltate`);
       setBulkText("");
       setBulkRows([]);
-      load();
+      await load();
+      toast.success(`Bulk: ${r.data.inseriti} inserite, ${r.data.saltati} saltate`);
     } catch (e) {
       toast.error(apiErrorMessage(e, "Errore bulk"));
+    } finally {
+      setBulkImporting(false);
     }
   };
 
@@ -271,8 +276,16 @@ export default function Vendite() {
           <select data-testid="bulk-pagamento" value={bulkPagamento} onChange={e => setBulkPagamento(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
             <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
           </select>
-          <button data-testid="bulk-submit" onClick={submitBulk} disabled={!bulkText.trim()} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
-            Aggiorna vendite
+          <button
+            type="button"
+            data-testid="bulk-submit"
+            onClick={submitBulk}
+            disabled={!bulkText.trim() || bulkImporting}
+            aria-busy={bulkImporting}
+            className="inline-flex items-center justify-center gap-2 bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <ArrowClockwise size={17} className={bulkImporting ? "animate-spin" : ""} aria-hidden="true" />
+            {bulkImporting ? "Aggiornamento…" : "Aggiorna vendite"}
           </button>
         </div>
         <textarea
