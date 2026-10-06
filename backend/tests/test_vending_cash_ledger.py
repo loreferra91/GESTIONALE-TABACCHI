@@ -40,6 +40,60 @@ def test_cash_csv_increments_vending_cash_but_cards_do_not(monkeypatch):
     assert asyncio.run(server._vending_cash_balance()) == 243.35
 
 
+def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatch):
+    database = fresh_db(monkeypatch)
+    raw = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "04/10/2026 10:00;PRODOTTO CASH;5,8;1-B02;1001;Sigarette;Contanti\n"
+    )
+
+    async def scenario():
+        await database.prelievi_vending.insert_one({"id": "legacy", "importo": 100})
+        await database.prodotti.insert_one({
+            "id": "product-1",
+            "codice": "AMMS1001",
+            "descrizione": "PRODOTTO CASH",
+            "giacenza_vending": 10,
+            "venduti_vending": 0,
+        })
+        await database.vending.insert_one({"id": "column-1", "colonna": "B02", "giacenza": 5})
+        upload = UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
+        imported = await server.import_csv_vending(upload)
+        product_after_import = await database.prodotti.find_one({"id": "product-1"}, {"_id": 0})
+        column_after_import = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
+        cash_after_import = await server._vending_cash_balance()
+        latest = await server.ultimo_csv_vending()
+        undone = await server.annulla_csv_vending(imported["batch_id"])
+        product_after_undo = await database.prodotti.find_one({"id": "product-1"}, {"_id": 0})
+        column_after_undo = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
+        cash_after_undo = await server._vending_cash_balance()
+        remaining = await database.vendite.find({"batch_id": imported["batch_id"]}).to_list(10)
+        return (
+            imported, product_after_import, column_after_import, cash_after_import, latest,
+            undone, product_after_undo, column_after_undo, cash_after_undo, remaining,
+        )
+
+    (
+        imported, product_after_import, column_after_import, cash_after_import, latest,
+        undone, product_after_undo, column_after_undo, cash_after_undo, remaining,
+    ) = asyncio.run(scenario())
+
+    assert imported["inseriti"] == 1
+    assert imported["batch_id"]
+    assert product_after_import["giacenza_vending"] == 9
+    assert product_after_import["venduti_vending"] == 1
+    assert column_after_import["giacenza"] == 4
+    assert cash_after_import == 105.8
+    assert latest["id"] == imported["batch_id"]
+    assert undone["rimossi"] == 1
+    assert undone["contanti_rimossi_giacenza"] == 5.8
+    assert product_after_undo["giacenza_vending"] == 10
+    assert product_after_undo["venduti_vending"] == 0
+    assert column_after_undo["giacenza"] == 5
+    assert cash_after_undo == 100
+    assert remaining == []
+
+
 def test_registering_and_deleting_withdrawal_updates_vending_cash(monkeypatch):
     database = fresh_db(monkeypatch)
     asyncio.run(database.prelievi_vending.insert_one({"id": "legacy", "importo": 237.55}))

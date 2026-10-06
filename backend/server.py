@@ -168,6 +168,7 @@ class VenditaGiornaliera(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     sorgente: str = "MANUALE"
     batch_id: Optional[str] = None
+    undo_meta: Dict[str, Any] = Field(default_factory=dict)
 
 
 class VenditaIn(BaseModel):
@@ -1058,6 +1059,39 @@ async def del_vendita(v_id: str):
     return {"ok": True}
 
 
+@api.get("/vendite/manuale/ultima")
+async def ultima_vendita_manuale():
+    """Restituisce l'ultima vendita manuale ancora presente e annullabile."""
+    return await db.vendite.find_one(
+        {"sorgente": "MANUALE"},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+
+@api.post("/vendite/manuale/{sale_id}/annulla")
+async def annulla_vendita_manuale(sale_id: str):
+    sale = await db.vendite.find_one({"id": sale_id, "sorgente": "MANUALE"}, {"_id": 0})
+    if not sale:
+        raise HTTPException(404, "Vendita manuale non trovata o già annullata")
+    field = "giacenza_vending" if sale.get("canale") == "VENDING" else "giacenza_negozio"
+    vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
+    quantity = int(sale.get("quantita") or 0)
+    stock_update = await db.prodotti.update_one(
+        {"codice": sale.get("codice")},
+        {"$inc": {field: quantity, vend_field: -quantity}},
+    )
+    deletion = await db.vendite.delete_one({"id": sale_id, "sorgente": "MANUALE"})
+    if deletion.deleted_count != 1:
+        if stock_update.modified_count == 1:
+            await db.prodotti.update_one(
+                {"codice": sale.get("codice")},
+                {"$inc": {field: -quantity, vend_field: quantity}},
+            )
+        raise HTTPException(409, "La vendita è cambiata durante l'annullamento")
+    return {"ok": True, "rimossi": 1, "id": sale_id}
+
+
 class BulkVenditaIn(BaseModel):
     canale: str = "NEGOZIO"
     pagamento: str = "CONTANTI"
@@ -1110,6 +1144,7 @@ async def bulk_vendite(body: BulkVenditaIn):
         await db.vendite_bulk_imports.insert_one({
             "id": batch_id,
             "created_at": created_at,
+            "sorgente": "BULK",
             "canale": body.canale,
             "pagamento": body.pagamento,
             "inseriti": inserted,
@@ -1131,7 +1166,10 @@ async def bulk_vendite(body: BulkVenditaIn):
 async def ultimo_bulk_vendite():
     """Restituisce l'ultimo caricamento bulk ancora annullabile."""
     return await db.vendite_bulk_imports.find_one(
-        {"status": "active"},
+        {
+            "status": "active",
+            "$or": [{"sorgente": "BULK"}, {"sorgente": {"$exists": False}}],
+        },
         {"_id": 0},
         sort=[("created_at", -1)],
     )
@@ -1792,11 +1830,15 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
     """Importa il CSV gia' validato dall'anteprima della UI."""
     raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
+    batch_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
     inserted = 0
     imported_cash = 0.0
     errors = list(parsed["errori"])
     payment_counts: Dict[str, int] = {}
     for csv_row in parsed["righe"]:
+        undo_meta: Dict[str, Any] = {}
+        codice = ""
         try:
             codice = csv_row["codice"]
             nome = csv_row["nome"]
@@ -1825,38 +1867,70 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 slug = re.sub(r"\s+", "_", nome.strip().lower())[:20]
                 codice = f"CSV-{slug}"
 
-            # ogni riga CSV = 1 pezzo venduto (formato tipico distributore)
-            v = VenditaGiornaliera(
-                data=data_iso, codice=codice, descrizione=nome, quantita=1, importo=prezzo_f,
-                canale="VENDING", pagamento=pag, sorgente="CSV_VENDING",
-            )
-            await db.vendite.insert_one(v.model_dump())
-
             # aggiorna vending column giacenza se colonna presente
             if colonna:
                 col = await db.vending.find_one({"colonna": colonna})
                 if col:
-                    new_g = max(0, (col.get("giacenza") or 0) - 1)
+                    old_g = int(col.get("giacenza") or 0)
+                    new_g = max(0, old_g - 1)
                     await db.vending.update_one({"id": col["id"]}, {"$set": {"giacenza": new_g}})
+                    undo_meta["vending_column_id"] = col["id"]
+                    undo_meta["vending_stock_decremented"] = old_g > 0
             # aggiorna prodotto
             prod = prod or await db.prodotti.find_one({"codice": codice})
             if prod:
                 await db.prodotti.update_one({"codice": codice}, {"$inc": {"giacenza_vending": -1, "venduti_vending": 1}})
+                undo_meta["product_stock_adjusted"] = True
             else:
                 # crea prodotto minimale
-                await db.prodotti.insert_one(Prodotto(
+                product_doc = Prodotto(
                     codice=codice, descrizione=nome or codice,
                     categoria=(categoria.upper() or "SIGARETTE") if categoria else "SIGARETTE",
                     prezzo=prezzo_f, venduti_vending=1,
-                ).model_dump())
+                ).model_dump()
+                product_doc["created_from_csv_batch"] = batch_id
+                await db.prodotti.insert_one(product_doc)
+                undo_meta["product_created"] = True
+                undo_meta["product_id"] = product_doc["id"]
+
+            # ogni riga CSV = 1 pezzo venduto (formato tipico distributore)
+            v = VenditaGiornaliera(
+                data=data_iso, codice=codice, descrizione=nome, quantita=1, importo=prezzo_f,
+                canale="VENDING", pagamento=pag, sorgente="CSV_VENDING",
+                batch_id=batch_id, undo_meta=undo_meta,
+            )
+            await db.vendite.insert_one(v.model_dump())
             inserted += 1
             payment_counts[pag] = payment_counts.get(pag, 0) + 1
             if _is_cash_payment(pag):
                 imported_cash += prezzo_f
         except Exception as exc:
+            if undo_meta.get("product_stock_adjusted"):
+                await db.prodotti.update_one(
+                    {"codice": codice},
+                    {"$inc": {"giacenza_vending": 1, "venduti_vending": -1}},
+                )
+            elif undo_meta.get("product_created"):
+                await db.prodotti.delete_one({"id": undo_meta.get("product_id"), "created_from_csv_batch": batch_id})
+            if undo_meta.get("vending_stock_decremented"):
+                await db.vending.update_one(
+                    {"id": undo_meta.get("vending_column_id")},
+                    {"$inc": {"giacenza": 1}},
+                )
             errors.append({"riga": csv_row["riga"], "errore": str(exc)})
     if imported_cash:
         await _adjust_vending_cash_balance(imported_cash)
+    if inserted:
+        await db.vendite_bulk_imports.insert_one({
+            "id": batch_id,
+            "created_at": created_at,
+            "sorgente": "CSV_VENDING",
+            "canale": "VENDING",
+            "pagamento": pagamento,
+            "inseriti": inserted,
+            "saltati": parsed["saltati"],
+            "status": "active",
+        })
     return {
         "inseriti": inserted,
         "saltati": parsed["saltati"],
@@ -1867,6 +1941,111 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
         "righe_file": file_rows,
         "righe_gia_presenti": file_rows - len(parsed["righe"]),
         "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
+        "batch_id": batch_id if inserted else None,
+        "created_at": created_at if inserted else None,
+        "sorgente": "CSV_VENDING",
+    }
+
+
+@api.get("/vendite/csv/ultimo")
+async def ultimo_csv_vending():
+    """Restituisce l'ultimo CSV vending ancora annullabile."""
+    return await db.vendite_bulk_imports.find_one(
+        {"status": "active", "sorgente": "CSV_VENDING"},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+
+@api.post("/vendite/csv/{batch_id}/annulla")
+async def annulla_csv_vending(batch_id: str):
+    """Annulla un import CSV e ripristina vendite, prodotti, vending e cassa."""
+    claim = await db.vendite_bulk_imports.update_one(
+        {"id": batch_id, "status": "active", "sorgente": "CSV_VENDING"},
+        {"$set": {"status": "annulling"}},
+    )
+    if claim.modified_count != 1:
+        raise HTTPException(404, "Caricamento CSV non trovato o già annullato")
+
+    removed = 0
+    cash_to_restore = 0.0
+    try:
+        sales = await db.vendite.find(
+            {"batch_id": batch_id, "sorgente": "CSV_VENDING"},
+            {"_id": 0},
+        ).to_list(None)
+        for sale in sales:
+            undo_meta = sale.get("undo_meta") or {}
+            codice = sale.get("codice")
+            if undo_meta.get("product_stock_adjusted"):
+                await db.prodotti.update_one(
+                    {"codice": codice},
+                    {"$inc": {"giacenza_vending": 1, "venduti_vending": -1}},
+                )
+            elif undo_meta.get("product_created"):
+                product = await db.prodotti.find_one({"id": undo_meta.get("product_id")})
+                can_delete = product and product.get("created_from_csv_batch") == batch_id and all(
+                    int(product.get(field) or 0) == expected
+                    for field, expected in {
+                        "acquistati": 0,
+                        "venduti_negozio": 0,
+                        "venduti_vending": 1,
+                        "giacenza_negozio": 0,
+                        "giacenza_vending": 0,
+                    }.items()
+                )
+                if can_delete:
+                    await db.prodotti.delete_one({"id": product["id"], "created_from_csv_batch": batch_id})
+                else:
+                    await db.prodotti.update_one({"codice": codice}, {"$inc": {"venduti_vending": -1}})
+            if undo_meta.get("vending_stock_decremented"):
+                await db.vending.update_one(
+                    {"id": undo_meta.get("vending_column_id")},
+                    {"$inc": {"giacenza": 1}},
+                )
+            if _is_cash_payment(sale.get("pagamento")):
+                cash_to_restore += float(sale.get("importo") or 0)
+            deletion = await db.vendite.delete_one({"id": sale.get("id"), "batch_id": batch_id})
+            if deletion.deleted_count != 1:
+                raise RuntimeError("Una vendita CSV non è stata eliminata")
+            removed += 1
+
+        created_products = await db.prodotti.find(
+            {"created_from_csv_batch": batch_id},
+            {"_id": 0},
+        ).to_list(None)
+        for product in created_products:
+            if all(
+                int(product.get(field) or 0) == 0
+                for field in (
+                    "acquistati", "venduti_negozio", "venduti_vending",
+                    "giacenza_negozio", "giacenza_vending",
+                )
+            ):
+                await db.prodotti.delete_one({"id": product.get("id"), "created_from_csv_batch": batch_id})
+
+        if cash_to_restore:
+            await _adjust_vending_cash_balance(-cash_to_restore)
+        await db.vendite_bulk_imports.update_one(
+            {"id": batch_id},
+            {"$set": {
+                "status": "annulled",
+                "annulled_at": datetime.now(timezone.utc).isoformat(),
+                "rimossi": removed,
+            }},
+        )
+    except Exception as exc:
+        await db.vendite_bulk_imports.update_one(
+            {"id": batch_id, "status": "annulling"},
+            {"$set": {"status": "active"}},
+        )
+        raise HTTPException(500, f"Impossibile annullare il CSV: {exc}") from exc
+
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "rimossi": removed,
+        "contanti_rimossi_giacenza": round(cash_to_restore, 2),
     }
 
 

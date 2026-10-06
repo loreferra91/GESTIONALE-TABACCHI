@@ -118,3 +118,38 @@ def test_bulk_sales_cannot_be_undone_twice(monkeypatch):
         asyncio.run(scenario())
 
     assert exc.value.status_code == 404
+
+
+def test_manual_sale_can_be_undone_and_stock_is_restored(monkeypatch):
+    database = AsyncMongoMockClient()["manual_sale_undo_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1",
+            "descrizione": "Prodotto uno",
+            "giacenza_negozio": 10,
+            "venduti_negozio": 0,
+        })
+        sale = await server.add_vendita(server.VenditaIn(
+            data="2026-10-06",
+            codice="P1",
+            quantita=2,
+            importo=12,
+        ))
+        latest = await server.ultima_vendita_manuale()
+        product_after_import = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
+        undone = await server.annulla_vendita_manuale(sale["id"])
+        product_after_undo = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
+        remaining = await database.vendite.find_one({"id": sale["id"]})
+        return sale, latest, product_after_import, undone, product_after_undo, remaining
+
+    sale, latest, product_after_import, undone, product_after_undo, remaining = asyncio.run(scenario())
+
+    assert latest["id"] == sale["id"]
+    assert product_after_import["giacenza_negozio"] == 8
+    assert product_after_import["venduti_negozio"] == 2
+    assert undone["rimossi"] == 1
+    assert product_after_undo["giacenza_negozio"] == 10
+    assert product_after_undo["venduti_negozio"] == 0
+    assert remaining is None

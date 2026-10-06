@@ -5,6 +5,30 @@ import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
 
+function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
+  return (
+    <div data-testid={testId} className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+      <div>
+        <div className="text-sm font-bold text-amber-950">{title}</div>
+        <div className="mt-0.5 text-xs text-amber-800">
+          {createdAt ? new Date(createdAt).toLocaleString("it-IT") : "Appena completato"} · {description}
+        </div>
+      </div>
+      <button
+        type="button"
+        data-testid={`${testId}-button`}
+        onClick={onUndo}
+        disabled={busy || disabled}
+        aria-busy={busy}
+        className="inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-bold text-red-700 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        <ArrowCounterClockwise size={17} className={busy ? "animate-spin" : ""} aria-hidden="true" />
+        {busy ? "Annullamento…" : buttonLabel}
+      </button>
+    </div>
+  );
+}
+
 export default function Vendite() {
   const [rows, setRows] = useState([]);
   const [giorno, setGiorno] = useState(new Date().toISOString().slice(0, 10));
@@ -20,6 +44,8 @@ export default function Vendite() {
   const [bulkImporting, setBulkImporting] = useState(false);
   const [lastBulkImport, setLastBulkImport] = useState(null);
   const [bulkUndoing, setBulkUndoing] = useState(false);
+  const [lastManualSale, setLastManualSale] = useState(null);
+  const [manualUndoing, setManualUndoing] = useState(false);
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
@@ -27,6 +53,8 @@ export default function Vendite() {
   const [csvPreview, setCsvPreview] = useState(null);
   const [csvPreviewing, setCsvPreviewing] = useState(false);
   const [csvImporting, setCsvImporting] = useState(false);
+  const [lastCsvImport, setLastCsvImport] = useState(null);
+  const [csvUndoing, setCsvUndoing] = useState(false);
   const [prodMap, setProdMap] = useState(new Map());
 
   useEffect(() => {
@@ -54,12 +82,51 @@ export default function Vendite() {
   }, []);
   useEffect(() => { loadLastBulkImport(); }, [loadLastBulkImport]);
 
+  const loadLastManualSale = useCallback(async () => {
+    try {
+      const r = await api.get("/vendite/manuale/ultima");
+      setLastManualSale(r.data || null);
+    } catch (error) {
+      console.error("loadLastManualSale failed:", error);
+      setLastManualSale(null);
+    }
+  }, []);
+  useEffect(() => { loadLastManualSale(); }, [loadLastManualSale]);
+
+  const loadLastCsvImport = useCallback(async () => {
+    try {
+      const r = await api.get("/vendite/csv/ultimo");
+      setLastCsvImport(r.data || null);
+    } catch (error) {
+      console.error("loadLastCsvImport failed:", error);
+      setLastCsvImport(null);
+    }
+  }, []);
+  useEffect(() => { loadLastCsvImport(); }, [loadLastCsvImport]);
+
   const save = async () => {
+    if (manualUndoing) return;
     if (!form.codice || !form.importo) { toast.error("Compila codice e importo"); return; }
-    await api.post("/vendite", form);
+    const r = await api.post("/vendite", form);
+    setLastManualSale(r.data);
     toast.success("Vendita registrata");
     setForm({ ...form, codice: "", descrizione: "", quantita: 1, importo: 0 });
-    load();
+    await load();
+  };
+
+  const undoLastManualSale = async () => {
+    if (!lastManualSale?.id || manualUndoing) return;
+    if (!window.confirm(`Annullare l'ultima vendita manuale (${lastManualSale.codice}, ${formatEur(lastManualSale.importo)})?`)) return;
+    setManualUndoing(true);
+    try {
+      await api.post(`/vendite/manuale/${lastManualSale.id}/annulla`);
+      await Promise.all([load(), loadLastManualSale()]);
+      toast.success("Ultima vendita manuale annullata e scorte ripristinate");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile annullare la vendita manuale"));
+    } finally {
+      setManualUndoing(false);
+    }
   };
 
   const del = async (id) => {
@@ -229,7 +296,7 @@ export default function Vendite() {
   };
 
   const uploadCsv = async () => {
-    if (!csvFile || !csvPreview?.righe) return;
+    if (!csvFile || !csvPreview?.righe || csvUndoing) return;
     setCsvImporting(true);
     const fd = new FormData();
     fd.append("file", csvFile);
@@ -238,6 +305,7 @@ export default function Vendite() {
       if (!r.ok) throw new Error((await r.text()) || r.statusText);
       const j = await r.json();
       setCsvResult(j);
+      if (j.batch_id) setLastCsvImport({ id: j.batch_id, ...j, status: "active" });
       toast.success(`CSV vending: ${j.inseriti} righe importate e vendite aggiornate`);
       clearCsv();
       await load();
@@ -245,6 +313,23 @@ export default function Vendite() {
       toast.error(apiErrorMessage(err, "Errore import CSV"));
     } finally {
       setCsvImporting(false);
+    }
+  };
+
+  const undoLastCsvImport = async () => {
+    if (!lastCsvImport?.id || csvUndoing || csvImporting) return;
+    const count = lastCsvImport.inseriti || 0;
+    if (!window.confirm(`Annullare l'ultimo CSV di ${count} vendite? Verranno ripristinate scorte vending e cassa contanti.`)) return;
+    setCsvUndoing(true);
+    try {
+      const r = await api.post(`/vendite/csv/${lastCsvImport.id}/annulla`);
+      setCsvResult(null);
+      await Promise.all([load(), loadLastCsvImport()]);
+      toast.success(`CSV annullato: ${r.data.rimossi} vendite rimosse e valori ripristinati`);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile annullare il CSV"));
+    } finally {
+      setCsvUndoing(false);
     }
   };
 
@@ -278,7 +363,7 @@ export default function Vendite() {
           <input data-testid="vend-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm col-span-2" />
           <input data-testid="vend-qta" type="number" placeholder="Qta" value={form.quantita} onChange={e => setForm({...form, quantita: parseInt(e.target.value) || 1})} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <input data-testid="vend-importo" type="number" step="0.01" placeholder="Importo €" value={form.importo} onChange={e => setForm({...form, importo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
-          <button data-testid="vend-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors col-span-2 md:col-span-1">Registra</button>
+          <button data-testid="vend-save-btn" onClick={save} disabled={manualUndoing} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-60 col-span-2 md:col-span-1">Registra</button>
         </div>
         <div className="grid grid-cols-2 gap-3 mt-3 md:max-w-md">
           <select data-testid="vend-canale" value={form.canale} onChange={e => setForm({...form, canale: e.target.value})} className="border rounded-md px-3 py-2 text-sm">
@@ -288,6 +373,17 @@ export default function Vendite() {
             <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
           </select>
         </div>
+        {lastManualSale && (
+          <UndoLastPanel
+            testId="manual-last-sale"
+            title={`Ultima vendita manuale: ${lastManualSale.codice} · ${formatEur(lastManualSale.importo)}`}
+            createdAt={lastManualSale.created_at}
+            description="Rimuove solo questa vendita e ripristina la relativa scorta."
+            buttonLabel="Annulla ultima vendita"
+            busy={manualUndoing}
+            onUndo={undoLastManualSale}
+          />
+        )}
       </Card>
       )}
 
@@ -418,27 +514,16 @@ export default function Vendite() {
         )}
 
         {lastBulkImport && (
-          <div data-testid="bulk-last-import" className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 p-3">
-            <div>
-              <div className="text-sm font-bold text-amber-950">
-                Ultimo caricamento: {formatNum(lastBulkImport.inseriti || 0)} vendite
-              </div>
-              <div className="mt-0.5 text-xs text-amber-800">
-                {lastBulkImport.created_at ? new Date(lastBulkImport.created_at).toLocaleString("it-IT") : "Appena completato"} · L'annullamento rimuove solo questo invio e ripristina le scorte.
-              </div>
-            </div>
-            <button
-              type="button"
-              data-testid="bulk-undo"
-              onClick={undoLastBulkImport}
-              disabled={bulkUndoing || bulkImporting}
-              aria-busy={bulkUndoing}
-              className="inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-bold text-red-700 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <ArrowCounterClockwise size={17} className={bulkUndoing ? "animate-spin" : ""} aria-hidden="true" />
-              {bulkUndoing ? "Annullamento…" : "Annulla ultimo caricamento"}
-            </button>
-          </div>
+          <UndoLastPanel
+            testId="bulk-last-import"
+            title={`Ultimo caricamento: ${formatNum(lastBulkImport.inseriti || 0)} ${(lastBulkImport.inseriti || 0) === 1 ? "vendita" : "vendite"}`}
+            createdAt={lastBulkImport.created_at}
+            description="Rimuove solo questo invio e ripristina le scorte."
+            buttonLabel="Annulla ultimo caricamento"
+            busy={bulkUndoing}
+            disabled={bulkImporting}
+            onUndo={undoLastBulkImport}
+          />
         )}
       </Card>
       )}
@@ -454,10 +539,10 @@ export default function Vendite() {
           <label className="text-xs text-slate-500">
             Pagamento predefinito se assente
           </label>
-          <select data-testid="csv-pag" value={csvPag} onChange={e => changeCsvDefaultPayment(e.target.value)} disabled={csvPreviewing || csvImporting} className="border rounded-md px-3 py-2 text-sm">
+          <select data-testid="csv-pag" value={csvPag} onChange={e => changeCsvDefaultPayment(e.target.value)} disabled={csvPreviewing || csvImporting || csvUndoing} className="border rounded-md px-3 py-2 text-sm">
             <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
           </select>
-          <input ref={csvRef} data-testid="csv-file" type="file" accept=".csv,text/csv" onChange={selectCsv} disabled={csvPreviewing || csvImporting} className="text-sm" />
+          <input ref={csvRef} data-testid="csv-file" type="file" accept=".csv,text/csv" onChange={selectCsv} disabled={csvPreviewing || csvImporting || csvUndoing} className="text-sm" />
           {csvPreviewing && <span className="text-sm text-slate-500">Analisi file…</span>}
         </div>
         {csvPreview && (
@@ -475,8 +560,8 @@ export default function Vendite() {
                 )}
               </div>
               <div className="flex gap-2">
-                <button data-testid="csv-cancel" onClick={clearCsv} disabled={csvImporting} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-100 disabled:opacity-40">Annulla</button>
-                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || !csvPreview.righe} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
+                <button data-testid="csv-cancel" onClick={clearCsv} disabled={csvImporting || csvUndoing} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-100 disabled:opacity-40">Annulla</button>
+                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || csvUndoing || !csvPreview.righe} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
                   {csvImporting ? "Aggiornamento…" : "Conferma e aggiorna vendite"}
                 </button>
               </div>
@@ -537,6 +622,18 @@ export default function Vendite() {
               </details>
             )}
           </div>
+        )}
+        {lastCsvImport && (
+          <UndoLastPanel
+            testId="csv-last-import"
+            title={`Ultimo CSV Vending: ${formatNum(lastCsvImport.inseriti || 0)} ${(lastCsvImport.inseriti || 0) === 1 ? "vendita" : "vendite"}`}
+            createdAt={lastCsvImport.created_at}
+            description="Ripristina vendite, scorte vending e cassa contanti di questo file."
+            buttonLabel="Annulla ultimo CSV"
+            busy={csvUndoing}
+            disabled={csvImporting}
+            onUndo={undoLastCsvImport}
+          />
         )}
       </Card>
       )}
