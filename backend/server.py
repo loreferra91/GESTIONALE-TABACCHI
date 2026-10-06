@@ -106,6 +106,30 @@ class ProdottoIn(BaseModel):
     colonna_vending: Optional[str] = None
 
 
+PRODUCT_CATEGORIES = {
+    "SIGARETTE",
+    "SIGARI",
+    "SIGARETTI",
+    "FIUTO E MASTICO",
+    "TRINCIATI PER SIGARETTA",
+    "ALTRI TABACCHI DA FUMO",
+    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE",
+    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA",
+    "ACCESSORI",
+}
+
+
+class SmartVenueProductIn(BaseModel):
+    codice: str
+    descrizione: str
+    categoria: str = "ACCESSORI"
+    prezzo: float = 0
+    acquistati: int = 0
+    giacenza_negozio: int = 0
+    giacenza_vending: int = 0
+    smart_venue: int = 0
+
+
 class ListinoItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -1269,7 +1293,7 @@ async def record_import_history(file_name: str, report: Dict[str, Any], backup_i
         "created_at": datetime.now(timezone.utc).isoformat(),
         "file": file_name,
         "backup_id": backup_id,
-        "tipo_import": "completo" if includes_accounting else "giacenze",
+        "tipo_import": report.get("tipo_import") or ("completo" if includes_accounting else "giacenze"),
         "contabilita_inclusa": includes_accounting,
         "fogli_trovati": report.get("fogli_trovati", []),
         "fogli_mancanti": report.get("fogli_mancanti", []),
@@ -3663,6 +3687,7 @@ async def _import_smart_venue(ws) -> Dict[str, int]:
                 "codice": code,
                 "descrizione": str(row[1] or "").strip(),
                 "smart_venue": int(row[5] or 0) if len(row) > 5 else 0,
+                "origine": "EXCEL",
                 "codice_smart": str(row[4] or "").strip() if len(row) > 4 else "",
                 "riga_excel": row_number,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -3670,10 +3695,53 @@ async def _import_smart_venue(ws) -> Dict[str, int]:
         except (TypeError, ValueError):
             errors += 1
 
+    manual_rows = await db.smart_venue.find(
+        {"origine": "MANUALE"}, {"_id": 0}
+    ).to_list(5000)
+    for manual_row in manual_rows:
+        code = str(manual_row.get("codice") or "")
+        if code and code not in rows_by_code:
+            rows_by_code[code] = manual_row
+
     await db.smart_venue.delete_many({})
     if rows_by_code:
         await db.smart_venue.insert_many(list(rows_by_code.values()))
     return {"inseriti": len(rows_by_code), "aggiornati": 0, "errori": errors}
+
+
+@api.post("/smart-venue/import-excel")
+async def import_smart_venue_excel(file: UploadFile = File(...)):
+    """Aggiorna soltanto SMART VENUE dalla colonna F del relativo foglio."""
+    try:
+        import openpyxl
+    except Exception:
+        raise HTTPException(500, "openpyxl non installato")
+    content = await _read_capped(file)
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
+    except Exception as exc:
+        raise HTTPException(422, f"File non leggibile: {exc}")
+    if "(SMART VENUE)" not in workbook.sheetnames:
+        raise HTTPException(422, "Foglio (SMART VENUE) non trovato")
+
+    backup = await create_backup_snapshot(
+        f"Prima import SMART VENUE {file.filename or 'Excel'}",
+        "pre-import-smart-venue",
+    )
+    result = await _import_smart_venue(workbook["(SMART VENUE)"])
+    response = {
+        "ok": True,
+        "file": file.filename,
+        "backup_id": backup["id"],
+        "tipo_import": "smart_venue",
+        "contabilita_inclusa": False,
+        "fogli_trovati": ["(SMART VENUE)"],
+        "fogli_mancanti": [],
+        "dettaglio": {"(SMART VENUE)": result},
+        "totali": {"smart_venue_righe": result["inseriti"]},
+    }
+    await record_import_history(file.filename or "Excel SMART VENUE", response, backup["id"])
+    return response
 
 
 @api.get("/smart-venue")
@@ -3708,6 +3776,57 @@ async def list_smart_venue():
             "differenza": smart_venue - rimanenze,
         })
     return rows
+
+
+@api.post("/smart-venue")
+async def create_smart_venue_product(body: SmartVenueProductIn):
+    code = _product_code_text(body.codice)
+    description = str(body.descrizione or "").strip()
+    category = str(body.categoria or "").strip().upper()
+    if not code or not description:
+        raise HTTPException(422, "Codice e descrizione sono obbligatori")
+    if category not in PRODUCT_CATEGORIES:
+        raise HTTPException(422, "Categoria prodotto non valida")
+    for field in ("acquistati", "giacenza_negozio", "giacenza_vending", "smart_venue"):
+        if getattr(body, field) < 0:
+            raise HTTPException(422, f"{field.replace('_', ' ').capitalize()} non può essere negativo")
+    if body.prezzo < 0:
+        raise HTTPException(422, "Prezzo non può essere negativo")
+    if await db.smart_venue.find_one({"codice": code}):
+        raise HTTPException(409, f"Codice già presente in SMART VENUE: {code}")
+
+    product = await db.prodotti.find_one({"codice": code}, {"_id": 0})
+    if product is None:
+        product = Prodotto(
+            codice=code,
+            descrizione=description,
+            categoria=category,
+            prezzo=body.prezzo,
+            acquistati=body.acquistati,
+            giacenza_negozio=body.giacenza_negozio,
+            giacenza_vending=body.giacenza_vending,
+        ).model_dump()
+        await db.prodotti.insert_one(product)
+
+    row_id = f"smart-venue:{code}"
+    smart_row = {
+        "id": row_id,
+        "codice": code,
+        "descrizione": description,
+        "smart_venue": body.smart_venue,
+        "origine": "MANUALE",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.smart_venue.insert_one(smart_row)
+    await db.smart_venue_hidden.delete_many({"product_id": row_id})
+    rimanenze = int(product.get("giacenza_negozio", 0) or 0) + int(product.get("giacenza_vending", 0) or 0)
+    return {
+        **smart_row,
+        "descrizione": str(product.get("descrizione") or description),
+        "acquistati": int(product.get("acquistati", 0) or 0),
+        "rimanenze": rimanenze,
+        "differenza": body.smart_venue - rimanenze,
+    }
 
 
 def _parse_smart_venue_quantity(value: Any) -> int:

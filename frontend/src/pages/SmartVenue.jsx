@@ -4,8 +4,20 @@ import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, formatNum } from "../components/UI";
 import { SearchBar, Th, useSortSearch } from "../lib/tableHooks";
 import { toast } from "sonner";
-import { CheckCircle, Trash } from "@phosphor-icons/react";
+import { CheckCircle, Plus, Trash, UploadSimple } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { PRODUCT_CATEGORIES } from "../lib/categories";
+
+const EMPTY_PRODUCT = {
+  codice: "",
+  descrizione: "",
+  categoria: "ACCESSORI",
+  prezzo: "",
+  acquistati: "",
+  giacenza_negozio: "",
+  giacenza_vending: "",
+  smart_venue: "",
+};
 
 export default function SmartVenue() {
   const [allRows, setAllRows] = useState([]);
@@ -13,12 +25,15 @@ export default function SmartVenue() {
   const [deleting, setDeleting] = useState(false);
   const [insertionDrafts, setInsertionDrafts] = useState({});
   const [confirmingId, setConfirmingId] = useState(null);
+  const [productForm, setProductForm] = useState(EMPTY_PRODUCT);
+  const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
 
-  useEffect(() => {
-    api.get("/smart-venue")
+  const load = () => api.get("/smart-venue")
       .then(response => setAllRows(response.data || []))
       .catch(err => toast.error(apiErrorMessage(err, "Impossibile caricare SMARTV VENUE")));
-  }, []);
+
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRows, {
     initial: "codice",
@@ -84,8 +99,82 @@ export default function SmartVenue() {
     }
   };
 
+  const addProduct = async event => {
+    event.preventDefault();
+    if (!productForm.codice.trim() || !productForm.descrizione.trim()) {
+      toast.error("Codice e descrizione sono obbligatori");
+      return;
+    }
+    setCreating(true);
+    try {
+      const payload = {
+        ...productForm,
+        prezzo: Number(productForm.prezzo || 0),
+        acquistati: Number(productForm.acquistati || 0),
+        giacenza_negozio: Number(productForm.giacenza_negozio || 0),
+        giacenza_vending: Number(productForm.giacenza_vending || 0),
+        smart_venue: Number(productForm.smart_venue || 0),
+      };
+      const response = await api.post("/smart-venue", payload);
+      setAllRows(current => [...current, response.data]);
+      setProductForm(EMPTY_PRODUCT);
+      toast.success(`Prodotto ${response.data.codice} aggiunto a SMARTV VENUE`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile aggiungere il prodotto"));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const importSmartVenue = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    try {
+      const data = new FormData();
+      data.append("file", file);
+      const response = await api.post("/smart-venue/import-excel", data);
+      await load();
+      toast.success(`${response.data.totali.smart_venue_righe} righe SMART VENUE aggiornate dalla colonna F`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile importare SMART VENUE"));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <Layout title="SMARTV VENUE" subtitle="dati Smart Venue da Excel e rimanenze correnti dei prodotti">
+      <Card className="mb-6 p-4">
+        <form onSubmit={addProduct}>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-bold text-slate-900">Aggiungi prodotto</h2>
+              <p className="text-xs text-slate-500">Il prodotto viene creato anche nell’anagrafica generale.</p>
+            </div>
+            <label className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${importing ? "pointer-events-none opacity-50" : "hover:bg-slate-50"}`}>
+              <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa colonna F da Excel"}
+              <input data-testid="smart-venue-import" type="file" accept=".xlsx,.xlsm" className="hidden" onChange={importSmartVenue} disabled={importing} />
+            </label>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <input data-testid="smart-venue-new-code" required placeholder="Codice" value={productForm.codice} onChange={event => setProductForm(current => ({ ...current, codice: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
+            <input data-testid="smart-venue-new-description" required placeholder="Descrizione" value={productForm.descrizione} onChange={event => setProductForm(current => ({ ...current, descrizione: event.target.value }))} className="rounded-md border px-3 py-2 text-sm lg:col-span-2" />
+            <select data-testid="smart-venue-new-category" value={productForm.categoria} onChange={event => setProductForm(current => ({ ...current, categoria: event.target.value }))} className="rounded-md border px-3 py-2 text-sm">
+              {PRODUCT_CATEGORIES.map(category => <option key={category} value={category}>{category}</option>)}
+            </select>
+            <input type="number" min="0" step="0.01" placeholder="Prezzo" value={productForm.prezzo} onChange={event => setProductForm(current => ({ ...current, prezzo: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
+            <input type="number" min="0" step="1" placeholder="Acquistati" value={productForm.acquistati} onChange={event => setProductForm(current => ({ ...current, acquistati: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
+            <input type="number" min="0" step="1" placeholder="Giacenza negozio" value={productForm.giacenza_negozio} onChange={event => setProductForm(current => ({ ...current, giacenza_negozio: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
+            <input type="number" min="0" step="1" placeholder="Giacenza vending" value={productForm.giacenza_vending} onChange={event => setProductForm(current => ({ ...current, giacenza_vending: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
+            <input data-testid="smart-venue-new-quantity" type="number" min="0" step="1" placeholder="Smart Venue" value={productForm.smart_venue} onChange={event => setProductForm(current => ({ ...current, smart_venue: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
+            <button data-testid="smart-venue-add" type="submit" disabled={creating} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50">
+              <Plus size={17} weight="bold" /> {creating ? "Aggiunta…" : "Aggiungi prodotto"}
+            </button>
+          </div>
+        </form>
+      </Card>
       <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-3">
         <KpiCard label="Prodotti" value={allRows.length} />
         <KpiCard label="Acquistati" value={purchased} />

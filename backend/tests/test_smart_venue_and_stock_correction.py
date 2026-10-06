@@ -3,6 +3,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+import openpyxl
 from fastapi import HTTPException
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -104,6 +105,60 @@ def test_smart_venue_uses_product_acquired_and_stock_with_excel_smart_value(monk
     assert rows[0]["rimanenze"] == 29
     assert rows[0]["smart_venue"] == 43
     assert rows[0]["differenza"] == 14
+
+
+def test_smart_venue_import_uses_column_f_and_preserves_manual_rows(monkeypatch):
+    database = isolated_db(monkeypatch)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "(SMART VENUE)"
+    sheet.append([])
+    sheet.append(["Codice", "Descrizione", "ACQ.", "RIMANENZE", "codice2", "RIMANENZE4"])
+    sheet.append(["AMMS9", "MARLBORO GOLD", 1080, 29, "87248265", 43])
+
+    async def seed_and_import():
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:MAN1", "codice": "MAN1", "descrizione": "Manuale",
+            "smart_venue": 7, "origine": "MANUALE",
+        })
+        result = await server._import_smart_venue(sheet)
+        rows = await database.smart_venue.find({}).to_list(5000)
+        return result, {row["codice"]: row for row in rows}
+
+    result, rows = asyncio.run(seed_and_import())
+
+    assert result["inseriti"] == 2
+    assert rows["AMMS9"]["smart_venue"] == 43
+    assert rows["AMMS9"]["origine"] == "EXCEL"
+    assert rows["MAN1"]["smart_venue"] == 7
+
+
+def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def create_and_read():
+        response = await server.create_smart_venue_product(server.SmartVenueProductIn(
+            codice="new1",
+            descrizione="Nuovo prodotto",
+            categoria="SIGARI",
+            prezzo=5.5,
+            acquistati=10,
+            giacenza_negozio=3,
+            giacenza_vending=2,
+            smart_venue=8,
+        ))
+        product = await database.prodotti.find_one({"codice": "NEW1"})
+        smart_row = await database.smart_venue.find_one({"codice": "NEW1"})
+        return response, product, smart_row
+
+    response, product, smart_row = asyncio.run(create_and_read())
+
+    assert product["categoria"] == "SIGARI"
+    assert product["acquistati"] == 10
+    assert smart_row["origine"] == "MANUALE"
+    assert response["rimanenze"] == 5
+    assert response["smart_venue"] == 8
+    assert response["differenza"] == 3
 
 
 def test_smart_venue_blank_insertion_uses_difference(monkeypatch):
