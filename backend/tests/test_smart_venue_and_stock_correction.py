@@ -12,6 +12,29 @@ os.environ.setdefault("DB_NAME", "gestionale_test")
 import backend.server as server
 
 
+def test_bulk_text_parser_groups_multiple_barcodes_by_adm_code():
+    text = (
+        "4033100045844 - BENSON BLUE - 02982 - Sigarette\n"
+        "5.30\n2\n10.60\n"
+        "80919599 - BENSON BLUE AST20 - 02982 - Sigarette\n"
+        "5.30\n3\n15.90\n"
+    )
+
+    parsed = server._parse_smart_venue_bulk_text(text)
+
+    assert parsed["errori"] == []
+    assert parsed["record"] == 2
+    assert parsed["righe"] == [{
+        "codice": "AMMS2982",
+        "descrizione": "BENSON BLUE",
+        "categoria": "Sigarette",
+        "smart_venue": 5,
+        "barcodes": ["4033100045844", "80919599"],
+        "righe_sorgente": [1, 2],
+        "avvisi": [],
+    }]
+
+
 class FakeCursor:
     def __init__(self, documents):
         self.documents = documents
@@ -102,10 +125,10 @@ def test_smart_venue_uses_product_acquired_and_stock_with_excel_smart_value(monk
     assert rows[0]["codice"] == "P1"
     assert rows[0]["descrizione"] == "Descrizione Excel"
     assert rows[0]["acquistati"] == 10
-    assert rows[0]["rimanenze"] == 29
+    assert rows[0]["rimanenze"] == 25
     assert rows[0]["smart_venue"] == 43
     assert rows[0]["barcode"] == "0012345"
-    assert rows[0]["differenza"] == 14
+    assert rows[0]["differenza"] == 18
 
 
 def test_smart_venue_import_uses_column_f_and_preserves_manual_rows(monkeypatch):
@@ -161,9 +184,9 @@ def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):
     assert smart_row["origine"] == "MANUALE"
     assert smart_row["barcode"] == "00998877"
     assert response["barcode"] == "00998877"
-    assert response["rimanenze"] == 5
+    assert response["rimanenze"] == 3
     assert response["smart_venue"] == 8
-    assert response["differenza"] == 3
+    assert response["differenza"] == 5
 
 
 def test_smart_venue_blank_insertion_uses_difference(monkeypatch):
@@ -182,10 +205,10 @@ def test_smart_venue_blank_insertion_uses_difference(monkeypatch):
 
     confirmed, stored = asyncio.run(seed_and_confirm())
 
-    assert confirmed["inserimento_smart_venue"] == 4
-    assert confirmed["smart_venue"] == 10
+    assert confirmed["inserimento_smart_venue"] == 7
+    assert confirmed["smart_venue"] == 7
     assert confirmed["differenza"] == 0
-    assert stored["smart_venue"] == 10
+    assert stored["smart_venue"] == 7
 
 
 def test_smart_venue_barcode_can_be_edited_and_cleared(monkeypatch):
@@ -229,7 +252,7 @@ def test_smart_venue_manual_insertion_decreases_smart_value(monkeypatch):
 
     assert confirmed["inserimento_smart_venue"] == 3
     assert confirmed["smart_venue"] == 17
-    assert confirmed["differenza"] == 7
+    assert confirmed["differenza"] == 10
 
 
 def test_manual_vending_stock_correction_updates_product_total_without_shop_movement(monkeypatch):

@@ -13,7 +13,7 @@ export default function Prodotti() {
   const [cat, setCat] = useState("");
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" });
+  const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "" });
 
   const filtered = cat ? allRows.filter(r => r.categoria === cat) : allRows;
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(filtered, {
@@ -40,13 +40,12 @@ export default function Prodotti() {
         ...form,
         prezzo: parseFloat(form.prezzo) || 0,
         giacenza_negozio: parseInt(form.giacenza_negozio) || 0,
-        giacenza_vending: parseInt(form.giacenza_vending) || 0,
       };
       if (editing) await api.put(`/prodotti/${editing}`, payload);
       else await api.post("/prodotti", payload);
       toast.success(editing ? "Prodotto aggiornato" : "Prodotto creato");
       setEditing(null);
-      setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" });
+      setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "" });
       load();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Errore salvataggio prodotto"));
@@ -66,7 +65,7 @@ export default function Prodotti() {
 
   const startEdit = (r) => {
     setEditing(r.id);
-    setForm({ codice: r.codice, descrizione: r.descrizione, categoria: r.categoria, prezzo: String(r.prezzo ?? ""), giacenza_negozio: String(r.giacenza_negozio ?? ""), giacenza_vending: String(r.giacenza_vending ?? "") });
+    setForm({ codice: r.codice, descrizione: r.descrizione, categoria: r.categoria, prezzo: String(r.prezzo ?? ""), giacenza_negozio: String(r.giacenza_negozio ?? "") });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -82,12 +81,12 @@ export default function Prodotti() {
           <input data-testid="prod-form-prezzo" type="number" step="0.01" placeholder="Prezzo" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.prezzo} onChange={e => setForm({...form, prezzo: e.target.value})} />
           <div className="flex gap-2 col-span-2 md:col-span-1">
             <button data-testid="prod-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-slate-800 transition-colors flex-1">{editing ? "Aggiorna" : "Aggiungi"}</button>
-            {editing && <button onClick={() => { setEditing(null); setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "", giacenza_vending: "" }); }} className="border rounded-md px-3 text-sm">✕</button>}
+            {editing && <button onClick={() => { setEditing(null); setForm({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "" }); }} className="border rounded-md px-3 text-sm">✕</button>}
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-3 mt-3 md:max-w-md">
+        <div className="mt-3 md:max-w-md">
           <input type="number" placeholder="Giacenza negozio" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.giacenza_negozio} onChange={e => setForm({...form, giacenza_negozio: e.target.value})} />
-          <input type="number" placeholder="Giacenza vending" className="border rounded-md px-3 py-2 text-sm font-mono" value={form.giacenza_vending} onChange={e => setForm({...form, giacenza_vending: e.target.value})} />
+          <p className="mt-2 text-xs text-slate-500">La giacenza vending è calcolata automaticamente dalla somma delle colonne Vending.</p>
         </div>
       </Card>
 

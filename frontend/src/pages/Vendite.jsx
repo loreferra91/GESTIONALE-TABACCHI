@@ -33,7 +33,8 @@ export default function Vendite() {
   const [rows, setRows] = useState([]);
   const [giorno, setGiorno] = useState(new Date().toISOString().slice(0, 10));
   const today = new Date().toISOString().slice(0, 10);
-  const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 1, importo: 0, canale: "NEGOZIO", pagamento: "CONTANTI" });
+  const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 1, importo: 0, canale: "NEGOZIO", pagamento: "CONTANTI", colonna: "" });
+  const [vendingColumns, setVendingColumns] = useState([]);
   const [tab, setTab] = useState("manuale"); // manuale | bulk | csv
   const [bulkText, setBulkText] = useState("");
   const [bulkCanale, setBulkCanale] = useState("NEGOZIO");
@@ -63,6 +64,7 @@ export default function Vendite() {
       (r.data || []).forEach(p => m.set(p.codice, p));
       setProdMap(m);
     });
+    api.get("/vending").then(r => setVendingColumns(r.data || []));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = useCallback(async () => {
@@ -107,10 +109,11 @@ export default function Vendite() {
   const save = async () => {
     if (manualUndoing) return;
     if (!form.codice || !form.importo) { toast.error("Compila codice e importo"); return; }
+    if (form.canale === "VENDING" && !form.colonna) { toast.error("Seleziona la colonna Vending"); return; }
     const r = await api.post("/vendite", form);
     setLastManualSale(r.data);
     toast.success("Vendita registrata");
-    setForm({ ...form, codice: "", descrizione: "", quantita: 1, importo: 0 });
+    setForm({ ...form, codice: "", descrizione: "", quantita: 1, importo: 0, colonna: "" });
     await load();
   };
 
@@ -365,13 +368,36 @@ export default function Vendite() {
           <input data-testid="vend-importo" type="number" step="0.01" placeholder="Importo €" value={form.importo} onChange={e => setForm({...form, importo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <button data-testid="vend-save-btn" onClick={save} disabled={manualUndoing} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-60 col-span-2 md:col-span-1">Registra</button>
         </div>
-        <div className="grid grid-cols-2 gap-3 mt-3 md:max-w-md">
-          <select data-testid="vend-canale" value={form.canale} onChange={e => setForm({...form, canale: e.target.value})} className="border rounded-md px-3 py-2 text-sm">
+        <div className="mt-3 grid grid-cols-2 gap-3 md:max-w-2xl">
+          <select data-testid="vend-canale" value={form.canale} onChange={e => setForm({...form, canale: e.target.value, colonna: e.target.value === "VENDING" ? form.colonna : ""})} className="border rounded-md px-3 py-2 text-sm">
             <option>NEGOZIO</option><option>VENDING</option>
           </select>
           <select data-testid="vend-pagamento" value={form.pagamento} onChange={e => setForm({...form, pagamento: e.target.value})} className="border rounded-md px-3 py-2 text-sm">
-            <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
+            <option>CONTANTI</option><option>CARTE</option><option>PAGOBANCOMAT</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
           </select>
+          {form.canale === "VENDING" && (
+            <select
+              data-testid="vend-colonna"
+              value={form.colonna}
+              onChange={e => {
+                const column = vendingColumns.find(item => item.colonna === e.target.value);
+                setForm(current => ({
+                  ...current,
+                  colonna: e.target.value,
+                  codice: column?.codice || current.codice,
+                  descrizione: column?.descrizione || current.descrizione,
+                }));
+              }}
+              className="col-span-2 rounded-md border px-3 py-2 text-sm"
+            >
+              <option value="">Seleziona colonna Vending…</option>
+              {vendingColumns.map(column => (
+                <option key={column.id} value={column.colonna}>
+                  {column.colonna} · {column.codice} · {column.descrizione} ({column.giacenza} pz)
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <UndoLastPanel
           testId="manual-last-sale"
@@ -403,7 +429,7 @@ export default function Vendite() {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
           <input data-testid="bulk-data" type="date" value={bulkData} onChange={e => setBulkData(e.target.value)} className="border rounded-md px-3 py-2 text-sm" />
           <select data-testid="bulk-canale" value={bulkCanale} onChange={e => setBulkCanale(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
-            <option>NEGOZIO</option><option>VENDING</option>
+            <option>NEGOZIO</option>
           </select>
           <select data-testid="bulk-pagamento" value={bulkPagamento} onChange={e => setBulkPagamento(e.target.value)} className="border rounded-md px-3 py-2 text-sm">
             <option>CONTANTI</option><option>POS</option><option>SATISPAY</option><option>ALTRO</option>
@@ -578,7 +604,9 @@ export default function Vendite() {
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
               <span className="font-bold uppercase tracking-wider text-slate-500">Pagamenti rilevati</span>
               {Object.entries(csvPreview.pagamenti || {}).map(([payment, count]) => (
-                <Badge key={payment} tone={payment === "CONTANTI" ? "ok" : "info"}>{payment}: {formatNum(count)}</Badge>
+                <Badge key={payment} tone={payment === "CONTANTI" ? "ok" : "info"}>
+                  {payment}: {formatNum(count)} · {formatEur(csvPreview.importi_pagamenti?.[payment] || 0)}
+                </Badge>
               ))}
             </div>
             {csvPreview.vendite?.length > 0 && (
@@ -623,7 +651,11 @@ export default function Vendite() {
           <div className="mt-3 text-sm bg-slate-50 border border-slate-200 rounded-md p-3">
             <span className="font-bold text-emerald-700">{csvResult.inseriti}</span> righe · saltate {csvResult.saltati} · delimitatore <code>{csvResult.delimitatore}</code>
             <div className="mt-2 flex flex-wrap gap-2">
-              {Object.entries(csvResult.pagamenti || {}).map(([payment, count]) => <Badge key={payment} tone="info">{payment}: {formatNum(count)}</Badge>)}
+              {Object.entries(csvResult.pagamenti || {}).map(([payment, count]) => (
+                <Badge key={payment} tone="info">
+                  {payment}: {formatNum(count)} · {formatEur(csvResult.importi_pagamenti?.[payment] || 0)}
+                </Badge>
+              ))}
             </div>
             {csvResult.errori?.length > 0 && (
               <details className="mt-2"><summary className="text-red-600 cursor-pointer">Errori ({csvResult.errori.length})</summary>

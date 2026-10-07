@@ -87,18 +87,28 @@ export default function Contabilita() {
           {refreshing ? "Aggiornamento…" : "Aggiorna saldi"}
         </button>
       </div>
-      <section className="grid grid-cols-1 gap-5 lg:grid-cols-3" aria-label="Saldi vending">
+      <section className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4" aria-label="Incassi vending per pagamento">
         <BalanceCard label="Saldo vending" value={balances.saldoVendingTotale} testId="saldo-vending-totale" />
         <BalanceCard
-          label="Giacenza vending"
+          label="Vendite con Carte"
+          value={balances.venditeVendingCarte}
+          testId="vendite-vending-carte"
+        />
+        <BalanceCard
+          label="Vendite con PagoBancomat"
+          value={balances.venditeVendingPagoBancomat}
+          testId="vendite-vending-pagobancomat"
+        />
+        <BalanceCard label="Totale pagamenti elettronici" value={balances.saldoVendingElettronico} testId="saldo-vending-elettronico" />
+      </section>
+
+      <section className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2 xl:grid-cols-5" aria-label="Riconciliazione contabile">
+        <BalanceCard
+          label="Giacenza contanti nella vending"
           value={giacenzaVending}
           tone={giacenzaVending < 0 ? "negative" : "default"}
           testId="giacenza-vending"
         />
-        <BalanceCard label="Saldo vending bancomat / pagamenti elettronici" value={balances.saldoVendingElettronico} testId="saldo-vending-elettronico" />
-      </section>
-
-      <section className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2 xl:grid-cols-4" aria-label="Riconciliazione contabile">
         <BalanceCard
           label="Prelievo da vending"
           value={prelievoVending}

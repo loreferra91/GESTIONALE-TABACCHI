@@ -80,6 +80,9 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
         "saldoCassaNegozioEVending": 1500.0,
         "saldoVendingContanti": 1225.0,
         "saldoVendingElettronico": 310.0,
+        "venditeVendingCarte": 250.5,
+        "venditeVendingPagoBancomat": 49.5,
+        "venditeVendingAltroElettronico": 10.0,
         "saldoCassa": 1500.0,
         "totalePrelievi": 0.0,
         "differenzaCassaVendingContanti": 1500.0,
@@ -173,9 +176,23 @@ def test_empty_legacy_payment_uses_cash_default_without_losing_unknown_methods()
     assert result["saldoVendingTotale"] == 18.0
     assert result["saldoVendingContanti"] == 15.0
     assert result["saldoVendingElettronico"] == 3.0
+    assert result["venditeVendingCarte"] == 0
+    assert result["venditeVendingPagoBancomat"] == 0
+    assert result["venditeVendingAltroElettronico"] == 3.0
     assert result["saldoVendingTotale"] == (
         result["saldoVendingContanti"] + result["saldoVendingElettronico"]
     )
+
+
+def test_separates_cards_and_pagobancomat_while_preserving_electronic_total():
+    result = server._calculate_dashboard_balances(
+        [(10, "Carte"), (20, "PagoBancomat"), (3, "POS"), (5, "Contanti")], 0
+    )
+
+    assert result["venditeVendingCarte"] == 10
+    assert result["venditeVendingPagoBancomat"] == 20
+    assert result["venditeVendingAltroElettronico"] == 3
+    assert result["saldoVendingElettronico"] == 33
 
 
 def test_vending_sales_do_not_change_combined_cash_balance():

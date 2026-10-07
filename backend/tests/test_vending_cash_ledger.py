@@ -56,7 +56,7 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
             "giacenza_vending": 10,
             "venduti_vending": 0,
         })
-        await database.vending.insert_one({"id": "column-1", "colonna": "B02", "giacenza": 5})
+        await database.vending.insert_one({"id": "column-1", "colonna": "B02", "codice": "AMMS1001", "giacenza": 5})
         upload = UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
         imported = await server.import_csv_vending(upload)
         product_after_import = await database.prodotti.find_one({"id": "product-1"}, {"_id": 0})
@@ -80,14 +80,14 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
 
     assert imported["inseriti"] == 1
     assert imported["batch_id"]
-    assert product_after_import["giacenza_vending"] == 9
+    assert product_after_import["giacenza_vending"] == 4
     assert product_after_import["venduti_vending"] == 1
     assert column_after_import["giacenza"] == 4
     assert cash_after_import == 105.8
     assert latest["id"] == imported["batch_id"]
     assert undone["rimossi"] == 1
     assert undone["contanti_rimossi_giacenza"] == 5.8
-    assert product_after_undo["giacenza_vending"] == 10
+    assert product_after_undo["giacenza_vending"] == 5
     assert product_after_undo["venduti_vending"] == 0
     assert column_after_undo["giacenza"] == 5
     assert cash_after_undo == 100

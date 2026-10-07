@@ -173,6 +173,7 @@ class VenditaGiornaliera(BaseModel):
     importo: float = 0
     canale: str = "NEGOZIO"  # NEGOZIO / VENDING
     pagamento: str = "CONTANTI"
+    colonna: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     sorgente: str = "MANUALE"
     batch_id: Optional[str] = None
@@ -187,6 +188,11 @@ class VenditaIn(BaseModel):
     importo: float = 0
     canale: str = "NEGOZIO"
     pagamento: str = "CONTANTI"
+    colonna: Optional[str] = None
+
+
+class SmartVenueBulkIn(BaseModel):
+    testo: str
 
 
 class OrdineStorico(BaseModel):
@@ -494,6 +500,9 @@ async def on_start():
         products_restored = await restore_canonical_product_snapshots()
         if products_restored:
             logging.info("Restored %s canonical ADM product snapshots", products_restored)
+        products_reconciled = await reconcile_all_vending_stock()
+        if products_reconciled:
+            logging.info("Reconciled %s product vending stock caches", products_reconciled)
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
@@ -676,6 +685,36 @@ def _canonical_product_code(code: Any, description: Any, aliases: Dict[str, List
     return raw
 
 
+async def _vending_stock_by_code() -> Optional[Dict[str, int]]:
+    """Return the physical vending stock grouped by product code.
+
+    The vending columns are the sole source of truth for vending quantities.
+    Product documents retain a synchronized cache for backwards compatibility,
+    but every operational read uses this aggregation.
+    """
+    # Alcuni test unitari isolano soltanto le collezioni coinvolte. In quel
+    # contesto manteniamo il valore cache del prodotto; nell'app reale la
+    # collezione Vending è sempre disponibile, anche quando è vuota.
+    if not hasattr(db, "vending"):
+        return None
+    rows = await db.vending.find({}, {"_id": 0, "codice": 1, "giacenza": 1}).to_list(5000)
+    totals: Dict[str, int] = {}
+    for row in rows:
+        code = str(row.get("codice") or "").strip()
+        if not code:
+            continue
+        totals[code] = totals.get(code, 0) + max(0, int(row.get("giacenza", 0) or 0))
+    return totals
+
+
+def _apply_vending_stock(products: List[Dict[str, Any]], totals: Optional[Dict[str, int]]) -> List[Dict[str, Any]]:
+    if totals is None:
+        return products
+    for product in products:
+        product["giacenza_vending"] = totals.get(str(product.get("codice") or ""), 0)
+    return products
+
+
 async def _remap_code_references(old_code: str, new_code: str) -> None:
     for collection_name in ("vendite", "db_storico_vend", "storico_ordini", "vending", "ordini_fornitore_righe"):
         await db[collection_name].update_many({"codice": old_code}, {"$set": {"codice": new_code}})
@@ -771,6 +810,39 @@ async def restore_canonical_product_snapshots() -> int:
     return restored
 
 
+async def reconcile_all_vending_stock() -> int:
+    """One-time migration: make every cached product total match Vending."""
+    migration_id = "vending-columns-authoritative-v1"
+    if await db.app_migrations.find_one({"id": migration_id}):
+        return 0
+    products = await db.prodotti.find({}, {"_id": 0, "codice": 1, "giacenza_vending": 1}).to_list(MAX_LIMIT)
+    if not products:
+        return 0
+    backup = await create_backup_snapshot(
+        "Prima riconciliazione completa giacenze Vending",
+        "vending-fonte-unica",
+    )
+    totals = await _vending_stock_by_code() or {}
+    changed = 0
+    for product in products:
+        code = str(product.get("codice") or "")
+        authoritative = totals.get(code, 0)
+        if int(product.get("giacenza_vending", 0) or 0) == authoritative:
+            continue
+        result = await db.prodotti.update_one(
+            {"codice": code},
+            {"$set": {"giacenza_vending": authoritative}},
+        )
+        changed += int(result.modified_count or 0)
+    await db.app_migrations.insert_one({
+        "id": migration_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "backup_id": backup["id"],
+        "prodotti_riconciliati": changed,
+    })
+    return changed
+
+
 def parse_italian_money(value: Any) -> float:
     text = str(value or "").strip().replace(".", "").replace(",", ".")
     text = re.sub(r"[^0-9.\-]", "", text)
@@ -789,8 +861,11 @@ async def list_prodotti(q: Optional[str] = None, categoria: Optional[str] = None
         rx = _q_regex(q)
         filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
     capped_limit = _cap(limit)
-    docs = await db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).limit(capped_limit).to_list(capped_limit)
-    return docs
+    docs, vending_totals = await asyncio.gather(
+        db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).limit(capped_limit).to_list(capped_limit),
+        _vending_stock_by_code(),
+    )
+    return _apply_vending_stock(docs, vending_totals)
 
 
 async def _canonical_manual_product_payload(p: ProdottoIn) -> Dict[str, Any]:
@@ -808,6 +883,8 @@ async def _canonical_manual_product_payload(p: ProdottoIn) -> Dict[str, Any]:
 @api.post("/prodotti")
 async def create_prodotto(p: ProdottoIn):
     payload = await _canonical_manual_product_payload(p)
+    # La quantità vending si modifica esclusivamente nelle colonne Vending.
+    payload["giacenza_vending"] = 0
     if await db.prodotti.find_one({"codice": payload["codice"]}):
         raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
     prod = Prodotto(**payload)
@@ -818,6 +895,8 @@ async def create_prodotto(p: ProdottoIn):
 @api.put("/prodotti/{prod_id}")
 async def update_prodotto(prod_id: str, p: ProdottoIn):
     payload = await _canonical_manual_product_payload(p)
+    # Non accettare copie manuali della giacenza vending nell'anagrafica.
+    payload.pop("giacenza_vending", None)
     collision = await db.prodotti.find_one({"codice": payload["codice"], "id": {"$ne": prod_id}})
     if collision:
         raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
@@ -825,6 +904,8 @@ async def update_prodotto(prod_id: str, p: ProdottoIn):
     if r.matched_count == 0:
         raise HTTPException(404, "not found")
     doc = await db.prodotti.find_one({"id": prod_id}, {"_id": 0})
+    vending_totals = await _vending_stock_by_code() or {}
+    doc["giacenza_vending"] = vending_totals.get(str(doc.get("codice") or ""), 0)
     return doc
 
 
@@ -1048,14 +1129,35 @@ async def list_vendite(giorno: Optional[str] = None, limit: int = 500):
 
 @api.post("/vendite")
 async def add_vendita(v: VenditaIn):
-    vv = VenditaGiornaliera(**v.model_dump())
-    # aggiorna giacenze del prodotto
+    payload = v.model_dump()
+    if str(v.canale or "").upper() == "VENDING":
+        column_code = _normalize_vending_column(v.colonna)
+        if not column_code:
+            raise HTTPException(422, "Per una vendita Vending devi indicare la colonna")
+        column = await db.vending.find_one({"colonna": column_code, "codice": v.codice})
+        if not column:
+            raise HTTPException(422, "La colonna Vending non contiene il prodotto indicato")
+        current_stock = int(column.get("giacenza", 0) or 0)
+        if v.quantita <= 0 or current_stock < v.quantita:
+            raise HTTPException(409, f"Giacenza insufficiente nella colonna {column_code}")
+        result = await db.vending.update_one(
+            {"id": column["id"], "giacenza": column.get("giacenza", 0)},
+            {"$inc": {"giacenza": -v.quantita}},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(409, "La colonna è cambiata nel frattempo")
+        payload["colonna"] = column_code
+    vv = VenditaGiornaliera(**payload)
     prod = await db.prodotti.find_one({"codice": v.codice})
     if prod:
         vv.descrizione = vv.descrizione or prod.get("descrizione", "")
-        field = "giacenza_vending" if v.canale == "VENDING" else "giacenza_negozio"
         vend_field = "venduti_vending" if v.canale == "VENDING" else "venduti_negozio"
-        await db.prodotti.update_one({"codice": v.codice}, {"$inc": {field: -v.quantita, vend_field: v.quantita}})
+        increments = {vend_field: v.quantita}
+        if v.canale != "VENDING":
+            increments["giacenza_negozio"] = -v.quantita
+        await db.prodotti.update_one({"codice": v.codice}, {"$inc": increments})
+        if v.canale == "VENDING":
+            await _sync_product_vending_stock(v.codice)
     await db.vendite.insert_one(vv.model_dump())
     return vv.model_dump()
 
@@ -1064,9 +1166,16 @@ async def add_vendita(v: VenditaIn):
 async def del_vendita(v_id: str):
     v = await db.vendite.find_one({"id": v_id})
     if v:
-        field = "giacenza_vending" if v.get("canale") == "VENDING" else "giacenza_negozio"
         vend_field = "venduti_vending" if v.get("canale") == "VENDING" else "venduti_negozio"
-        await db.prodotti.update_one({"codice": v["codice"]}, {"$inc": {field: v["quantita"], vend_field: -v["quantita"]}})
+        increments = {vend_field: -v["quantita"]}
+        if v.get("canale") == "VENDING":
+            column_code = _normalize_vending_column(v.get("colonna"))
+            if column_code:
+                await db.vending.update_one({"colonna": column_code, "codice": v["codice"]}, {"$inc": {"giacenza": v["quantita"]}})
+                await _sync_product_vending_stock(v["codice"])
+        else:
+            increments["giacenza_negozio"] = v["quantita"]
+        await db.prodotti.update_one({"codice": v["codice"]}, {"$inc": increments})
     await db.vendite.delete_one({"id": v_id})
     return {"ok": True}
 
@@ -1086,20 +1195,37 @@ async def annulla_vendita_manuale(sale_id: str):
     sale = await db.vendite.find_one({"id": sale_id, "sorgente": "MANUALE"}, {"_id": 0})
     if not sale:
         raise HTTPException(404, "Vendita manuale non trovata o già annullata")
-    field = "giacenza_vending" if sale.get("canale") == "VENDING" else "giacenza_negozio"
     vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
     quantity = int(sale.get("quantita") or 0)
+    increments = {vend_field: -quantity}
+    if sale.get("canale") == "VENDING":
+        column_code = _normalize_vending_column(sale.get("colonna"))
+        if not column_code:
+            raise HTTPException(409, "Vendita Vending senza colonna: annullamento manuale richiesto")
+        await db.vending.update_one(
+            {"colonna": column_code, "codice": sale.get("codice")},
+            {"$inc": {"giacenza": quantity}},
+        )
+        await _sync_product_vending_stock(str(sale.get("codice") or ""))
+    else:
+        increments["giacenza_negozio"] = quantity
     stock_update = await db.prodotti.update_one(
         {"codice": sale.get("codice")},
-        {"$inc": {field: quantity, vend_field: -quantity}},
+        {"$inc": increments},
     )
     deletion = await db.vendite.delete_one({"id": sale_id, "sorgente": "MANUALE"})
     if deletion.deleted_count != 1:
         if stock_update.modified_count == 1:
-            await db.prodotti.update_one(
-                {"codice": sale.get("codice")},
-                {"$inc": {field: -quantity, vend_field: quantity}},
+            rollback = {vend_field: quantity}
+            if sale.get("canale") != "VENDING":
+                rollback["giacenza_negozio"] = -quantity
+            await db.prodotti.update_one({"codice": sale.get("codice")}, {"$inc": rollback})
+        if sale.get("canale") == "VENDING":
+            await db.vending.update_one(
+                {"colonna": column_code, "codice": sale.get("codice")},
+                {"$inc": {"giacenza": -quantity}},
             )
+            await _sync_product_vending_stock(str(sale.get("codice") or ""))
         raise HTTPException(409, "La vendita è cambiata durante l'annullamento")
     return {"ok": True, "rimossi": 1, "id": sale_id}
 
@@ -1113,6 +1239,8 @@ class BulkVenditaIn(BaseModel):
 @api.post("/vendite/bulk")
 async def bulk_vendite(body: BulkVenditaIn):
     """Bulk paste da Excel: rows with data, codice, descrizione, quantita, importo."""
+    if str(body.canale or "").upper() == "VENDING":
+        raise HTTPException(422, "Per le vendite Vending usa il CSV distributore, che identifica la colonna reale")
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
     inserted = 0
@@ -1521,10 +1649,14 @@ async def global_search(q: str, limit: int = 8):
         return {"items": []}
     capped = max(1, min(int(limit or 8), 20))
     rx = _q_regex(text)
-    products = await db.prodotti.find(
-        {"$or": [{"codice": rx}, {"descrizione": rx}]},
-        {"_id": 0},
-    ).sort("codice", 1).limit(capped).to_list(capped)
+    products, vending_totals = await asyncio.gather(
+        db.prodotti.find(
+            {"$or": [{"codice": rx}, {"descrizione": rx}]},
+            {"_id": 0},
+        ).sort("codice", 1).limit(capped).to_list(capped),
+        _vending_stock_by_code(),
+    )
+    _apply_vending_stock(products, vending_totals)
     items = [
         {
             "type": "prodotto",
@@ -1815,10 +1947,12 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
     raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
     payment_counts: Dict[str, int] = {}
+    payment_amounts: Dict[str, float] = {}
     total = 0.0
     for row in parsed["righe"]:
         method = row["pagamento"]
         payment_counts[method] = payment_counts.get(method, 0) + 1
+        payment_amounts[method] = round(payment_amounts.get(method, 0) + row["prezzo"], 2)
         total += row["prezzo"]
     dates = [row["data"][:10] for row in parsed["righe"]]
     return {
@@ -1827,6 +1961,7 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
         "errori": parsed["errori"],
         "delimitatore": parsed["delimitatore"],
         "pagamenti": payment_counts,
+        "importi_pagamenti": payment_amounts,
         "totale": round(total, 2),
         "data_da": min(dates, default=None),
         "data_a": max(dates, default=None),
@@ -1848,6 +1983,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
     imported_cash = 0.0
     errors = list(parsed["errori"])
     payment_counts: Dict[str, int] = {}
+    payment_amounts: Dict[str, float] = {}
     for csv_row in parsed["righe"]:
         undo_meta: Dict[str, Any] = {}
         codice = ""
@@ -1883,6 +2019,10 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             if colonna:
                 col = await db.vending.find_one({"colonna": colonna})
                 if col:
+                    if codice and col.get("codice") and str(col.get("codice")) != codice:
+                        raise ValueError(
+                            f"colonna {colonna} associata a {col.get('codice')}, CSV indica {codice}"
+                        )
                     old_g = int(col.get("giacenza") or 0)
                     new_g = max(0, old_g - 1)
                     await db.vending.update_one({"id": col["id"]}, {"$set": {"giacenza": new_g}})
@@ -1891,8 +2031,10 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             # aggiorna prodotto
             prod = prod or await db.prodotti.find_one({"codice": codice})
             if prod:
-                await db.prodotti.update_one({"codice": codice}, {"$inc": {"giacenza_vending": -1, "venduti_vending": 1}})
+                await db.prodotti.update_one({"codice": codice}, {"$inc": {"venduti_vending": 1}})
                 undo_meta["product_stock_adjusted"] = True
+                if colonna:
+                    await _sync_product_vending_stock(codice)
             else:
                 # crea prodotto minimale
                 product_doc = Prodotto(
@@ -1914,13 +2056,14 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             await db.vendite.insert_one(v.model_dump())
             inserted += 1
             payment_counts[pag] = payment_counts.get(pag, 0) + 1
+            payment_amounts[pag] = round(payment_amounts.get(pag, 0) + prezzo_f, 2)
             if _is_cash_payment(pag):
                 imported_cash += prezzo_f
         except Exception as exc:
             if undo_meta.get("product_stock_adjusted"):
                 await db.prodotti.update_one(
                     {"codice": codice},
-                    {"$inc": {"giacenza_vending": 1, "venduti_vending": -1}},
+                    {"$inc": {"venduti_vending": -1}},
                 )
             elif undo_meta.get("product_created"):
                 await db.prodotti.delete_one({"id": undo_meta.get("product_id"), "created_from_csv_batch": batch_id})
@@ -1929,6 +2072,8 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                     {"id": undo_meta.get("vending_column_id")},
                     {"$inc": {"giacenza": 1}},
                 )
+            if codice:
+                await _sync_product_vending_stock(codice)
             errors.append({"riga": csv_row["riga"], "errore": str(exc)})
     if imported_cash:
         await _adjust_vending_cash_balance(imported_cash)
@@ -1949,6 +2094,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
         "errori": errors,
         "delimitatore": parsed["delimitatore"],
         "pagamenti": payment_counts,
+        "importi_pagamenti": payment_amounts,
         "contanti_aggiunti_giacenza": round(imported_cash, 2),
         "righe_file": file_rows,
         "righe_gia_presenti": file_rows - len(parsed["righe"]),
@@ -1992,7 +2138,7 @@ async def annulla_csv_vending(batch_id: str):
             if undo_meta.get("product_stock_adjusted"):
                 await db.prodotti.update_one(
                     {"codice": codice},
-                    {"$inc": {"giacenza_vending": 1, "venduti_vending": -1}},
+                    {"$inc": {"venduti_vending": -1}},
                 )
             elif undo_meta.get("product_created"):
                 product = await db.prodotti.find_one({"id": undo_meta.get("product_id")})
@@ -2015,6 +2161,8 @@ async def annulla_csv_vending(batch_id: str):
                     {"id": undo_meta.get("vending_column_id")},
                     {"$inc": {"giacenza": 1}},
                 )
+            if codice:
+                await _sync_product_vending_stock(str(codice))
             if _is_cash_payment(sale.get("pagamento")):
                 cash_to_restore += float(sale.get("importo") or 0)
             deletion = await db.vendite.delete_one({"id": sale.get("id"), "batch_id": batch_id})
@@ -2891,6 +3039,7 @@ async def auto_order():
         vendite_importate_breve,
         vendite_importate_lunga,
         storico_ordini,
+        vending_totals,
     ) = await asyncio.gather(
         db.prodotti.find({}, {"_id": 0}).to_list(5000),
         db.vendite.aggregate(pipeline_breve).to_list(5000),
@@ -2898,7 +3047,9 @@ async def auto_order():
         db.db_storico_vend.aggregate(pipeline_breve).to_list(5000),
         db.db_storico_vend.aggregate(pipeline_lunga).to_list(5000),
         db.storico_ordini.aggregate(storico_pipeline).to_list(5000),
+        _vending_stock_by_code(),
     )
+    _apply_vending_stock(prodotti, vending_totals)
 
     def totals(rows: List[Dict[str, Any]]) -> Dict[str, int]:
         return {r["_id"]: int(r.get("tot", 0) or 0) for r in rows if r.get("_id") is not None}
@@ -3405,8 +3556,12 @@ async def prodotti_top(limit: int = 40):
 # ------------------------- Pivot magazzino -------------------------
 @api.get("/pivot")
 async def pivot():
-    prods = await db.prodotti.find({"presente_ultimo_import": {"$ne": False}}, {"_id": 0}).to_list(5000)
-    params = await get_params()
+    prods, params, vending_totals = await asyncio.gather(
+        db.prodotti.find({"presente_ultimo_import": {"$ne": False}}, {"_id": 0}).to_list(5000),
+        get_params(),
+        _vending_stock_by_code(),
+    )
+    _apply_vending_stock(prods, vending_totals)
     divisor = params.get("VENDITE_GIORNALIERE_MESE", 6.5)
     aggio = params.get("AGGIO_PCT", 0.10)
     cost_factor = max(0.0, 1.0 - aggio)  # costo acquisto = prezzo * cost_factor
@@ -3531,6 +3686,18 @@ def _is_cash_payment(payment_method: Any) -> bool:
     return not normalized or "CONTANT" in normalized
 
 
+def _vending_payment_bucket(payment_method: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(payment_method or "")).encode("ascii", "ignore").decode().upper()
+    normalized = re.sub(r"[^A-Z0-9]+", "", normalized)
+    if not normalized or "CONTANT" in normalized:
+        return "CONTANTI"
+    if "PAGOBANCOMAT" in normalized or normalized in {"BANCOMAT", "PAGOBANCO"}:
+        return "PAGOBANCOMAT"
+    if "CART" in normalized:
+        return "CARTE"
+    return "ALTRO_ELETTRONICO"
+
+
 def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -> List[tuple]:
     """Estrae importo e pagamento dalle due sorgenti vending compatibili."""
     values = []
@@ -3587,17 +3754,25 @@ def _calculate_dashboard_balances(
     aumentare la disponibilità combinata di negozio e vending.
     """
     cash = 0.0
-    electronic = 0.0
+    cards = 0.0
+    pagobancomat = 0.0
+    other_electronic = 0.0
     for amount, payment_method in vending_payments:
-        if _is_cash_payment(payment_method):
+        bucket = _vending_payment_bucket(payment_method)
+        if bucket == "CONTANTI":
             cash += amount
+        elif bucket == "CARTE":
+            cards += amount
+        elif bucket == "PAGOBANCOMAT":
+            pagobancomat += amount
         else:
-            # Il modello prevede due soli bucket: ogni metodo non-contante
-            # valorizzato (Carte, PagoBancomat, POS, ecc.) resta elettronico.
-            # I valori legacy vuoti seguono il default storico CONTANTI dell'app.
-            electronic += amount
+            other_electronic += amount
 
     cash = round(cash, 2)
+    cards = round(cards, 2)
+    pagobancomat = round(pagobancomat, 2)
+    other_electronic = round(other_electronic, 2)
+    electronic = round(cards + pagobancomat + other_electronic, 2)
     electronic = round(electronic, 2)
     total = round(cash + electronic, 2)
     saldo_cassa = round(float(saldo_cassa or 0), 2)
@@ -3621,6 +3796,9 @@ def _calculate_dashboard_balances(
         # Alias mantenuti per compatibilità con client meno recenti.
         "saldoVendingContanti": cash,
         "saldoVendingElettronico": electronic,
+        "venditeVendingCarte": cards,
+        "venditeVendingPagoBancomat": pagobancomat,
+        "venditeVendingAltroElettronico": other_electronic,
         "saldoCassa": saldo_cassa,
         "totalePrelievi": prelievo_vending,
         "differenzaCassaVendingContanti": saldo_casse,
@@ -4178,6 +4356,179 @@ async def _import_smart_venue(ws) -> Dict[str, int]:
     return {"inseriti": len(rows_by_code), "aggiornati": 0, "errori": errors}
 
 
+def _parse_smart_venue_bulk_text(text: str) -> Dict[str, Any]:
+    """Parse the four-line copy format exported by the SmartVenue website."""
+    lines = [line.strip() for line in str(text or "").replace("\r", "").split("\n") if line.strip()]
+    errors: List[Dict[str, Any]] = []
+    grouped: Dict[str, Dict[str, Any]] = {}
+    if not lines:
+        return {"righe": [], "errori": [{"riga": 1, "errore": "Nessun dato incollato"}], "record": 0}
+    if len(lines) % 4:
+        errors.append({
+            "riga": len(lines) - (len(lines) % 4) + 1,
+            "errore": "Il testo deve contenere blocchi completi di 4 righe",
+        })
+
+    for start in range(0, len(lines) - (len(lines) % 4), 4):
+        header, price_raw, quantity_raw, value_raw = lines[start:start + 4]
+        try:
+            left, adm_code, category = header.rsplit(" - ", 2)
+            barcode, description = left.split(" - ", 1)
+            numeric_code = adm_numeric_code(adm_code)
+            if not numeric_code:
+                raise ValueError("codice ADM mancante")
+            code = adm_local_code(numeric_code)
+            price = float(price_raw.replace(",", "."))
+            quantity_float = float(quantity_raw.replace(",", "."))
+            if not quantity_float.is_integer() or quantity_float < 0:
+                raise ValueError("quantità non valida")
+            quantity = int(quantity_float)
+            total_value = float(value_raw.replace(",", "."))
+            expected_value = round(price * quantity, 2)
+            warning = None
+            if abs(expected_value - total_value) > 0.02:
+                warning = f"valore {total_value:.2f} diverso da prezzo × quantità {expected_value:.2f}"
+
+            current = grouped.setdefault(code, {
+                "codice": code,
+                "descrizione": description.strip(),
+                "categoria": category.strip(),
+                "smart_venue": 0,
+                "barcodes": [],
+                "righe_sorgente": [],
+                "avvisi": [],
+            })
+            current["smart_venue"] += quantity
+            if barcode.strip() and barcode.strip() not in current["barcodes"]:
+                current["barcodes"].append(barcode.strip())
+            current["righe_sorgente"].append(start // 4 + 1)
+            if warning:
+                current["avvisi"].append(warning)
+        except (ValueError, TypeError) as exc:
+            errors.append({"riga": start + 1, "errore": str(exc)})
+
+    return {
+        "righe": sorted(grouped.values(), key=lambda row: row["codice"]),
+        "errori": errors,
+        "record": len(lines) // 4,
+    }
+
+
+async def _smart_venue_bulk_comparison(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    products, vending_totals = await asyncio.gather(
+        db.prodotti.find({}, {"_id": 0}).to_list(5000),
+        _vending_stock_by_code(),
+    )
+    products_by_code = {str(product.get("codice") or ""): product for product in products}
+    vending_totals = vending_totals or {}
+    products_by_numeric: Dict[str, Dict[str, Any]] = {}
+    for product in products:
+        numeric = adm_numeric_code(product.get("codice"))
+        if numeric:
+            current = products_by_numeric.get(numeric)
+            if current is None or str(product.get("codice") or "").startswith("AMMS"):
+                products_by_numeric[numeric] = product
+
+    compared = []
+    for row in rows:
+        requested_code = str(row.get("codice") or "")
+        product = products_by_code.get(requested_code) or products_by_numeric.get(adm_numeric_code(requested_code))
+        code = str((product or {}).get("codice") or requested_code)
+        smart_total = int(row.get("smart_venue", 0) or 0)
+        vending_total = int(vending_totals.get(code, 0) or 0)
+        shop_total = int((product or {}).get("giacenza_negozio", 0) or 0)
+        management_total = shop_total + vending_total
+        inferred_shop = smart_total - vending_total
+        difference = smart_total - management_total
+        if not product:
+            status = "CODICE MANCANTE"
+        elif inferred_shop < 0:
+            status = "ANOMALIA VENDING"
+        elif difference == 0:
+            status = "OK"
+        else:
+            status = "DIFFERENZA"
+        compared.append({
+            **row,
+            "codice": code,
+            "prodotto_trovato": bool(product),
+            "giacenza_vending": vending_total,
+            "giacenza_negozio": shop_total,
+            "gestionale_totale": management_total,
+            "negozio_calcolato": inferred_shop,
+            "differenza": difference,
+            "stato": status,
+        })
+    return compared
+
+
+@api.post("/smart-venue/bulk/preview")
+async def preview_smart_venue_bulk(body: SmartVenueBulkIn):
+    parsed = _parse_smart_venue_bulk_text(body.testo)
+    rows = await _smart_venue_bulk_comparison(parsed["righe"])
+    return {
+        **parsed,
+        "righe": rows,
+        "prodotti": len(rows),
+        "totale_smart_venue": sum(row["smart_venue"] for row in rows),
+        "differenze": sum(1 for row in rows if row["stato"] != "OK"),
+    }
+
+
+@api.post("/smart-venue/bulk/import")
+async def import_smart_venue_bulk(body: SmartVenueBulkIn):
+    parsed = _parse_smart_venue_bulk_text(body.testo)
+    if parsed["errori"]:
+        raise HTTPException(422, {"message": "Correggi gli errori prima di salvare", "errori": parsed["errori"]})
+    if not parsed["righe"]:
+        raise HTTPException(422, "Nessun prodotto valido")
+    backup = await create_backup_snapshot(
+        "Prima import testo SmartVenue",
+        "pre-import-smart-venue-bulk",
+    )
+    batch_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    imported_codes = []
+    for row in parsed["righe"]:
+        code = row["codice"]
+        imported_codes.append(code)
+        await db.smart_venue.update_one(
+            {"codice": code},
+            {
+                "$set": {
+                    "id": f"smart-venue:{code}",
+                    "codice": code,
+                    "descrizione": row["descrizione"],
+                    "smart_venue": row["smart_venue"],
+                    "barcode": row["barcodes"][0] if row["barcodes"] else "",
+                    "barcodes": row["barcodes"],
+                    "origine": "BULK_TESTO",
+                    "batch_id": batch_id,
+                    "updated_at": now,
+                }
+            },
+            upsert=True,
+        )
+    await db.smart_venue.delete_many({
+        "origine": "BULK_TESTO",
+        "codice": {"$nin": imported_codes},
+    })
+    rows = await _smart_venue_bulk_comparison(parsed["righe"])
+    response = {
+        "ok": True,
+        "batch_id": batch_id,
+        "backup_id": backup["id"],
+        "created_at": now,
+        "righe": rows,
+        "prodotti": len(rows),
+        "totale_smart_venue": sum(row["smart_venue"] for row in rows),
+        "differenze": sum(1 for row in rows if row["stato"] != "OK"),
+        "errori": [],
+    }
+    await record_import_history("Testo SmartVenue", response, backup["id"])
+    return response
+
+
 @api.post("/smart-venue/import-excel")
 async def import_smart_venue_excel(file: UploadFile = File(...)):
     """Aggiorna barcode e SMART VENUE dalle colonne E/F del relativo foglio."""
@@ -4215,11 +4566,13 @@ async def import_smart_venue_excel(file: UploadFile = File(...)):
 
 @api.get("/smart-venue")
 async def list_smart_venue():
-    hidden_rows, smart_rows, products = await asyncio.gather(
+    hidden_rows, smart_rows, products, vending_totals = await asyncio.gather(
         db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000),
         db.smart_venue.find({}, {"_id": 0}).sort("codice", 1).to_list(5000),
         db.prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(5000),
+        _vending_stock_by_code(),
     )
+    _apply_vending_stock(products, vending_totals)
     hidden_ids = {str(row.get("product_id")) for row in hidden_rows if row.get("product_id")}
     products_by_code = {str(row.get("codice") or ""): row for row in products}
     rows = []
@@ -4233,6 +4586,16 @@ async def list_smart_venue():
         giacenza_vending = int(product.get("giacenza_vending", 0) or 0)
         rimanenze = giacenza_negozio + giacenza_vending
         smart_venue = int(smart_row.get("smart_venue", smart_row.get("rimanenze_smart", 0)) or 0)
+        difference = smart_venue - rimanenze
+        inferred_shop = smart_venue - giacenza_vending
+        if not product:
+            status = "CODICE MANCANTE"
+        elif inferred_shop < 0:
+            status = "ANOMALIA VENDING"
+        elif difference == 0:
+            status = "OK"
+        else:
+            status = "DIFFERENZA"
         rows.append({
             "id": row_id,
             "codice": code,
@@ -4241,11 +4604,17 @@ async def list_smart_venue():
             # SMART VENUE fornisce soltanto la sua fotografia di confronto.
             "acquistati": int(product.get("acquistati", 0) or 0),
             "rimanenze": rimanenze,
+            "giacenza_negozio": giacenza_negozio,
+            "giacenza_vending": giacenza_vending,
+            "gestionale_totale": rimanenze,
+            "negozio_calcolato": inferred_shop,
             "smart_venue": smart_venue,
             "barcode": str(
                 smart_row.get("barcode", smart_row.get("codice_smart", "")) or ""
             ),
-            "differenza": smart_venue - rimanenze,
+            "barcodes": smart_row.get("barcodes") or [],
+            "differenza": difference,
+            "stato": status,
         })
     return rows
 
@@ -4259,7 +4628,7 @@ async def create_smart_venue_product(body: SmartVenueProductIn):
         raise HTTPException(422, "Codice e descrizione sono obbligatori")
     if category not in PRODUCT_CATEGORIES:
         raise HTTPException(422, "Categoria prodotto non valida")
-    for field in ("acquistati", "giacenza_negozio", "giacenza_vending", "smart_venue"):
+    for field in ("acquistati", "giacenza_negozio", "smart_venue"):
         if getattr(body, field) < 0:
             raise HTTPException(422, f"{field.replace('_', ' ').capitalize()} non può essere negativo")
     if body.prezzo < 0:
@@ -4276,7 +4645,7 @@ async def create_smart_venue_product(body: SmartVenueProductIn):
             prezzo=body.prezzo,
             acquistati=body.acquistati,
             giacenza_negozio=body.giacenza_negozio,
-            giacenza_vending=body.giacenza_vending,
+            giacenza_vending=0,
         ).model_dump()
         await db.prodotti.insert_one(product)
 
@@ -4338,7 +4707,8 @@ async def _smart_venue_row_and_stock(row_id: str) -> tuple[Dict[str, Any], int]:
     if not smart_row:
         raise HTTPException(404, "Riga SMARTV VENUE non trovata")
     product = await db.prodotti.find_one({"codice": smart_row.get("codice")}, {"_id": 0}) or {}
-    rimanenze = int(product.get("giacenza_negozio", 0) or 0) + int(product.get("giacenza_vending", 0) or 0)
+    vending_totals = await _vending_stock_by_code() or {}
+    rimanenze = int(product.get("giacenza_negozio", 0) or 0) + int(vending_totals.get(str(product.get("codice") or ""), 0) or 0)
     return smart_row, rimanenze
 
 

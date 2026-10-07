@@ -16,7 +16,6 @@ const EMPTY_PRODUCT = {
   prezzo: "",
   acquistati: "",
   giacenza_negozio: "",
-  giacenza_vending: "",
   smart_venue: "",
 };
 
@@ -148,7 +147,6 @@ export default function SmartVenue() {
         prezzo: Number(productForm.prezzo || 0),
         acquistati: Number(productForm.acquistati || 0),
         giacenza_negozio: Number(productForm.giacenza_negozio || 0),
-        giacenza_vending: Number(productForm.giacenza_vending || 0),
         smart_venue: Number(productForm.smart_venue || 0),
       };
       const response = await api.post("/smart-venue", payload);
@@ -204,7 +202,6 @@ export default function SmartVenue() {
             <input type="number" min="0" step="0.01" placeholder="Prezzo" value={productForm.prezzo} onChange={event => setProductForm(current => ({ ...current, prezzo: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
             <input type="number" min="0" step="1" placeholder="Acquistati" value={productForm.acquistati} onChange={event => setProductForm(current => ({ ...current, acquistati: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
             <input type="number" min="0" step="1" placeholder="Giacenza negozio" value={productForm.giacenza_negozio} onChange={event => setProductForm(current => ({ ...current, giacenza_negozio: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
-            <input type="number" min="0" step="1" placeholder="Giacenza vending" value={productForm.giacenza_vending} onChange={event => setProductForm(current => ({ ...current, giacenza_vending: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
             <input data-testid="smart-venue-new-quantity" type="number" min="0" step="1" placeholder="Smart Venue" value={productForm.smart_venue} onChange={event => setProductForm(current => ({ ...current, smart_venue: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />
             <button data-testid="smart-venue-add" type="submit" disabled={creating} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50">
               <Plus size={17} weight="bold" /> {creating ? "Aggiunta…" : "Aggiungi prodotto"}
