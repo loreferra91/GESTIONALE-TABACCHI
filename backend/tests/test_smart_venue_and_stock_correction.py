@@ -35,6 +35,48 @@ def test_bulk_text_parser_groups_multiple_barcodes_by_adm_code():
     }]
 
 
+def test_smart_venue_resolves_old_codes_and_collapses_duplicate_snapshots(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def seed_and_compare():
+        await database.prodotti.insert_many([
+            {
+                "id": "sunset", "codice": "AMMS20933",
+                "descrizione": "ISENZIA SUNSET CORAL CRUSH", "giacenza_negozio": 8,
+            },
+            {
+                "id": "evo", "codice": "AMMS21601",
+                "descrizione": "EVO AMBER STICKS", "giacenza_negozio": 22,
+            },
+            {
+                "id": "diana", "codice": "AMMS233",
+                "descrizione": "DIANA ROSSA KS*AST20", "giacenza_negozio": 77,
+            },
+        ])
+        await database.vending.insert_one({
+            "id": "H2", "codice": "AMMS233", "giacenza": 4,
+        })
+        return await server._smart_venue_bulk_comparison([
+            {"codice": "AMMS20933", "descrizione": "ISENZIA SUNSET CORAL CRUSH", "smart_venue": 8},
+            {"codice": "AMMS21000", "descrizione": "ISENZIA SUNSET CORAL CRUSH (Conf. astuccio da 20 pezzi)", "smart_venue": 8},
+            {"codice": "AMMS20697", "descrizione": "EVO AMBER STICKS*20PZ (Conf. astuccio da 20 pezzi)", "smart_venue": 22},
+            {"codice": "AMMS21601", "descrizione": "EVO AMBER STICKS", "smart_venue": 22},
+            {"codice": "AMMS223", "descrizione": "DIANA ROSSA KS*AST20 (nuove) (Conf. astuccio da 20 pezzi)", "smart_venue": 81},
+            {"codice": "AMMS233", "descrizione": "DIANA ROSSA KS (Conf. astuccio da 20 pezzi)", "smart_venue": 0},
+        ])
+
+    rows = asyncio.run(seed_and_compare())
+
+    assert [(row["codice"], row["smart_venue"], row["stato"]) for row in rows] == [
+        ("AMMS20933", 8, "OK"),
+        ("AMMS21601", 22, "OK"),
+        ("AMMS233", 81, "OK"),
+    ]
+    assert rows[0]["codici_sorgente"] == ["AMMS20933", "AMMS21000"]
+    assert rows[1]["codici_sorgente"] == ["AMMS20697", "AMMS21601"]
+    assert rows[2]["codici_sorgente"] == ["AMMS223", "AMMS233"]
+
+
 class FakeCursor:
     def __init__(self, documents):
         self.documents = documents

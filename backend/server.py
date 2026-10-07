@@ -640,6 +640,27 @@ def _description_tokens(value: Any) -> List[str]:
     return [token_aliases.get(token, token) for token in re.findall(r"[A-Z0-9]+", ascii_text)]
 
 
+def _product_identity_tokens(value: Any) -> tuple:
+    """Return stable product-name tokens without packaging-only wording."""
+    ignored = {
+        "AST", "ASTUCCIO", "ASTUCCI", "CONF", "CONFEZIONE", "DA",
+        "NUOVA", "NUOVE", "NUOVO", "NUOVI", "PEZZI", "PEZZO", "PZ",
+    }
+    source_tokens = _description_tokens(value)
+    has_packaging = any(
+        token in ignored or re.fullmatch(r"(?:(?:AST|PZ)\d+|\d+(?:AST|PZ))", token)
+        for token in source_tokens
+    )
+    tokens = []
+    for token in source_tokens:
+        if token in ignored or re.fullmatch(r"(?:(?:AST|PZ)\d+|\d+(?:AST|PZ))", token):
+            continue
+        if token == "20" and has_packaging:
+            continue
+        tokens.append(token)
+    return tuple(tokens)
+
+
 def _same_adm_product(description: Any, adm_description: Any) -> bool:
     """Match name variants without confusing numeric accessory codes with ADM codes."""
     product_tokens = _description_tokens(description)
@@ -4561,11 +4582,62 @@ def _parse_smart_venue_bulk_text(text: str) -> Dict[str, Any]:
     }
 
 
+def _resolve_smart_venue_product_rows(
+    rows: List[Dict[str, Any]],
+    products: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Resolve renamed ADM codes and collapse duplicate old/new-code rows.
+
+    SmartVenue can retain an obsolete ADM row while exposing the same physical
+    stock on its replacement code. We only infer an alias when a normalized
+    description identifies exactly one product in the management database.
+    Quantities from old/new aliases are snapshots of the same stock, so the
+    maximum is retained instead of summing them twice.
+    """
+    products_by_code = {str(product.get("codice") or ""): product for product in products}
+    products_by_identity: Dict[tuple, List[Dict[str, Any]]] = {}
+    for product in products:
+        identity = _product_identity_tokens(product.get("descrizione"))
+        if identity:
+            products_by_identity.setdefault(identity, []).append(product)
+
+    resolved: Dict[str, Dict[str, Any]] = {}
+    for source in rows:
+        row = dict(source)
+        requested_code = str(row.get("codice") or "")
+        product = products_by_code.get(requested_code)
+        if product is None:
+            candidates = products_by_identity.get(_product_identity_tokens(row.get("descrizione")), [])
+            if len(candidates) == 1:
+                product = candidates[0]
+        canonical_code = str((product or {}).get("codice") or requested_code)
+        row["codice"] = canonical_code
+
+        current = resolved.get(canonical_code)
+        if current is None:
+            row["codici_sorgente"] = [requested_code] if requested_code else []
+            resolved[canonical_code] = row
+            continue
+
+        current["smart_venue"] = max(
+            int(current.get("smart_venue", 0) or 0),
+            int(row.get("smart_venue", 0) or 0),
+        )
+        for field in ("barcodes", "righe_sorgente", "avvisi", "codici_sorgente"):
+            incoming = row.get(field, [])
+            if field == "codici_sorgente":
+                incoming = [requested_code] if requested_code else []
+            current[field] = list(dict.fromkeys([*(current.get(field) or []), *incoming]))
+
+    return sorted(resolved.values(), key=lambda row: row["codice"])
+
+
 async def _smart_venue_bulk_comparison(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     products, vending_totals = await asyncio.gather(
         db.prodotti.find({}, {"_id": 0}).to_list(5000),
         _vending_stock_by_code(),
     )
+    rows = _resolve_smart_venue_product_rows(rows, products)
     products_by_code = {str(product.get("codice") or ""): product for product in products}
     vending_totals = vending_totals or {}
     products_by_numeric: Dict[str, Dict[str, Any]] = {}
@@ -4629,6 +4701,8 @@ async def import_smart_venue_bulk(body: SmartVenueBulkIn):
         raise HTTPException(422, {"message": "Correggi gli errori prima di salvare", "errori": parsed["errori"]})
     if not parsed["righe"]:
         raise HTTPException(422, "Nessun prodotto valido")
+    products = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
+    resolved_rows = _resolve_smart_venue_product_rows(parsed["righe"], products)
     backup = await create_backup_snapshot(
         "Prima import testo SmartVenue",
         "pre-import-smart-venue-bulk",
@@ -4636,7 +4710,7 @@ async def import_smart_venue_bulk(body: SmartVenueBulkIn):
     batch_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     imported_codes = []
-    for row in parsed["righe"]:
+    for row in resolved_rows:
         code = row["codice"]
         imported_codes.append(code)
         await db.smart_venue.update_one(
@@ -4660,7 +4734,7 @@ async def import_smart_venue_bulk(body: SmartVenueBulkIn):
         "origine": "BULK_TESTO",
         "codice": {"$nin": imported_codes},
     })
-    rows = await _smart_venue_bulk_comparison(parsed["righe"])
+    rows = await _smart_venue_bulk_comparison(resolved_rows)
     response = {
         "ok": True,
         "batch_id": batch_id,
@@ -4720,6 +4794,7 @@ async def list_smart_venue():
         _vending_stock_by_code(),
     )
     _apply_vending_stock(products, vending_totals)
+    smart_rows = _resolve_smart_venue_product_rows(smart_rows, products)
     hidden_ids = {str(row.get("product_id")) for row in hidden_rows if row.get("product_id")}
     products_by_code = {str(row.get("codice") or ""): row for row in products}
     rows = []
