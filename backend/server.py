@@ -318,6 +318,7 @@ BACKUP_COLLECTIONS = [
     "prelievi_vending",
     "scontrini_vending",
     "cassa_vending_stato",
+    "vending_accounting_snapshots",
     "cassa",
     "ordini_fornitore",
     "ordini_fornitore_righe",
@@ -335,6 +336,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "vendite_bulk_imports",
     "scontrini_vending",
     "cassa_vending_stato",
+    "vending_accounting_snapshots",
     "anomalie_ignorate",
     "smart_venue",
     "smart_venue_hidden",
@@ -1845,6 +1847,40 @@ def _parse_csv_vending(raw: str, pagamento: str = "CONTANTI") -> Dict[str, Any]:
     return {"righe": rows, "saltati": skipped, "errori": errors, "delimitatore": delim}
 
 
+def _summarize_vending_csv(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Riepiloga l'intero CSV senza applicare filtri dello storico Excel."""
+    payment_counts: Dict[str, int] = {}
+    payment_amounts: Dict[str, float] = {}
+    dates = []
+    for row in parsed.get("righe", []):
+        bucket = _vending_payment_bucket(row.get("pagamento"))
+        payment_counts[bucket] = payment_counts.get(bucket, 0) + 1
+        payment_amounts[bucket] = round(
+            payment_amounts.get(bucket, 0) + float(row.get("prezzo") or 0), 2
+        )
+        parsed_date = _parse_sale_datetime(row.get("data"))
+        if parsed_date:
+            dates.append(parsed_date)
+    electronic = round(
+        payment_amounts.get("CARTE", 0)
+        + payment_amounts.get("PAGOBANCOMAT", 0)
+        + payment_amounts.get("ALTRO_ELETTRONICO", 0),
+        2,
+    )
+    total = round(sum(payment_amounts.values()), 2)
+    return {
+        "righe": len(parsed.get("righe", [])),
+        "saltati": int(parsed.get("saltati", 0)),
+        "errori": parsed.get("errori", []),
+        "pagamenti": payment_counts,
+        "importi_pagamenti": payment_amounts,
+        "totale_elettronici": electronic,
+        "totale": total,
+        "data_da": min(dates).isoformat() if dates else None,
+        "data_a": max(dates).isoformat() if dates else None,
+    }
+
+
 def _parse_sale_datetime(value: Any):
     """Normalizza data e ora delle vendite senza perdere il dettaglio orario."""
     text = str(value or "").strip()
@@ -1901,6 +1937,63 @@ async def _prepare_csv_vending_import(raw: str, pagamento: str) -> tuple[Dict[st
     all_rows = parsed["righe"]
     parsed["righe"], cutoff = _filter_new_csv_vending_rows(all_rows, historical_documents)
     return parsed, cutoff, len(all_rows)
+
+
+async def _latest_vending_accounting_snapshot() -> Optional[Dict[str, Any]]:
+    collection = getattr(db, "vending_accounting_snapshots", None)
+    if collection is None:
+        return None
+    return await collection.find_one(
+        {"status": "active"}, {"_id": 0}, sort=[("created_at", -1)]
+    )
+
+
+@api.post("/contabilita/vending/preview-csv")
+async def preview_vending_accounting_csv(file: UploadFile = File(...)):
+    """Controlla l'intero export vending destinato alla riconciliazione contabile."""
+    content = await _read_capped(file)
+    parsed = _parse_csv_vending(content.decode("utf-8-sig", errors="replace"))
+    return _summarize_vending_csv(parsed)
+
+
+@api.post("/contabilita/vending/allinea-csv")
+async def align_vending_accounting_csv(file: UploadFile = File(...)):
+    """Rende il CSV fonte contabile senza modificare giacenze o venduti."""
+    content = await _read_capped(file)
+    parsed = _parse_csv_vending(content.decode("utf-8-sig", errors="replace"))
+    summary = _summarize_vending_csv(parsed)
+    if not summary["righe"]:
+        raise HTTPException(422, "Il CSV non contiene vendite valide")
+    if summary["errori"]:
+        raise HTTPException(
+            422,
+            f"Il CSV contiene {len(summary['errori'])} righe non valide: correggile prima dell'allineamento",
+        )
+
+    backup = await create_backup_snapshot("Prima dell'allineamento contabile al CSV vending")
+    created_at = datetime.now(timezone.utc).isoformat()
+    snapshot_id = str(uuid.uuid4())
+    document = {
+        "id": snapshot_id,
+        "status": "active",
+        "created_at": created_at,
+        "file_name": Path(file.filename or "vendite-vending.csv").name,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        **{key: value for key, value in summary.items() if key != "errori"},
+    }
+    await db.vending_accounting_snapshots.insert_one(document)
+    await db.vending_accounting_snapshots.update_many(
+        {"id": {"$ne": snapshot_id}, "status": "active"},
+        {"$set": {"status": "superseded", "superseded_at": created_at}},
+    )
+    response = {key: value for key, value in document.items() if key not in {"_id", "sha256"}}
+    response["backup_id"] = backup.get("id")
+    return response
+
+
+@api.get("/contabilita/vending/fonte")
+async def vending_accounting_source():
+    return await _latest_vending_accounting_snapshot()
 
 
 VENDING_CASH_STATE_ID = "saldo"
@@ -3815,13 +3908,36 @@ async def _dashboard_balances(
     # pagamento. Le vendite dell'app successive all'ultima data importata si
     # aggiungono allo storico; il filtro temporale impedisce doppi conteggi al
     # successivo import Excel.
-    historical_docs, app_docs = await asyncio.gather(
+    historical_docs, app_docs, accounting_snapshot = await asyncio.gather(
         db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
         db.vendite.find(
             {"canale": {"$regex": "^VENDING$", "$options": "i"}},
-            {"_id": 0, "data": 1, "created_at": 1, "importo": 1, "pagamento": 1},
+            {"_id": 0, "data": 1, "created_at": 1, "importo": 1, "pagamento": 1, "sorgente": 1},
         ).to_list(None),
+        _latest_vending_accounting_snapshot(),
     )
+    if accounting_snapshot:
+        amounts = accounting_snapshot.get("importi_pagamenti") or {}
+        payments = [(float(amount or 0), bucket) for bucket, amount in amounts.items()]
+        aligned_at = _parse_utc_datetime(accounting_snapshot.get("created_at"))
+        for document in app_docs:
+            created_at = _parse_utc_datetime(document.get("created_at"))
+            if not aligned_at or not created_at or created_at <= aligned_at:
+                continue
+            payments.extend(_vending_payment_values([document], legacy_raw=False))
+        result = _calculate_dashboard_balances(
+            payments, saldo_cassa, giacenza_vending, totale_scontrini
+        )
+        result.update({
+            "fonteVendingContabile": "CSV_VENDING",
+            "fonteVendingFile": accounting_snapshot.get("file_name"),
+            "fonteVendingRighe": accounting_snapshot.get("righe"),
+            "fonteVendingDataDa": accounting_snapshot.get("data_da"),
+            "fonteVendingDataA": accounting_snapshot.get("data_a"),
+            "fonteVendingAllineataIl": accounting_snapshot.get("created_at"),
+        })
+        return result
+
     payments = _vending_payment_values(historical_docs, legacy_raw=True)
     cutoff = _latest_historical_vending_date(historical_docs)
     supplemental_app_docs = []

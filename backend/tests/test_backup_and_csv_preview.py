@@ -94,6 +94,29 @@ def test_csv_preview_preserves_payment_types_and_normalizes_dates():
     assert parsed["saltati"] == 0
 
 
+def test_accounting_csv_summary_matches_payment_totals_without_stock_changes():
+    raw = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "02/08/2026 05:34;A;10,00;1-A01;1;Tabacchi;Contanti\n"
+        "07/10/2026 06:56;B;5,50;1-A02;2;Tabacchi;Carte\n"
+        "07/10/2026 06:57;C;4,50;1-A03;3;Tabacchi;PagoBancomat\n"
+    )
+
+    summary = server._summarize_vending_csv(server._parse_csv_vending(raw))
+
+    assert summary["righe"] == 3
+    assert summary["pagamenti"] == {"CONTANTI": 1, "CARTE": 1, "PAGOBANCOMAT": 1}
+    assert summary["importi_pagamenti"] == {
+        "CONTANTI": 10.0,
+        "CARTE": 5.5,
+        "PAGOBANCOMAT": 4.5,
+    }
+    assert summary["totale_elettronici"] == 10.0
+    assert summary["totale"] == 20.0
+    assert summary["data_da"] == "2026-08-02T05:34:00"
+    assert summary["data_a"] == "2026-10-07T06:57:00"
+
+
 def test_csv_preview_filters_rows_after_latest_excel_vending_timestamp():
     rows = [
         {"data": "2026-10-02T07:58:00", "nome": "Gia presente"},

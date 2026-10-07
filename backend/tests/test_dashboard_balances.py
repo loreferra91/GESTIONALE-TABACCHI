@@ -34,6 +34,14 @@ class SalesCollection:
         return FakeCursor(self.documents)
 
 
+class SnapshotCollection:
+    def __init__(self, document):
+        self.document = document
+
+    async def find_one(self, *_args, **_kwargs):
+        return self.document
+
+
 def historical_row(amount, payment, accounted="SI", outcome="OK", day="2026-08-31"):
     raw = [""] * 18
     raw[2] = day
@@ -166,6 +174,53 @@ def test_same_day_csv_cash_created_after_excel_import_is_counted(monkeypatch):
     ))
 
     assert result["saldoVendingContanti"] == 125
+
+
+def test_accounting_csv_snapshot_replaces_excel_totals_and_adds_only_later_sales(monkeypatch):
+    historical = FakeCollection([historical_row(9999, "Contanti")])
+    app_sales = FakeCollection([
+        {
+            "created_at": "2026-10-07T09:59:00+00:00",
+            "importo": 100,
+            "pagamento": "CONTANTI",
+        },
+        {
+            "created_at": "2026-10-07T10:01:00+00:00",
+            "importo": 5.5,
+            "pagamento": "CARTE",
+        },
+    ])
+    snapshot = SnapshotCollection({
+        "status": "active",
+        "created_at": "2026-10-07T10:00:00+00:00",
+        "file_name": "prodotti-venduti.csv",
+        "righe": 1000,
+        "data_da": "2026-08-02T05:34:00",
+        "data_a": "2026-10-07T06:57:00",
+        "importi_pagamenti": {
+            "CONTANTI": 2984.0,
+            "CARTE": 2215.7,
+            "PAGOBANCOMAT": 591.0,
+        },
+    })
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            db_storico_vending_ext=historical,
+            vendite=app_sales,
+            vending_accounting_snapshots=snapshot,
+        ),
+    )
+
+    result = asyncio.run(server._dashboard_balances(0))
+
+    assert result["venditeVendingContanti"] == 2984.0
+    assert result["venditeVendingCarte"] == 2221.2
+    assert result["venditeVendingPagoBancomat"] == 591.0
+    assert result["saldoVendingTotale"] == 5796.2
+    assert result["fonteVendingContabile"] == "CSV_VENDING"
+    assert result["fonteVendingRighe"] == 1000
 
 
 def test_empty_legacy_payment_uses_cash_default_without_losing_unknown_methods():
