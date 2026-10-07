@@ -73,6 +73,19 @@ momento Auto-Order usa direttamente `giacenza_negozio` e non sottrae di nuovo la
 vending; una ricarica vending `-negozio/+vending` riduce quindi lo stock
 Auto-Order esattamente una volta.
 
+Le ricariche vending proteggono inoltre `SCORTA_MINIMA_NEGOZIO_VENDING`
+(2 pezzi di default): soltanto la parte di `giacenza_negozio` eccedente questa
+riserva può essere trasferita. La regola vale per proposte, carico singolo,
+carico completo e PDF; se più colonne usano lo stesso prodotto, condividono la
+stessa disponibilità residua. Quando non è possibile riempire completamente una
+colonna, viene proposta la quantità parziale che lascia intatta la riserva.
+
+Dalla pagina Vending è possibile associare un prodotto già presente nel
+gestionale a una nuova colonna, indicando capacità, soglia e carico iniziale.
+La colonna deve essere univoca; l'eventuale carico iniziale esegue lo stesso
+movimento `-negozio/+vending` delle ricariche e non può consumare la scorta
+minima protetta.
+
 Stock importati o movimentati in modo incoerente, per esempio con
 `giacenza_negozio` negativa, sono trattati come `ANOMALIA`: non generano quantita
 da ordinare, non entrano in righe Auto-Order, PDF, totale o conferma, anche se le
