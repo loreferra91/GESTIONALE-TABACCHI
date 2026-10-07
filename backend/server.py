@@ -407,6 +407,10 @@ DEFAULT_PARAMS = {
         "valore": 2,
         "descrizione": "Pezzi da lasciare sempre disponibili in negozio durante la ricarica vending",
     },
+    "GIACENZA_INIZIALE_CONTANTI_VENDING": {
+        "valore": 0,
+        "descrizione": "Contanti presenti nella vending all'apertura della contabilità",
+    },
 }
 
 
@@ -3042,6 +3046,7 @@ PARAM_BOUNDS = {
     "FAST_VENDUTO30_MIN": (0.0, 10000.0, "0 ≤ soglia"),
     "SLOW_VENDUTO30_MAX": (0.0, 10000.0, "0 ≤ soglia"),
     "SCORTA_MINIMA_NEGOZIO_VENDING": (0.0, 10000.0, "0 ≤ scorta minima"),
+    "GIACENZA_INIZIALE_CONTANTI_VENDING": (0.0, 1000000.0, "0 ≤ giacenza iniziale < 1.000.000"),
     "LOTTO_SIGARETTE": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_SIGARI": (1.0, 10000.0, "1 ≤ lotto"),
     "LOTTO_SIGARETTI": (1.0, 10000.0, "1 ≤ lotto"),
@@ -3056,16 +3061,23 @@ PARAM_BOUNDS = {
 
 @api.put("/parametri/{nome}")
 async def update_parametro(nome: str, body: ParametroIn):
+    value = round(float(body.valore), 2) if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING" else body.valore
     bounds = PARAM_BOUNDS.get(nome)
     if bounds is not None:
         lo, hi, msg = bounds
-        if not (lo <= body.valore < hi):
-            raise HTTPException(422, f"{nome} fuori range consentito ({msg}). Ricevuto: {body.valore}")
+        if not (lo <= value < hi):
+            raise HTTPException(422, f"{nome} fuori range consentito ({msg}). Ricevuto: {value}")
     if nome == "SCORTA_MINIMA_NEGOZIO_VENDING" and not float(body.valore).is_integer():
         raise HTTPException(422, "SCORTA_MINIMA_NEGOZIO_VENDING deve essere un numero intero")
-    r = await db.parametri.update_one({"nome": nome}, {"$set": {"valore": body.valore}})
+    previous = await db.parametri.find_one({"nome": nome}, {"_id": 0, "valore": 1})
+    previous_value = float((previous or {}).get("valore") or 0)
+    r = await db.parametri.update_one({"nome": nome}, {"$set": {"valore": value}})
     if r.matched_count == 0:
-        await db.parametri.insert_one(Parametro(nome=nome, valore=body.valore).model_dump())
+        await db.parametri.insert_one(Parametro(nome=nome, valore=value).model_dump())
+    if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING":
+        delta = round(float(value) - previous_value, 2)
+        if delta:
+            await _adjust_vending_cash_balance(delta)
     doc = await db.parametri.find_one({"nome": nome}, {"_id": 0})
     return doc
 
@@ -3838,12 +3850,14 @@ def _calculate_dashboard_balances(
     saldo_cassa: float,
     giacenza_vending: float = 0,
     totale_scontrini: float = 0,
+    giacenza_iniziale_vending: float = 0,
 ) -> Dict[str, float]:
     """Calcola in un solo punto i saldi monetari esposti dalla dashboard.
 
     Il CSV incrementa sia le vendite cash sia la giacenza fisica. Il contante
-    prelevato è la differenza tra vendite cash e giacenza. Gli scontrini sono
-    esposti separatamente e non rappresentano un movimento di contante.
+    prelevato è la giacenza iniziale più le vendite cash, meno la giacenza
+    attuale. Gli scontrini sono esposti separatamente e non rappresentano un
+    movimento di contante.
     """
     cash = 0.0
     cards = 0.0
@@ -3870,11 +3884,13 @@ def _calculate_dashboard_balances(
     saldo_cassa = round(float(saldo_cassa or 0), 2)
     giacenza_vending = round(float(giacenza_vending or 0), 2)
     totale_scontrini = round(float(totale_scontrini or 0), 2)
-    prelievo_vending = round(cash - giacenza_vending, 2)
+    giacenza_iniziale_vending = round(float(giacenza_iniziale_vending or 0), 2)
+    prelievo_vending = round(giacenza_iniziale_vending + cash - giacenza_vending, 2)
     saldo_casse = round(prelievo_vending + saldo_cassa, 2)
     return {
         "saldoVendingTotale": total,
         "venditeVendingContanti": cash,
+        "giacenzaInizialeVendingContanti": giacenza_iniziale_vending,
         "giacenzaVendingContanti": giacenza_vending,
         "prelievoVending": prelievo_vending,
         "scontriniVending": totale_scontrini,
@@ -3902,6 +3918,7 @@ async def _dashboard_balances(
     giacenza_vending: float = 0,
     totale_scontrini: float = 0,
     latest_import_created_at: Any = None,
+    giacenza_iniziale_vending: float = 0,
 ) -> Dict[str, float]:
     # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
     # pagamento. Le vendite dell'app successive all'ultima data importata si
@@ -3925,7 +3942,11 @@ async def _dashboard_balances(
                 continue
             payments.extend(_vending_payment_values([document], legacy_raw=False))
         result = _calculate_dashboard_balances(
-            payments, saldo_cassa, giacenza_vending, totale_scontrini
+            payments,
+            saldo_cassa,
+            giacenza_vending,
+            totale_scontrini,
+            giacenza_iniziale_vending,
         )
         result.update({
             "fonteVendingContabile": "CSV_VENDING",
@@ -3947,7 +3968,13 @@ async def _dashboard_balances(
             continue
         supplemental_app_docs.append(document)
     payments.extend(_vending_payment_values(supplemental_app_docs, legacy_raw=False))
-    return _calculate_dashboard_balances(payments, saldo_cassa, giacenza_vending, totale_scontrini)
+    return _calculate_dashboard_balances(
+        payments,
+        saldo_cassa,
+        giacenza_vending,
+        totale_scontrini,
+        giacenza_iniziale_vending,
+    )
 
 
 async def _supplemental_store_cash_sales(
@@ -4051,16 +4078,21 @@ async def dashboard():
         {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
-    versamenti, prelievi, scontrini, giacenza_vending, venduto_negozio_app_contanti = await asyncio.gather(
+    versamenti, prelievi, scontrini, giacenza_vending, giacenza_iniziale_doc, venduto_negozio_app_contanti = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
         _scontrini_vending_summary(),
         _vending_cash_balance(),
+        db.parametri.find_one(
+            {"nome": "GIACENZA_INIZIALE_CONTANTI_VENDING"},
+            {"_id": 0, "valore": 1},
+        ),
         _supplemental_store_cash_sales(
             ultima_vendita_importata,
             (ultimo_import_contabile or {}).get("created_at"),
         ),
     )
+    giacenza_iniziale_vending = round(float((giacenza_iniziale_doc or {}).get("valore") or 0), 2)
     venduto_negozio_contabilizzato = round(venduto_negozio_excel + venduto_negozio_app_contanti, 2)
     liquidita_residua = round(venduto_negozio_contabilizzato - versamenti["totale"], 2)
     saldi, andamento_vendite = await asyncio.gather(
@@ -4069,6 +4101,7 @@ async def dashboard():
             giacenza_vending,
             scontrini["totale"],
             (ultimo_import_contabile or {}).get("created_at"),
+            giacenza_iniziale_vending,
         ),
         _dashboard_sales_trend(),
     )
@@ -4082,6 +4115,7 @@ async def dashboard():
         "totale_prelievi": prelievi["totale"],
         "totale_scontrini_vending": scontrini["totale"],
         "giacenza_vending_contanti": giacenza_vending,
+        "giacenza_iniziale_vending_contanti": giacenza_iniziale_vending,
         "venduto_negozio_excel": round(venduto_negozio_excel, 2),
         "venduto_negozio_app_contanti": venduto_negozio_app_contanti,
         "venduto_negozio_contabilizzato": venduto_negozio_contabilizzato,

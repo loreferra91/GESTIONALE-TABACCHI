@@ -55,12 +55,16 @@ export default function Parametri() {
   const [restoreTarget, setRestoreTarget] = useState(null);
   const [restoreFile, setRestoreFile] = useState(null);
   const [workingBackup, setWorkingBackup] = useState(false);
+  const [openingVendingCash, setOpeningVendingCash] = useState("0");
+  const [savingOpeningVendingCash, setSavingOpeningVendingCash] = useState(false);
   const fileRef = useRef(null);
   const restoreFileRef = useRef(null);
 
   const load = async () => {
     const r = await api.get("/parametri");
     setRows(r.data);
+    const openingCash = r.data.find(p => p.nome === "GIACENZA_INIZIALE_CONTANTI_VENDING");
+    setOpeningVendingCash(String(openingCash?.valore ?? 0));
   };
   const loadAudit = async () => {
     const [h, b] = await Promise.all([
@@ -80,6 +84,25 @@ export default function Parametri() {
     } catch (err) {
       toast.error(apiErrorMessage(err, "Errore aggiornamento"));
       load();
+    }
+  };
+
+  const updateOpeningVendingCash = async () => {
+    const value = Number(openingVendingCash);
+    if (!Number.isFinite(value) || value < 0) {
+      toast.error("Inserisci una giacenza iniziale valida, uguale o superiore a zero");
+      return;
+    }
+    setSavingOpeningVendingCash(true);
+    try {
+      await api.put("/parametri/GIACENZA_INIZIALE_CONTANTI_VENDING", { valore: value });
+      toast.success("Giacenza iniziale vending aggiornata");
+      await load();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Errore aggiornamento giacenza iniziale"));
+      await load();
+    } finally {
+      setSavingOpeningVendingCash(false);
     }
   };
 
@@ -209,6 +232,42 @@ export default function Parametri() {
 
   return (
     <Layout title="Parametri di sistema" subtitle="configurazione motore & sincronizzazione Excel">
+      <Card className="mb-6 p-6">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="overline">Contabilità vending</div>
+            <h2 className="mt-1 font-heading text-lg font-black text-slate-900">Giacenza contanti iniziale</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Indica il denaro già presente nella vending all'apertura della contabilità.
+              La giacenza attuale viene calcolata come <b>giacenza iniziale + vendite in contanti − prelievi</b>.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <label className="text-sm font-semibold text-slate-700">
+              Importo iniziale (€)
+              <input
+                data-testid="opening-vending-cash-input"
+                type="number"
+                min="0"
+                step="0.01"
+                value={openingVendingCash}
+                onChange={event => setOpeningVendingCash(event.target.value)}
+                className="mt-1 block w-44 rounded-md border border-slate-300 px-3 py-2 text-right font-mono text-base"
+              />
+            </label>
+            <button
+              type="button"
+              data-testid="opening-vending-cash-save"
+              onClick={updateOpeningVendingCash}
+              disabled={savingOpeningVendingCash}
+              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40"
+            >
+              {savingOpeningVendingCash ? "Salvataggio…" : "Salva importo"}
+            </button>
+          </div>
+        </div>
+      </Card>
+
       <Card className="p-6 mb-6">
         <div className="flex items-start gap-4">
           <div className="w-12 h-12 bg-slate-900 text-white rounded-md flex items-center justify-center flex-shrink-0">
@@ -377,7 +436,7 @@ export default function Parametri() {
           <table className="data-table w-full">
             <thead><tr><th>Parametro</th><th>Descrizione</th><th className="text-right">Valore</th><th></th></tr></thead>
             <tbody>
-              {rows.map(p => (
+              {rows.filter(p => p.nome !== "GIACENZA_INIZIALE_CONTANTI_VENDING").map(p => (
                 <tr key={p.nome} data-testid={`param-row-${p.nome}`}>
                   <td className="font-mono font-semibold">{p.nome}</td>
                   <td className="text-slate-600">{p.descrizione}</td>

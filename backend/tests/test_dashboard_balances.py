@@ -76,6 +76,7 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
     assert result == {
         "saldoVendingTotale": 1535.0,
         "venditeVendingContanti": 1225.0,
+        "giacenzaInizialeVendingContanti": 0.0,
         "giacenzaVendingContanti": 1225.0,
         "prelievoVending": 0.0,
         "scontriniVending": 0.0,
@@ -267,6 +268,19 @@ def test_cash_difference_adds_vending_withdrawals_to_signed_store_balance():
 
     assert result["totalePrelievi"] == 500.0
     assert result["differenzaCassaVendingContanti"] == -1110.62
+
+
+def test_opening_vending_cash_is_included_in_reconciliation():
+    result = server._calculate_dashboard_balances(
+        [(1000, "Contanti")],
+        saldo_cassa=300,
+        giacenza_vending=750,
+        giacenza_iniziale_vending=150,
+    )
+
+    assert result["giacenzaInizialeVendingContanti"] == 150.0
+    assert result["prelievoVending"] == 400.0
+    assert result["saldoCassaNegozioEVending"] == 700.0
 
 
 def test_vending_cash_inventory_withdrawals_and_receipts_are_exposed_separately():

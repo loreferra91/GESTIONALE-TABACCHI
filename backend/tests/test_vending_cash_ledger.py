@@ -108,6 +108,30 @@ def test_registering_and_deleting_withdrawal_updates_vending_cash(monkeypatch):
     assert asyncio.run(server._vending_cash_balance()) == 237.55
 
 
+def test_updating_opening_cash_adjusts_current_balance_by_the_delta(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.parametri.insert_one({
+            "nome": "GIACENZA_INIZIALE_CONTANTI_VENDING",
+            "valore": 50,
+        })
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID,
+            "giacenza": 200,
+        })
+        updated = await server.update_parametro(
+            "GIACENZA_INIZIALE_CONTANTI_VENDING",
+            server.ParametroIn(valore=125),
+        )
+        return updated, await server._vending_cash_balance()
+
+    updated, balance = asyncio.run(scenario())
+
+    assert updated["valore"] == 125
+    assert balance == 275.0
+
+
 def test_receipts_are_separate_from_cash_withdrawal_and_combined_balance():
     result = server._calculate_dashboard_balances(
         [(3445.30, "Contanti"), (2445, "Carte")],
