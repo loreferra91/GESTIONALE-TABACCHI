@@ -108,7 +108,7 @@ def test_registering_and_deleting_withdrawal_updates_vending_cash(monkeypatch):
     assert asyncio.run(server._vending_cash_balance()) == 237.55
 
 
-def test_receipts_increase_derived_withdrawal_without_changing_combined_balance():
+def test_receipts_are_separate_from_cash_withdrawal_and_combined_balance():
     result = server._calculate_dashboard_balances(
         [(3445.30, "Contanti"), (2445, "Carte")],
         saldo_cassa=-664.72,
@@ -116,6 +116,6 @@ def test_receipts_increase_derived_withdrawal_without_changing_combined_balance(
         totale_scontrini=100,
     )
 
-    assert result["prelievoVending"] == 3307.75
+    assert result["prelievoVending"] == 3207.75
     assert result["scontriniVending"] == 100
     assert result["saldoCassaNegozioEVending"] == 2543.03

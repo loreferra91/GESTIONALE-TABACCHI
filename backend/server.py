@@ -3841,10 +3841,9 @@ def _calculate_dashboard_balances(
 ) -> Dict[str, float]:
     """Calcola in un solo punto i saldi monetari esposti dalla dashboard.
 
-    Il CSV incrementa sia le vendite cash sia la giacenza fisica. I prelievi
-    sono la differenza tra vendite cash e giacenza, più gli scontrini. Nel saldo
-    complessivo gli scontrini vengono sottratti di nuovo, perché non devono
-    aumentare la disponibilità combinata di negozio e vending.
+    Il CSV incrementa sia le vendite cash sia la giacenza fisica. Il contante
+    prelevato è la differenza tra vendite cash e giacenza. Gli scontrini sono
+    esposti separatamente e non rappresentano un movimento di contante.
     """
     cash = 0.0
     cards = 0.0
@@ -3871,8 +3870,8 @@ def _calculate_dashboard_balances(
     saldo_cassa = round(float(saldo_cassa or 0), 2)
     giacenza_vending = round(float(giacenza_vending or 0), 2)
     totale_scontrini = round(float(totale_scontrini or 0), 2)
-    prelievo_vending = round(cash - giacenza_vending + totale_scontrini, 2)
-    saldo_casse = round(prelievo_vending + saldo_cassa - totale_scontrini, 2)
+    prelievo_vending = round(cash - giacenza_vending, 2)
+    saldo_casse = round(prelievo_vending + saldo_cassa, 2)
     return {
         "saldoVendingTotale": total,
         "venditeVendingContanti": cash,

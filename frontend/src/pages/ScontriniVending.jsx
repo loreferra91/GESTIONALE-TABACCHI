@@ -51,7 +51,7 @@ export default function ScontriniVending() {
   };
 
   return (
-    <Layout title="Scontrini Vending" subtitle="scontrini sommati al prelievo vending">
+    <Layout title="Scontrini Vending" subtitle="registrazione degli scontrini della vending">
       <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
         <KpiCard label="Totale scontrini vending" value={formatEur(data.totale)} tone="info" />
         <KpiCard label="Scontrini registrati" value={data.movimenti.length} />

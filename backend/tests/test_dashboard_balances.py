@@ -277,10 +277,10 @@ def test_vending_cash_inventory_withdrawals_and_receipts_are_exposed_separately(
     assert result["venditeVendingContanti"] == 1000.0
     assert result["giacenzaVendingContanti"] == 600.0
     assert result["scontriniVending"] == 50.0
-    assert result["prelievoVending"] == 450.0
-    assert result["prelievoDaVending"] == 450.0
-    assert result["prelieviContantiDaVending"] == 450.0
-    assert result["prelieviContantiCassaVending"] == 450.0
+    assert result["prelievoVending"] == 400.0
+    assert result["prelievoDaVending"] == 400.0
+    assert result["prelieviContantiDaVending"] == 400.0
+    assert result["prelieviContantiCassaVending"] == 400.0
     assert result["giacenzaAttualeCassaVending"] == 600.0
     assert result["cassaVending"] == 600.0
     assert result["saldoCassaNegozioEVending"] == 700.0

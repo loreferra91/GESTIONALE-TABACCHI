@@ -34,7 +34,7 @@ export default function PrelieviVending() {
         venditeVendingContanti,
         giacenzaVending,
         prelievoVending: saldi.prelievoVending
-          ?? (venditeVendingContanti - giacenzaVending + (saldi.scontriniVending ?? 0)),
+          ?? (venditeVendingContanti - giacenzaVending),
       });
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile caricare i prelievi vending"));
