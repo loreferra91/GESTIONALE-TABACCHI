@@ -136,10 +136,11 @@ def test_receipts_are_separate_from_cash_withdrawal_and_combined_balance():
     result = server._calculate_dashboard_balances(
         [(3445.30, "Contanti"), (2445, "Carte")],
         saldo_cassa=-664.72,
-        giacenza_vending=237.55,
+        totale_prelievi_vending=3207.75,
         totale_scontrini=100,
     )
 
     assert result["prelievoVending"] == 3207.75
+    assert result["giacenzaVendingContanti"] == 237.55
     assert result["scontriniVending"] == 100
     assert result["saldoCassaNegozioEVending"] == 2543.03

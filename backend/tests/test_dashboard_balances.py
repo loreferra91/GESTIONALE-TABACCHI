@@ -71,7 +71,7 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
         SimpleNamespace(db_storico_vending_ext=historical, vendite=app_sales),
     )
 
-    result = asyncio.run(server._dashboard_balances(1500, 1225))
+    result = asyncio.run(server._dashboard_balances(1500, 0))
 
     assert result == {
         "saldoVendingTotale": 1535.0,
@@ -111,7 +111,7 @@ def test_uses_app_vending_sales_as_backward_compatible_fallback(monkeypatch):
         SimpleNamespace(db_storico_vending_ext=historical, vendite=app_sales),
     )
 
-    result = asyncio.run(server._dashboard_balances(1000, 1200))
+    result = asyncio.run(server._dashboard_balances(1000, 0))
 
     assert result["saldoVendingTotale"] == 1400.0
     assert result["saldoVendingContanti"] == 1200.0
@@ -251,22 +251,24 @@ def test_separates_cards_and_pagobancomat_while_preserving_electronic_total():
     assert result["saldoVendingElettronico"] == 33
 
 
-def test_vending_sales_do_not_change_combined_cash_balance():
+def test_zero_registered_withdrawals_leave_all_cash_sales_in_vending():
     result = server._calculate_dashboard_balances(
-        [(3445.30, "Contanti")], -1610.62, 3445.30
+        [(2984.00, "Contanti")], -1610.62, 0
     )
 
-    assert result["venditeVendingContanti"] == 3445.30
+    assert result["venditeVendingContanti"] == 2984.00
     assert result["prelievoVending"] == 0
+    assert result["giacenzaVendingContanti"] == 2984.00
     assert result["differenzaCassaVendingContanti"] == -1610.62
 
 
 def test_cash_difference_adds_vending_withdrawals_to_signed_store_balance():
     result = server._calculate_dashboard_balances(
-        [(3445.30, "Contanti")], -1610.62, 2945.30
+        [(3445.30, "Contanti")], -1610.62, 500
     )
 
     assert result["totalePrelievi"] == 500.0
+    assert result["giacenzaVendingContanti"] == 2945.30
     assert result["differenzaCassaVendingContanti"] == -1110.62
 
 
@@ -274,18 +276,19 @@ def test_opening_vending_cash_is_included_in_reconciliation():
     result = server._calculate_dashboard_balances(
         [(1000, "Contanti")],
         saldo_cassa=300,
-        giacenza_vending=750,
+        totale_prelievi_vending=400,
         giacenza_iniziale_vending=150,
     )
 
     assert result["giacenzaInizialeVendingContanti"] == 150.0
     assert result["prelievoVending"] == 400.0
+    assert result["giacenzaVendingContanti"] == 750.0
     assert result["saldoCassaNegozioEVending"] == 700.0
 
 
 def test_vending_cash_inventory_withdrawals_and_receipts_are_exposed_separately():
     result = server._calculate_dashboard_balances(
-        [(1000, "Contanti"), (250, "POS")], 300, 600, 50
+        [(1000, "Contanti"), (250, "POS")], 300, 400, 50
     )
 
     assert result["venditeVendingContanti"] == 1000.0

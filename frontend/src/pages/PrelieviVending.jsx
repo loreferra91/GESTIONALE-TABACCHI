@@ -25,17 +25,15 @@ export default function PrelieviVending() {
       const venditeVendingContanti = saldi.venditeVendingContanti
         ?? saldi.saldoVendingContanti
         ?? 0;
-      const giacenzaVending = saldi.scontriniVending !== undefined
-        ? saldi.giacenzaVendingContanti
-        : prelievi.data.totale;
       const giacenzaInizialeVending = saldi.giacenzaInizialeVendingContanti ?? 0;
+      const prelievoVending = Number(prelievi.data?.totale ?? 0);
+      const giacenzaVending = giacenzaInizialeVending + venditeVendingContanti - prelievoVending;
       setData({
         movimenti: prelievi.data.movimenti,
         totale: prelievi.data.totale,
         venditeVendingContanti,
         giacenzaVending,
-        prelievoVending: saldi.prelievoVending
-          ?? (giacenzaInizialeVending + venditeVendingContanti - giacenzaVending),
+        prelievoVending,
       });
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile caricare i prelievi vending"));

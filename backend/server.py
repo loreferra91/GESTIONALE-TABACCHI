@@ -3848,16 +3848,15 @@ def _latest_historical_vending_date(documents: List[Dict[str, Any]]):
 def _calculate_dashboard_balances(
     vending_payments: List[tuple],
     saldo_cassa: float,
-    giacenza_vending: float = 0,
+    totale_prelievi_vending: float = 0,
     totale_scontrini: float = 0,
     giacenza_iniziale_vending: float = 0,
 ) -> Dict[str, float]:
     """Calcola in un solo punto i saldi monetari esposti dalla dashboard.
 
-    Il CSV incrementa sia le vendite cash sia la giacenza fisica. Il contante
-    prelevato è la giacenza iniziale più le vendite cash, meno la giacenza
-    attuale. Gli scontrini sono esposti separatamente e non rappresentano un
-    movimento di contante.
+    I prelievi registrati sono la fonte autorevole. La giacenza è la giacenza
+    iniziale più le vendite cash, meno quei prelievi. Gli scontrini sono
+    esposti separatamente e non rappresentano un movimento di contante.
     """
     cash = 0.0
     cards = 0.0
@@ -3882,10 +3881,10 @@ def _calculate_dashboard_balances(
     electronic = round(electronic, 2)
     total = round(cash + electronic, 2)
     saldo_cassa = round(float(saldo_cassa or 0), 2)
-    giacenza_vending = round(float(giacenza_vending or 0), 2)
+    prelievo_vending = round(float(totale_prelievi_vending or 0), 2)
     totale_scontrini = round(float(totale_scontrini or 0), 2)
     giacenza_iniziale_vending = round(float(giacenza_iniziale_vending or 0), 2)
-    prelievo_vending = round(giacenza_iniziale_vending + cash - giacenza_vending, 2)
+    giacenza_vending = round(giacenza_iniziale_vending + cash - prelievo_vending, 2)
     saldo_casse = round(prelievo_vending + saldo_cassa, 2)
     return {
         "saldoVendingTotale": total,
@@ -3915,7 +3914,7 @@ def _calculate_dashboard_balances(
 
 async def _dashboard_balances(
     saldo_cassa: float,
-    giacenza_vending: float = 0,
+    totale_prelievi_vending: float = 0,
     totale_scontrini: float = 0,
     latest_import_created_at: Any = None,
     giacenza_iniziale_vending: float = 0,
@@ -3944,7 +3943,7 @@ async def _dashboard_balances(
         result = _calculate_dashboard_balances(
             payments,
             saldo_cassa,
-            giacenza_vending,
+            totale_prelievi_vending,
             totale_scontrini,
             giacenza_iniziale_vending,
         )
@@ -3971,7 +3970,7 @@ async def _dashboard_balances(
     return _calculate_dashboard_balances(
         payments,
         saldo_cassa,
-        giacenza_vending,
+        totale_prelievi_vending,
         totale_scontrini,
         giacenza_iniziale_vending,
     )
@@ -4078,11 +4077,10 @@ async def dashboard():
         {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
-    versamenti, prelievi, scontrini, giacenza_vending, giacenza_iniziale_doc, venduto_negozio_app_contanti = await asyncio.gather(
+    versamenti, prelievi, scontrini, giacenza_iniziale_doc, venduto_negozio_app_contanti = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
         _scontrini_vending_summary(),
-        _vending_cash_balance(),
         db.parametri.find_one(
             {"nome": "GIACENZA_INIZIALE_CONTANTI_VENDING"},
             {"_id": 0, "valore": 1},
@@ -4098,7 +4096,7 @@ async def dashboard():
     saldi, andamento_vendite = await asyncio.gather(
         _dashboard_balances(
             liquidita_residua,
-            giacenza_vending,
+            prelievi["totale"],
             scontrini["totale"],
             (ultimo_import_contabile or {}).get("created_at"),
             giacenza_iniziale_vending,
@@ -4114,7 +4112,7 @@ async def dashboard():
         "totale_versamenti": versamenti["totale"],
         "totale_prelievi": prelievi["totale"],
         "totale_scontrini_vending": scontrini["totale"],
-        "giacenza_vending_contanti": giacenza_vending,
+        "giacenza_vending_contanti": saldi["giacenzaVendingContanti"],
         "giacenza_iniziale_vending_contanti": giacenza_iniziale_vending,
         "venduto_negozio_excel": round(venduto_negozio_excel, 2),
         "venduto_negozio_app_contanti": venduto_negozio_app_contanti,
