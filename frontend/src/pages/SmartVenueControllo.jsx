@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import Layout from "../components/Layout";
 import { Badge, Card, KpiCard, formatNum } from "../components/UI";
 import { api, apiErrorMessage } from "../lib/api";
+import { SearchBar, Th, useSortSearch } from "../lib/tableHooks";
 
 const statusTone = status => ({
   OK: "ok",
@@ -16,7 +17,6 @@ export default function SmartVenueControllo() {
   const [text, setText] = useState("");
   const [rows, setRows] = useState([]);
   const [errors, setErrors] = useState([]);
-  const [query, setQuery] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
@@ -27,12 +27,23 @@ export default function SmartVenueControllo() {
       .catch(error => toast.error(apiErrorMessage(error, "Impossibile caricare l'ultimo controllo")));
   }, []);
 
-  const visibleRows = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return rows;
-    return rows.filter(row => [row.codice, row.descrizione, ...(row.barcodes || [])]
-      .some(value => String(value || "").toLowerCase().includes(normalized)));
-  }, [query, rows]);
+  const sortableRows = useMemo(() => rows.map(row => ({
+    ...row,
+    gestionale_totale: row.gestionale_totale ?? row.rimanenze,
+    stato: row.stato || (row.differenza ? "DIFFERENZA" : "OK"),
+    ricerca_barcode: (row.barcodes || []).join(" "),
+  })), [rows]);
+
+  const {
+    rows: visibleRows,
+    sortKey,
+    sortDir,
+    toggle,
+    query,
+    setQuery,
+  } = useSortSearch(sortableRows, {
+    searchFields: ["codice", "descrizione", "ricerca_barcode"],
+  });
 
   const summary = useMemo(() => ({
     products: rows.length,
@@ -136,16 +147,13 @@ export default function SmartVenueControllo() {
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="relative max-w-lg flex-1">
-          <MagnifyingGlass size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            data-testid="smart-venue-control-search"
-            value={query}
-            onChange={event => setQuery(event.target.value)}
-            placeholder="Cerca codice, descrizione o barcode…"
-            className="w-full rounded-md border border-slate-300 py-2 pl-9 pr-3 text-sm"
-          />
-        </div>
+        <SearchBar
+          data-testid="smart-venue-control-search"
+          value={query}
+          onChange={setQuery}
+          placeholder="Cerca codice, descrizione o barcode…"
+          className="max-w-lg flex-1"
+        />
         <span className="text-sm text-slate-500">{visibleRows.length} risultati</span>
       </div>
 
@@ -154,15 +162,15 @@ export default function SmartVenueControllo() {
           <table className="data-table w-full min-w-[1120px]">
             <thead>
               <tr>
-                <th>Codice</th>
-                <th>Descrizione</th>
-                <th className="text-right">SmartVenue reale</th>
-                <th className="text-right">Vending reale</th>
-                <th className="text-right">Negozio registrato</th>
-                <th className="text-right">Totale gestionale</th>
-                <th className="text-right">Negozio calcolato</th>
-                <th className="text-right">Differenza</th>
-                <th>Stato</th>
+                <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
+                <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
+                <Th sortKey="smart_venue" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">SmartVenue reale</Th>
+                <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vending reale</Th>
+                <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Negozio registrato</Th>
+                <Th sortKey="gestionale_totale" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Totale gestionale</Th>
+                <Th sortKey="negozio_calcolato" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Negozio calcolato</Th>
+                <Th sortKey="differenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Differenza</Th>
+                <Th sortKey="stato" currentKey={sortKey} dir={sortDir} onClick={toggle}>Stato</Th>
               </tr>
             </thead>
             <tbody>
