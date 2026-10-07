@@ -77,6 +77,42 @@ def test_smart_venue_resolves_old_codes_and_collapses_duplicate_snapshots(monkey
     assert rows[2]["codici_sorgente"] == ["AMMS223", "AMMS233"]
 
 
+def test_smart_venue_save_uses_one_bulk_write(monkeypatch):
+    database = isolated_db(monkeypatch)
+    bulk_sizes = []
+
+    async def fake_backup(*_args, **_kwargs):
+        return {"id": "backup-1"}
+
+    async def fake_bulk(_collection, operations, batch_size=1000):
+        bulk_sizes.append((len(operations), batch_size))
+        return {"inseriti": len(operations), "aggiornati": 0, "errori": 0}
+
+    async def fake_history(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(server, "create_backup_snapshot", fake_backup)
+    monkeypatch.setattr(server, "_bulk_upsert", fake_bulk)
+    monkeypatch.setattr(server, "record_import_history", fake_history)
+
+    async def seed_and_save():
+        await database.prodotti.insert_one({
+            "id": "evo", "codice": "AMMS21601",
+            "descrizione": "EVO AMBER STICKS", "giacenza_negozio": 22,
+        })
+        return await server.import_smart_venue_bulk(server.SmartVenueBulkIn(testo=(
+            "80824947 - EVO AMBER STICKS*20PZ (Conf. astuccio da 20 pezzi) - 20697 - Sigarette\n"
+            "4.50\n22\n99.00\n"
+            "99999999 - EVO AMBER STICKS - 21601 - Sigarette\n"
+            "4.50\n22\n99.00\n"
+        )))
+
+    response = asyncio.run(seed_and_save())
+
+    assert response["ok"] is True
+    assert bulk_sizes == [(1, 1000)]
+
+
 class FakeCursor:
     def __init__(self, documents):
         self.documents = documents

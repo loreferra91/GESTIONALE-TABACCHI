@@ -4710,26 +4710,28 @@ async def import_smart_venue_bulk(body: SmartVenueBulkIn):
     batch_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     imported_codes = []
+    operations = []
     for row in resolved_rows:
         code = row["codice"]
         imported_codes.append(code)
-        await db.smart_venue.update_one(
+        operations.append(UpdateOne(
             {"codice": code},
-            {
-                "$set": {
-                    "id": f"smart-venue:{code}",
-                    "codice": code,
-                    "descrizione": row["descrizione"],
-                    "smart_venue": row["smart_venue"],
-                    "barcode": row["barcodes"][0] if row["barcodes"] else "",
-                    "barcodes": row["barcodes"],
-                    "origine": "BULK_TESTO",
-                    "batch_id": batch_id,
-                    "updated_at": now,
-                }
-            },
+            {"$set": {
+                "id": f"smart-venue:{code}",
+                "codice": code,
+                "descrizione": row["descrizione"],
+                "smart_venue": row["smart_venue"],
+                "barcode": row["barcodes"][0] if row["barcodes"] else "",
+                "barcodes": row["barcodes"],
+                "origine": "BULK_TESTO",
+                "batch_id": batch_id,
+                "updated_at": now,
+            }},
             upsert=True,
-        )
+        ))
+    write_result = await _bulk_upsert(db.smart_venue, operations)
+    if write_result["errori"]:
+        raise HTTPException(500, "Salvataggio SmartVenue incompleto: riprova")
     await db.smart_venue.delete_many({
         "origine": "BULK_TESTO",
         "codice": {"$nin": imported_codes},
