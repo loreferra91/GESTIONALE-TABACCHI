@@ -4099,6 +4099,7 @@ async def _import_listino(ws) -> Dict[str, int]:
 
 async def _import_vending(ws) -> Dict[str, int]:
     operations = []
+    codici_importati = set()
     err = 0
     for row in ws.iter_rows(min_row=4, values_only=True):
         try:
@@ -4116,9 +4117,19 @@ async def _import_vending(ws) -> Dict[str, int]:
                 "soglia_minima": int(row[5]) if row[5] is not None else 2,
             }
             operations.append(UpdateOne({"colonna": colonna}, {"$set": data_p}, upsert=True))
+            if data_p["codice"]:
+                codici_importati.add(data_p["codice"])
         except Exception:
             err += 1
     result = await _bulk_upsert(db.vending, operations)
+    # La giacenza registrata nelle singole colonne vending e' la fotografia
+    # fisica autorevole. RIEP_VENDITA puo' contenere un totale vecchio o anche
+    # negativo: dopo l'import delle colonne riallineiamo quindi il totale del
+    # prodotto alla loro somma, cosi' Prodotti, Magazzino e Smart Venue leggono
+    # tutti la stessa giacenza reale.
+    for codice in sorted(codici_importati):
+        await _sync_product_vending_stock(codice)
+    result["prodotti_riconciliati"] = len(codici_importati)
     result["errori"] += err
     return result
 

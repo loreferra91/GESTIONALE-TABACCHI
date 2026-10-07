@@ -2,6 +2,7 @@ import asyncio
 import os
 from types import SimpleNamespace
 
+import openpyxl
 import pytest
 from fastapi import HTTPException
 from mongomock_motor import AsyncMongoMockClient
@@ -10,6 +11,35 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 import backend.server as server
+
+
+def test_vending_import_reconciles_product_stock_from_real_columns(monkeypatch):
+    database = AsyncMongoMockClient()["vending_import_reconciliation_test"]
+    monkeypatch.setattr(server, "db", database)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append([])
+    sheet.append([])
+    sheet.append([])
+    sheet.append(["F02", "AMMS20154", "TEREA TOURQUOISE", 0, 5, 2])
+
+    async def import_and_read():
+        await database.prodotti.insert_one({
+            "codice": "AMMS20154",
+            "giacenza_negozio": 0,
+            "giacenza_vending": -5,
+        })
+        result = await server._import_vending(sheet)
+        product = await database.prodotti.find_one(
+            {"codice": "AMMS20154"}, {"_id": 0}
+        )
+        return result, product
+
+    result, product = asyncio.run(import_and_read())
+
+    assert result["prodotti_riconciliati"] == 1
+    assert product["giacenza_negozio"] == 0
+    assert product["giacenza_vending"] == 0
 
 
 class FakeCollection:
