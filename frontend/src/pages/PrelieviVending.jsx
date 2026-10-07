@@ -6,7 +6,7 @@ import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
 export default function PrelieviVending() {
-  const [data, setData] = useState({ movimenti: [], totale: 0, venditeVendingContanti: 0, giacenzaVending: 0, prelievoVending: 0 });
+  const [data, setData] = useState({ movimenti: [], totale: 0, venditeVendingContanti: 0, giacenzaVending: 0, prelievoVending: 0, scontriniVending: 0 });
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, importo: 0, descrizione: "", operatore: "" });
 
@@ -17,8 +17,9 @@ export default function PrelieviVending() {
 
   const load = async () => {
     try {
-      const [prelievi, dashboard] = await Promise.all([
+      const [prelievi, scontrini, dashboard] = await Promise.all([
         api.get("/prelievi-vending"),
+        api.get("/scontrini-vending"),
         api.get("/dashboard"),
       ]);
       const saldi = dashboard.data?.saldi || {};
@@ -27,6 +28,7 @@ export default function PrelieviVending() {
         ?? 0;
       const giacenzaInizialeVending = saldi.giacenzaInizialeVendingContanti ?? 0;
       const prelievoVending = Number(prelievi.data?.totale ?? 0);
+      const scontriniVending = Number(scontrini.data?.totale ?? 0);
       const giacenzaVending = giacenzaInizialeVending + venditeVendingContanti - prelievoVending;
       setData({
         movimenti: prelievi.data.movimenti,
@@ -34,6 +36,7 @@ export default function PrelieviVending() {
         venditeVendingContanti,
         giacenzaVending,
         prelievoVending,
+        scontriniVending,
       });
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile caricare i prelievi vending"));
@@ -41,6 +44,8 @@ export default function PrelieviVending() {
   };
 
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const prelievoVendingVisuale = data.prelievoVending + data.scontriniVending;
 
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
@@ -69,7 +74,7 @@ export default function PrelieviVending() {
     <Layout title="Prelievi Vending" subtitle="registrazione del contante prelevato dalla vending">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <KpiCard label="Vendite vending in contanti" value={formatEur(data.venditeVendingContanti)} tone="info" />
-        <KpiCard label="Prelievo da vending" value={formatEur(data.prelievoVending)} />
+        <KpiCard label="Prelievo da vending" value={formatEur(prelievoVendingVisuale)} />
         <KpiCard label="Giacenza vending" value={formatEur(data.giacenzaVending)} tone={data.giacenzaVending < 0 ? "danger" : "success"} />
       </div>
 
