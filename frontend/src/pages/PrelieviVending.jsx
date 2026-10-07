@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { ArrowRight } from "@phosphor-icons/react";
+import { Link } from "react-router-dom";
 import Layout from "../components/Layout";
 import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, formatEur } from "../components/UI";
@@ -45,8 +47,6 @@ export default function PrelieviVending() {
 
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const prelievoVendingVisuale = data.prelievoVending + data.scontriniVending;
-
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
     try {
@@ -72,10 +72,26 @@ export default function PrelieviVending() {
 
   return (
     <Layout title="Prelievi Vending" subtitle="registrazione del contante prelevato dalla vending">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 gap-4 mb-6 md:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Vendite vending in contanti" value={formatEur(data.venditeVendingContanti)} tone="info" />
-        <KpiCard label="Prelievo da vending" value={formatEur(prelievoVendingVisuale)} />
+        <KpiCard label="Prelievo da vending" value={formatEur(data.prelievoVending)} />
         <KpiCard label="Giacenza vending" value={formatEur(data.giacenzaVending)} tone={data.giacenzaVending < 0 ? "danger" : "success"} />
+        <Link
+          to="/scontrini-vending"
+          data-testid="scontrini-vending-link"
+          aria-label={`Apri Scontrini Vending, totale ${formatEur(data.scontriniVending)}`}
+          className="group block min-w-0"
+        >
+          <Card className="h-full min-w-0 p-4 transition-all duration-200 group-hover:-translate-y-[2px] group-hover:border-slate-300 group-hover:shadow-md lg:p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="overline min-h-[2.5rem] break-words leading-tight">Scontrini vending</div>
+              <ArrowRight size={18} weight="bold" className="shrink-0 text-slate-400 transition-transform group-hover:translate-x-1 group-hover:text-slate-700" />
+            </div>
+            <div className="kpi-value mt-2 whitespace-nowrap text-[clamp(1.35rem,1.8vw,2.15rem)] leading-tight text-blue-800 tabular-nums">
+              {formatEur(data.scontriniVending)}
+            </div>
+          </Card>
+        </Link>
       </div>
 
       <Card className="p-4 mb-6">
