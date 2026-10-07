@@ -52,8 +52,28 @@ def test_backup_snapshot_response_does_not_leak_mongo_object_id(monkeypatch):
     assert "_id" not in result
     assert "_id" in fake_db.backup_snapshots.saved
     assert result["total_docs"] == len(server.BACKUP_COLLECTIONS)
+    assert result["partial"] is False
     assert "vendite" in server.BACKUP_COLLECTIONS
     assert "cassa" in server.BACKUP_COLLECTIONS
+
+
+def test_backup_snapshot_can_be_limited_to_changed_collections(monkeypatch):
+    fake_db = _BackupDb()
+    monkeypatch.setattr(server, "db", fake_db)
+
+    result = asyncio.run(server.create_backup_snapshot(
+        "Backup SmartVenue",
+        "pre-import-smart-venue-bulk",
+        ["smart_venue", "smart_venue_hidden", "smart_venue_values"],
+    ))
+
+    assert result["counts"] == {
+        "smart_venue": 1,
+        "smart_venue_hidden": 1,
+        "smart_venue_values": 1,
+    }
+    assert result["total_docs"] == 3
+    assert result["partial"] is True
 
 
 def test_backup_file_validation_requires_every_operational_collection():

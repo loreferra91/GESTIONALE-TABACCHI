@@ -1407,12 +1407,19 @@ async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> b
     return bytes(buf)
 
 
-async def create_backup_snapshot(label: str, reason: str = "manuale") -> Dict[str, Any]:
+async def create_backup_snapshot(
+    label: str,
+    reason: str = "manuale",
+    collection_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     snapshot_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
     counts: Dict[str, int] = {}
+    names = BACKUP_COLLECTIONS if collection_names is None else [
+        name for name in collection_names if name in BACKUP_COLLECTIONS
+    ]
     await db.backup_snapshot_items.delete_many({"snapshot_id": snapshot_id})
-    for collection_name in BACKUP_COLLECTIONS:
+    for collection_name in names:
         collection = db[collection_name]
         docs = await collection.find({}, {"_id": 0}).to_list(25000)
         counts[collection_name] = len(docs)
@@ -1429,6 +1436,7 @@ async def create_backup_snapshot(label: str, reason: str = "manuale") -> Dict[st
         "created_at": created_at,
         "counts": counts,
         "total_docs": total_docs,
+        "partial": collection_names is not None,
         "status": "READY",
     }
     # Motor muta il dizionario passato a insert_one aggiungendo ``_id``.
@@ -1512,6 +1520,11 @@ async def backup_download(snapshot_id: str):
         if name not in backed_up_names and name not in OPTIONAL_BACKUP_COLLECTIONS
     ]
     if missing:
+        if meta.get("partial"):
+            raise HTTPException(
+                409,
+                "Questo è un backup automatico parziale: può essere ripristinato dall'app, ma non scaricato come backup completo.",
+            )
         raise HTTPException(
             409,
             "Questo backup è precedente al formato completo. Creane uno nuovo per scaricare anche vendite, cassa e ordini.",
@@ -4706,6 +4719,7 @@ async def import_smart_venue_bulk(body: SmartVenueBulkIn):
     backup = await create_backup_snapshot(
         "Prima import testo SmartVenue",
         "pre-import-smart-venue-bulk",
+        ["smart_venue", "smart_venue_hidden", "smart_venue_values"],
     )
     batch_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
