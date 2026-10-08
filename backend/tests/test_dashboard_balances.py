@@ -224,6 +224,86 @@ def test_accounting_csv_snapshot_replaces_excel_totals_and_adds_only_later_sales
     assert result["fonteVendingRighe"] == 1000
 
 
+def test_accounting_snapshot_does_not_duplicate_csv_sales_imported_after_alignment(monkeypatch):
+    historical = FakeCollection([])
+    app_sales = FakeCollection([
+        {
+            "created_at": "2026-10-07T10:01:00+00:00",
+            "importo": 10,
+            "pagamento": "CONTANTI",
+            "csv_event_key": "cash-event:1",
+            "csv_file_sha256": "same-file",
+        },
+        {
+            "created_at": "2026-10-07T10:02:00+00:00",
+            "importo": 20,
+            "pagamento": "CARTE",
+            "csv_event_key": "card-event:1",
+            "csv_file_sha256": "same-file",
+        },
+        {
+            "created_at": "2026-10-07T10:03:00+00:00",
+            "importo": 5,
+            "pagamento": "PAGOBANCOMAT",
+            "csv_event_key": "later-event:1",
+            "csv_file_sha256": "later-file",
+        },
+    ])
+    snapshot = SnapshotCollection({
+        "status": "active",
+        "created_at": "2026-10-07T10:00:00+00:00",
+        "sha256": "same-file",
+        "csv_event_keys": ["cash-event:1", "card-event:1"],
+        "importi_pagamenti": {"CONTANTI": 100, "CARTE": 200},
+    })
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            db_storico_vending_ext=historical,
+            vendite=app_sales,
+            vending_accounting_snapshots=snapshot,
+        ),
+    )
+
+    result = asyncio.run(server._dashboard_balances(0))
+
+    assert result["venditeVendingContanti"] == 100
+    assert result["venditeVendingCarte"] == 200
+    assert result["venditeVendingPagoBancomat"] == 5
+    assert result["saldoVendingTotale"] == 305
+
+
+def test_legacy_accounting_snapshot_uses_file_hash_to_avoid_duplicate_payments(monkeypatch):
+    historical = FakeCollection([])
+    app_sales = FakeCollection([{
+        "created_at": "2026-10-07T10:01:00+00:00",
+        "importo": 25,
+        "pagamento": "CONTANTI",
+        "csv_file_sha256": "legacy-same-file",
+    }])
+    snapshot = SnapshotCollection({
+        "status": "active",
+        "created_at": "2026-10-07T10:00:00+00:00",
+        "sha256": "legacy-same-file",
+        "importi_pagamenti": {"CONTANTI": 100},
+    })
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            db_storico_vending_ext=historical,
+            vendite=app_sales,
+            vending_accounting_snapshots=snapshot,
+        ),
+    )
+
+    result = asyncio.run(server._dashboard_balances(0))
+
+    assert result["venditeVendingContanti"] == 100
+    assert result["saldoVendingTotale"] == 100
+
+
 def test_empty_legacy_payment_uses_cash_default_without_losing_unknown_methods():
     result = server._calculate_dashboard_balances(
         [(10, "Contanti"), (5, ""), (3, "Voucher elettronico")], 10

@@ -2125,6 +2125,7 @@ async def align_vending_accounting_csv(file: UploadFile = File(...)):
     """Rende il CSV fonte contabile senza modificare giacenze o venduti."""
     content = await _read_capped(file)
     parsed = _parse_csv_vending(content.decode("utf-8-sig", errors="replace"))
+    _assign_csv_vending_event_keys(parsed["righe"])
     summary = _summarize_vending_csv(parsed)
     if not summary["righe"]:
         raise HTTPException(422, "Il CSV non contiene vendite valide")
@@ -2143,6 +2144,9 @@ async def align_vending_accounting_csv(file: UploadFile = File(...)):
         "created_at": created_at,
         "file_name": Path(file.filename or "vendite-vending.csv").name,
         "sha256": hashlib.sha256(content).hexdigest(),
+        # Permette al dashboard di riconoscere esattamente le vendite gia'
+        # comprese nella fotografia, anche se vengono importate dopo.
+        "csv_event_keys": [row["csv_event_key"] for row in parsed["righe"]],
         **{key: value for key, value in summary.items() if key != "errori"},
     }
     await db.vending_accounting_snapshots.insert_one(document)
@@ -2150,14 +2154,23 @@ async def align_vending_accounting_csv(file: UploadFile = File(...)):
         {"id": {"$ne": snapshot_id}, "status": "active"},
         {"$set": {"status": "superseded", "superseded_at": created_at}},
     )
-    response = {key: value for key, value in document.items() if key not in {"_id", "sha256"}}
+    response = {
+        key: value for key, value in document.items()
+        if key not in {"_id", "sha256", "csv_event_keys"}
+    }
     response["backup_id"] = backup.get("id")
     return response
 
 
 @api.get("/contabilita/vending/fonte")
 async def vending_accounting_source():
-    return await _latest_vending_accounting_snapshot()
+    snapshot = await _latest_vending_accounting_snapshot()
+    if not snapshot:
+        return None
+    return {
+        key: value for key, value in snapshot.items()
+        if key not in {"sha256", "csv_event_keys"}
+    }
 
 
 VENDING_CASH_STATE_ID = "saldo"
@@ -4158,7 +4171,11 @@ async def _dashboard_balances(
         db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
         db.vendite.find(
             {"canale": {"$regex": "^VENDING$", "$options": "i"}},
-            {"_id": 0, "data": 1, "created_at": 1, "importo": 1, "pagamento": 1, "sorgente": 1},
+            {
+                "_id": 0, "data": 1, "created_at": 1, "importo": 1,
+                "pagamento": 1, "sorgente": 1, "csv_event_key": 1,
+                "csv_file_sha256": 1,
+            },
         ).to_list(None),
         _latest_vending_accounting_snapshot(),
     )
@@ -4166,7 +4183,18 @@ async def _dashboard_balances(
         amounts = accounting_snapshot.get("importi_pagamenti") or {}
         payments = [(float(amount or 0), bucket) for bucket, amount in amounts.items()]
         aligned_at = _parse_utc_datetime(accounting_snapshot.get("created_at"))
+        snapshot_event_keys = set(accounting_snapshot.get("csv_event_keys") or [])
+        snapshot_file_sha256 = str(accounting_snapshot.get("sha256") or "")
         for document in app_docs:
+            # La fotografia CSV contiene gia' questi importi. Il confronto per
+            # evento copre anche CSV cumulativi; lo SHA mantiene compatibili le
+            # fotografie create prima dell'introduzione delle chiavi evento.
+            event_key = str(document.get("csv_event_key") or "")
+            file_sha256 = str(document.get("csv_file_sha256") or "")
+            if event_key and event_key in snapshot_event_keys:
+                continue
+            if snapshot_file_sha256 and file_sha256 == snapshot_file_sha256:
+                continue
             created_at = _parse_utc_datetime(document.get("created_at"))
             if not aligned_at or not created_at or created_at <= aligned_at:
                 continue
