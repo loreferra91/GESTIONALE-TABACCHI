@@ -299,7 +299,7 @@ export default function Vendite() {
   };
 
   const uploadCsv = async () => {
-    if (!csvFile || !csvPreview?.righe || !csvPreview?.importabile || csvUndoing) return;
+    if (!csvFile || !csvPreview?.contabilita_csv?.righe || !csvPreview?.importabile || csvUndoing) return;
     setCsvImporting(true);
     const fd = new FormData();
     fd.append("file", csvFile);
@@ -309,7 +309,10 @@ export default function Vendite() {
       const j = await r.json();
       setCsvResult(j);
       if (j.batch_id) setLastCsvImport({ id: j.batch_id, ...j, status: "active" });
-      toast.success(`CSV vending: ${j.inseriti} vendite importate, ${j.righe_da_scalare || 0} applicate alla giacenza`);
+      toast.success(j.inseriti
+        ? `CSV vending: ${j.inseriti} vendite importate, ${j.righe_da_scalare || 0} applicate alla giacenza; contabilità allineata`
+        : "Nessuna nuova vendita; contabilità vending allineata al CSV completo"
+      );
       clearCsv();
       await load();
     } catch (err) {
@@ -599,8 +602,8 @@ export default function Vendite() {
               </div>
               <div className="flex gap-2">
                 <button data-testid="csv-cancel" onClick={clearCsv} disabled={csvImporting || csvUndoing} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-100 disabled:opacity-40">Annulla</button>
-                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || csvUndoing || !csvPreview.righe || !csvPreview.importabile} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
-                  {csvImporting ? "Aggiornamento…" : "Conferma e aggiorna vendite"}
+                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || csvUndoing || !csvPreview.contabilita_csv?.righe || !csvPreview.importabile} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
+                  {csvImporting ? "Aggiornamento…" : csvPreview.righe ? "Conferma vendite e contabilità" : "Allinea solo contabilità"}
                 </button>
               </div>
             </div>
@@ -611,6 +614,10 @@ export default function Vendite() {
                   {payment}: {formatNum(count)} · {formatEur(csvPreview.importi_pagamenti?.[payment] || 0)}
                 </Badge>
               ))}
+            </div>
+            <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+              Contabilità completa del CSV: {formatNum(csvPreview.contabilita_csv?.righe || 0)} movimenti · {formatEur(csvPreview.contabilita_csv?.totale || 0)}.
+              Verrà aggiornata insieme alle vendite, usando i totali completi del file.
             </div>
             {csvPreview.vendite?.length > 0 && (
               <div className="mt-4 max-h-80 overflow-auto rounded-md border border-slate-200 bg-white">

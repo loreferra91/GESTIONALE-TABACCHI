@@ -2112,6 +2112,57 @@ async def _latest_vending_accounting_snapshot() -> Optional[Dict[str, Any]]:
     )
 
 
+def _public_vending_accounting_snapshot(document: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in document.items()
+        if key not in {"_id", "sha256", "csv_event_keys"}
+    }
+
+
+async def _store_vending_accounting_snapshot(
+    content: bytes,
+    file_name: str,
+    *,
+    source_batch_id: Optional[str] = None,
+    backup_reason: Optional[str] = None,
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Salva l'intero CSV come fotografia contabile autorevole."""
+    parsed = _parse_csv_vending(content.decode("utf-8-sig", errors="replace"))
+    _assign_csv_vending_event_keys(parsed["righe"])
+    summary = _summarize_vending_csv(parsed)
+    if not summary["righe"]:
+        raise HTTPException(422, "Il CSV non contiene vendite valide")
+    if summary["errori"]:
+        raise HTTPException(
+            422,
+            f"Il CSV contiene {len(summary['errori'])} righe non valide: correggile prima dell'allineamento",
+        )
+
+    backup = await create_backup_snapshot(backup_reason) if backup_reason else None
+    previous = await _latest_vending_accounting_snapshot()
+    created_at = datetime.now(timezone.utc).isoformat()
+    snapshot_id = str(uuid.uuid4())
+    document = {
+        "id": snapshot_id,
+        "status": "active",
+        "created_at": created_at,
+        "file_name": Path(file_name or "vendite-vending.csv").name,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "previous_snapshot_id": (previous or {}).get("id"),
+        "source_batch_id": source_batch_id,
+        # Permette al dashboard di riconoscere esattamente le vendite gia'
+        # comprese nella fotografia, anche se vengono importate dopo.
+        "csv_event_keys": [row["csv_event_key"] for row in parsed["righe"]],
+        **{key: value for key, value in summary.items() if key != "errori"},
+    }
+    await db.vending_accounting_snapshots.insert_one(document)
+    await db.vending_accounting_snapshots.update_many(
+        {"id": {"$ne": snapshot_id}, "status": "active"},
+        {"$set": {"status": "superseded", "superseded_at": created_at}},
+    )
+    return document, backup
+
+
 @api.post("/contabilita/vending/preview-csv")
 async def preview_vending_accounting_csv(file: UploadFile = File(...)):
     """Controlla l'intero export vending destinato alla riconciliazione contabile."""
@@ -2124,41 +2175,13 @@ async def preview_vending_accounting_csv(file: UploadFile = File(...)):
 async def align_vending_accounting_csv(file: UploadFile = File(...)):
     """Rende il CSV fonte contabile senza modificare giacenze o venduti."""
     content = await _read_capped(file)
-    parsed = _parse_csv_vending(content.decode("utf-8-sig", errors="replace"))
-    _assign_csv_vending_event_keys(parsed["righe"])
-    summary = _summarize_vending_csv(parsed)
-    if not summary["righe"]:
-        raise HTTPException(422, "Il CSV non contiene vendite valide")
-    if summary["errori"]:
-        raise HTTPException(
-            422,
-            f"Il CSV contiene {len(summary['errori'])} righe non valide: correggile prima dell'allineamento",
-        )
-
-    backup = await create_backup_snapshot("Prima dell'allineamento contabile al CSV vending")
-    created_at = datetime.now(timezone.utc).isoformat()
-    snapshot_id = str(uuid.uuid4())
-    document = {
-        "id": snapshot_id,
-        "status": "active",
-        "created_at": created_at,
-        "file_name": Path(file.filename or "vendite-vending.csv").name,
-        "sha256": hashlib.sha256(content).hexdigest(),
-        # Permette al dashboard di riconoscere esattamente le vendite gia'
-        # comprese nella fotografia, anche se vengono importate dopo.
-        "csv_event_keys": [row["csv_event_key"] for row in parsed["righe"]],
-        **{key: value for key, value in summary.items() if key != "errori"},
-    }
-    await db.vending_accounting_snapshots.insert_one(document)
-    await db.vending_accounting_snapshots.update_many(
-        {"id": {"$ne": snapshot_id}, "status": "active"},
-        {"$set": {"status": "superseded", "superseded_at": created_at}},
+    document, backup = await _store_vending_accounting_snapshot(
+        content,
+        file.filename or "vendite-vending.csv",
+        backup_reason="Prima dell'allineamento contabile al CSV vending",
     )
-    response = {
-        key: value for key, value in document.items()
-        if key not in {"_id", "sha256", "csv_event_keys"}
-    }
-    response["backup_id"] = backup.get("id")
+    response = _public_vending_accounting_snapshot(document)
+    response["backup_id"] = (backup or {}).get("id")
     return response
 
 
@@ -2167,10 +2190,7 @@ async def vending_accounting_source():
     snapshot = await _latest_vending_accounting_snapshot()
     if not snapshot:
         return None
-    return {
-        key: value for key, value in snapshot.items()
-        if key not in {"sha256", "csv_event_keys"}
-    }
+    return _public_vending_accounting_snapshot(snapshot)
 
 
 VENDING_CASH_STATE_ID = "saldo"
@@ -2217,6 +2237,7 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
     content = await _read_capped(file)
     raw = content.decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
+    accounting_summary = _summarize_vending_csv(_parse_csv_vending(raw, pagamento))
     payment_counts: Dict[str, int] = {}
     payment_amounts: Dict[str, float] = {}
     total = 0.0
@@ -2243,6 +2264,8 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
         "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
         "file_sha256": hashlib.sha256(content).hexdigest(),
         **parsed["stock"],
+        "importabile": parsed["stock"]["importabile"] and not parsed["errori"],
+        "contabilita_csv": accounting_summary,
         "vendite": parsed["righe"],
     }
 
@@ -2253,6 +2276,11 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
     content = await _read_capped(file)
     raw = content.decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
+    if parsed["errori"]:
+        raise HTTPException(
+            422,
+            f"Il CSV contiene {len(parsed['errori'])} righe non valide: correggile prima dell'importazione",
+        )
     stock_summary = parsed["stock"]
     if not stock_summary["importabile"]:
         details = []
@@ -2379,6 +2407,11 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             errors.append({"riga": csv_row["riga"], "errore": str(exc)})
     if imported_cash:
         await _adjust_vending_cash_balance(imported_cash)
+    accounting_snapshot, _ = await _store_vending_accounting_snapshot(
+        content,
+        file.filename or "vendite-vending.csv",
+        source_batch_id=batch_id if inserted else None,
+    )
     if inserted:
         await db.vendite_bulk_imports.insert_one({
             "id": batch_id,
@@ -2390,6 +2423,8 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             "saltati": parsed["saltati"],
             "file_sha256": file_sha256,
             "file_name": Path(file.filename or "vendite-vending.csv").name,
+            "accounting_snapshot_id": accounting_snapshot["id"],
+            "previous_accounting_snapshot_id": accounting_snapshot.get("previous_snapshot_id"),
             "righe_file": file_rows,
             "righe_storico_excel": parsed["righe_storico_excel"],
             "righe_csv_gia_importate": parsed["righe_csv_gia_importate"],
@@ -2414,6 +2449,10 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
         "batch_id": batch_id if inserted else None,
         "created_at": created_at if inserted else None,
         "sorgente": "CSV_VENDING",
+        "contabilita_allineata": True,
+        "contabilita_snapshot_id": accounting_snapshot["id"],
+        "contabilita_importi_pagamenti": accounting_snapshot.get("importi_pagamenti", {}),
+        "contabilita_totale": accounting_snapshot.get("totale", 0),
     }
 
 
@@ -2436,6 +2475,8 @@ async def annulla_csv_vending(batch_id: str):
     )
     if claim.modified_count != 1:
         raise HTTPException(404, "Caricamento CSV non trovato o già annullato")
+
+    batch = await db.vendite_bulk_imports.find_one({"id": batch_id}, {"_id": 0})
 
     removed = 0
     cash_to_restore = 0.0
@@ -2498,6 +2539,25 @@ async def annulla_csv_vending(batch_id: str):
 
         if cash_to_restore:
             await _adjust_vending_cash_balance(-cash_to_restore)
+        accounting_restored = False
+        snapshot_id = (batch or {}).get("accounting_snapshot_id")
+        if snapshot_id:
+            snapshot = await db.vending_accounting_snapshots.find_one(
+                {"id": snapshot_id, "status": "active"}, {"_id": 0}
+            )
+            if snapshot:
+                reverted_at = datetime.now(timezone.utc).isoformat()
+                await db.vending_accounting_snapshots.update_one(
+                    {"id": snapshot_id, "status": "active"},
+                    {"$set": {"status": "reverted", "reverted_at": reverted_at}},
+                )
+                previous_id = snapshot.get("previous_snapshot_id")
+                if previous_id:
+                    await db.vending_accounting_snapshots.update_one(
+                        {"id": previous_id, "status": "superseded"},
+                        {"$set": {"status": "active", "reactivated_at": reverted_at}},
+                    )
+                accounting_restored = True
         await db.vendite_bulk_imports.update_one(
             {"id": batch_id},
             {"$set": {
@@ -2518,6 +2578,7 @@ async def annulla_csv_vending(batch_id: str):
         "batch_id": batch_id,
         "rimossi": removed,
         "contanti_rimossi_giacenza": round(cash_to_restore, 2),
+        "contabilita_ripristinata": accounting_restored,
     }
 
 

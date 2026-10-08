@@ -35,9 +35,16 @@ def test_cash_csv_increments_vending_cash_but_cards_do_not(monkeypatch):
     upload = UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
 
     result = asyncio.run(server.import_csv_vending(upload))
+    snapshot = asyncio.run(database.vending_accounting_snapshots.find_one(
+        {"status": "active"}, {"_id": 0}
+    ))
 
     assert result["contanti_aggiunti_giacenza"] == 5.8
     assert asyncio.run(server._vending_cash_balance()) == 243.35
+    assert result["contabilita_allineata"] is True
+    assert result["contabilita_importi_pagamenti"] == {"CONTANTI": 5.8, "CARTE": 6.0}
+    assert snapshot["importi_pagamenti"] == {"CONTANTI": 5.8, "CARTE": 6.0}
+    assert snapshot["totale"] == 11.8
 
 
 def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatch):
@@ -49,6 +56,12 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
 
     async def scenario():
         await database.prelievi_vending.insert_one({"id": "legacy", "importo": 100})
+        await database.vending_accounting_snapshots.insert_one({
+            "id": "previous-accounting",
+            "status": "active",
+            "created_at": "2026-10-03T08:00:00+00:00",
+            "importi_pagamenti": {"CONTANTI": 50},
+        })
         await database.prodotti.insert_one({
             "id": "product-1",
             "codice": "AMMS1001",
@@ -74,14 +87,22 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
         column_after_undo = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
         cash_after_undo = await server._vending_cash_balance()
         remaining = await database.vendite.find({"batch_id": imported["batch_id"]}).to_list(10)
+        active_accounting = await database.vending_accounting_snapshots.find_one(
+            {"status": "active"}, {"_id": 0}
+        )
+        reverted_accounting = await database.vending_accounting_snapshots.find_one(
+            {"source_batch_id": imported["batch_id"]}, {"_id": 0}
+        )
         return (
             imported, product_after_import, column_after_import, cash_after_import, latest,
             undone, product_after_undo, column_after_undo, cash_after_undo, remaining,
+            active_accounting, reverted_accounting,
         )
 
     (
         imported, product_after_import, column_after_import, cash_after_import, latest,
         undone, product_after_undo, column_after_undo, cash_after_undo, remaining,
+        active_accounting, reverted_accounting,
     ) = asyncio.run(scenario())
 
     assert imported["inseriti"] == 1
@@ -98,6 +119,9 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
     assert column_after_undo["giacenza"] == 5
     assert cash_after_undo == 100
     assert remaining == []
+    assert undone["contabilita_ripristinata"] is True
+    assert active_accounting["id"] == "previous-accounting"
+    assert reverted_accounting["status"] == "reverted"
 
 
 def test_same_csv_is_idempotent_and_does_not_change_stock_or_cash_twice(monkeypatch):
