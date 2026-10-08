@@ -56,7 +56,13 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
             "giacenza_vending": 10,
             "venduti_vending": 0,
         })
-        await database.vending.insert_one({"id": "column-1", "colonna": "B02", "codice": "AMMS1001", "giacenza": 5})
+        await database.vending.insert_one({
+            "id": "column-1",
+            "colonna": "B02",
+            "codice": "AMMS1001",
+            "giacenza": 5,
+            "giacenza_aggiornata_il": "2026-10-04T07:00:00+00:00",
+        })
         upload = UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
         imported = await server.import_csv_vending(upload)
         product_after_import = await database.prodotti.find_one({"id": "product-1"}, {"_id": 0})
@@ -92,6 +98,156 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
     assert column_after_undo["giacenza"] == 5
     assert cash_after_undo == 100
     assert remaining == []
+
+
+def test_same_csv_is_idempotent_and_does_not_change_stock_or_cash_twice(monkeypatch):
+    database = fresh_db(monkeypatch)
+    raw = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "04/10/2026 10:00;PRODOTTO CASH;5,8;1-B02;1001;Sigarette;Contanti\n"
+    )
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "id": "product-1", "codice": "AMMS1001", "descrizione": "PRODOTTO CASH",
+            "giacenza_vending": 5, "venduti_vending": 0,
+        })
+        await database.vending.insert_one({
+            "id": "column-1", "colonna": "B02", "codice": "AMMS1001", "giacenza": 5,
+            "giacenza_aggiornata_il": "2026-10-04T07:00:00+00:00",
+        })
+        first = await server.import_csv_vending(UploadFile(filename="one.csv", file=io.BytesIO(raw.encode())))
+        second = await server.import_csv_vending(UploadFile(filename="same.csv", file=io.BytesIO(raw.encode())))
+        product = await database.prodotti.find_one({"id": "product-1"}, {"_id": 0})
+        column = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
+        sales = await database.vendite.find({"sorgente": "CSV_VENDING"}).to_list(10)
+        return first, second, product, column, sales, await server._vending_cash_balance()
+
+    first, second, product, column, sales, cash = asyncio.run(scenario())
+
+    assert first["inseriti"] == 1
+    assert second["inseriti"] == 0
+    assert second["righe_csv_gia_importate"] == 1
+    assert column["giacenza"] == 4
+    assert product["venduti_vending"] == 1
+    assert len(sales) == 1
+    assert cash == 5.8
+
+
+def test_cumulative_csv_imports_only_the_additional_identical_occurrence(monkeypatch):
+    database = fresh_db(monkeypatch)
+    header = "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+    row = "04/10/2026 10:00;PRODOTTO;5,8;1-B02;1001;Sigarette;Carte\n"
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "id": "product-1", "codice": "AMMS1001", "descrizione": "PRODOTTO",
+            "giacenza_vending": 5, "venduti_vending": 0,
+        })
+        await database.vending.insert_one({
+            "id": "column-1", "colonna": "B02", "codice": "AMMS1001", "giacenza": 5,
+            "giacenza_aggiornata_il": "2026-10-04T07:00:00+00:00",
+        })
+        first = await server.import_csv_vending(UploadFile(filename="one.csv", file=io.BytesIO((header + row).encode())))
+        second = await server.import_csv_vending(UploadFile(filename="two.csv", file=io.BytesIO((header + row + row).encode())))
+        column = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
+        sales = await database.vendite.find({"sorgente": "CSV_VENDING"}).to_list(10)
+        return first, second, column, sales
+
+    first, second, column, sales = asyncio.run(scenario())
+
+    assert first["inseriti"] == 1
+    assert second["inseriti"] == 1
+    assert second["righe_csv_gia_importate"] == 1
+    assert column["giacenza"] == 3
+    assert len(sales) == 2
+    assert {sale["csv_event_occurrence"] for sale in sales} == {1, 2}
+
+
+def test_sales_before_stock_snapshot_are_recorded_without_decrement(monkeypatch):
+    database = fresh_db(monkeypatch)
+    raw = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "04/10/2026 09:00;PRODOTTO;5,8;1-B02;1001;Sigarette;Carte\n"
+        "04/10/2026 11:00;PRODOTTO;5,8;1-B02;1001;Sigarette;Carte\n"
+    )
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "id": "product-1", "codice": "AMMS1001", "descrizione": "PRODOTTO",
+            "giacenza_vending": 5, "venduti_vending": 0,
+        })
+        await database.vending.insert_one({
+            "id": "column-1", "colonna": "B02", "codice": "AMMS1001", "giacenza": 5,
+            # 08:00 UTC = 10:00 Europe/Rome in ottobre.
+            "giacenza_aggiornata_il": "2026-10-04T08:00:00+00:00",
+        })
+        result = await server.import_csv_vending(UploadFile(filename="mixed.csv", file=io.BytesIO(raw.encode())))
+        column = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
+        sales = await database.vendite.find({"sorgente": "CSV_VENDING"}).sort("data", 1).to_list(10)
+        return result, column, sales
+
+    result, column, sales = asyncio.run(scenario())
+
+    assert result["inseriti"] == 2
+    assert result["righe_gia_comprese_nella_giacenza"] == 1
+    assert result["righe_da_scalare"] == 1
+    assert column["giacenza"] == 4
+    assert [sale["stock_effect_applied"] for sale in sales] == [False, True]
+
+
+def test_restored_backup_time_is_used_when_legacy_columns_have_no_timestamp(monkeypatch):
+    database = fresh_db(monkeypatch)
+    rows = [
+        {"data": "2026-10-07T22:00:00", "colonna": "A01"},
+        {"data": "2026-10-07T23:00:00", "colonna": "A01"},
+    ]
+
+    async def scenario():
+        await database.vending.insert_one({"id": "column-1", "colonna": "A01", "giacenza": 4})
+        await database.backup_snapshots.insert_one({
+            "id": "restored",
+            # 20:30 UTC = 22:30 Europe/Rome.
+            "created_at": "2026-10-07T20:30:00+00:00",
+            "last_restored_at": "2026-10-08T07:00:00+00:00",
+        })
+        return await server._annotate_csv_vending_stock_effects(rows)
+
+    summary = asyncio.run(scenario())
+
+    assert summary["importabile"] is True
+    assert summary["righe_gia_comprese_nella_giacenza"] == 1
+    assert summary["righe_da_scalare"] == 1
+    assert [row["scala_giacenza"] for row in rows] == [False, True]
+
+
+def test_csv_import_is_blocked_instead_of_clipping_stock_to_zero(monkeypatch):
+    database = fresh_db(monkeypatch)
+    header = "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+    row = "04/10/2026 10:00;PRODOTTO;5,8;1-B02;1001;Sigarette;Carte\n"
+
+    async def scenario():
+        await database.vending.insert_one({
+            "id": "column-1", "colonna": "B02", "codice": "AMMS1001", "giacenza": 1,
+            "giacenza_aggiornata_il": "2026-10-04T07:00:00+00:00",
+        })
+        upload = UploadFile(filename="too-many.csv", file=io.BytesIO((header + row + row).encode()))
+        try:
+            await server.import_csv_vending(upload)
+        except Exception as exc:
+            error = exc
+        else:
+            error = None
+        column = await database.vending.find_one({"id": "column-1"}, {"_id": 0})
+        sales = await database.vendite.find({}).to_list(10)
+        return error, column, sales
+
+    error, column, sales = asyncio.run(scenario())
+
+    assert error is not None
+    assert getattr(error, "status_code", None) == 409
+    assert column["giacenza"] == 1
+    assert sales == []
 
 
 def test_registering_and_deleting_withdrawal_updates_vending_cash(monkeypatch):

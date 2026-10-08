@@ -222,9 +222,10 @@ def test_restock_fills_to_capacity_and_leaves_remaining_shop_stock(monkeypatch):
     assert result["quantita_caricata"] == 2
     assert result["nuova_giacenza"] == 4
     assert result["giacenza_magazzino_residua"] == 3
-    assert vending.updates == [
-        ({"id": "v1", "giacenza": 2}, {"$inc": {"giacenza": 2}})
-    ]
+    assert vending.updates[0][0] == {"id": "v1", "giacenza": 2}
+    assert vending.updates[0][1]["$inc"] == {"giacenza": 2}
+    assert vending.updates[0][1]["$set"]["giacenza_sorgente"] == "RICARICA"
+    assert vending.updates[0][1]["$set"]["giacenza_aggiornata_il"]
     assert prodotti.updates == [
         ({"codice": "P1", "giacenza_negozio": {"$gte": 4}}, {"$inc": {"giacenza_negozio": -2, "giacenza_vending": 2}})
     ]
@@ -285,7 +286,10 @@ def test_restock_accepts_partial_manual_quantity(monkeypatch):
 
     assert result["quantita_caricata"] == 1
     assert result["nuova_giacenza"] == 3
-    assert vending.updates == [({"id": "v1", "giacenza": 2}, {"$inc": {"giacenza": 1}})]
+    assert vending.updates[0][0] == {"id": "v1", "giacenza": 2}
+    assert vending.updates[0][1]["$inc"] == {"giacenza": 1}
+    assert vending.updates[0][1]["$set"]["giacenza_sorgente"] == "RICARICA"
+    assert vending.updates[0][1]["$set"]["giacenza_aggiornata_il"]
     assert prodotti.updates == [
         ({"codice": "P1", "giacenza_negozio": {"$gte": 3}}, {"$inc": {"giacenza_negozio": -1, "giacenza_vending": 1}})
     ]

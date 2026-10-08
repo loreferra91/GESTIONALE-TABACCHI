@@ -14,6 +14,7 @@ import secrets
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -481,6 +482,7 @@ async def on_start():
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
             db.vendite.create_index([("data", 1), ("codice", 1)]),
+            db.vendite.create_index("csv_event_key", unique=True, sparse=True),
             db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
             db.ordini_fornitore.create_index("batch_key", unique=True),
@@ -1561,6 +1563,11 @@ async def backup_restore(snapshot_id: str):
     # caso ripristiniamo soltanto ciò che era stato effettivamente salvato.
     backed_up_names = [name for name in (meta.get("counts") or {}) if name in BACKUP_COLLECTIONS]
     await _restore_collections(await _backup_documents(snapshot_id, backed_up_names))
+    if "vending" in backed_up_names:
+        await db.vending.update_many({}, {"$set": {
+            "giacenza_aggiornata_il": meta.get("created_at"),
+            "giacenza_sorgente": "BACKUP_RIPRISTINATO",
+        }})
     await db.backup_snapshots.update_one(
         {"id": snapshot_id},
         {"$set": {"last_restored_at": datetime.now(timezone.utc).isoformat()}},
@@ -1581,6 +1588,12 @@ async def backup_restore_file(file: UploadFile = File(...)):
         "pre-restore-file",
     )
     await _restore_collections(collections)
+    if "vending" in collections:
+        snapshot_at = payload.get("created_at") or datetime.now(timezone.utc).isoformat()
+        await db.vending.update_many({}, {"$set": {
+            "giacenza_aggiornata_il": snapshot_at,
+            "giacenza_sorgente": "BACKUP_FILE_RIPRISTINATO",
+        }})
     return {
         "ok": True,
         "file": file.filename,
@@ -1967,13 +1980,126 @@ def _filter_new_csv_vending_rows(
     return [row for row in rows if (_parse_sale_datetime(row.get("data")) or datetime.min) > cutoff], cutoff
 
 
+def _csv_vending_event_base(row: Dict[str, Any]) -> str:
+    """Identifica un tipo di riga senza confondere pezzi identici della stessa vendita."""
+    payload = {
+        "data": str(row.get("data") or ""),
+        "colonna": _normalize_vending_column(row.get("colonna")),
+        "codice": _product_code_text(row.get("codice")),
+        "prezzo": f"{float(row.get('prezzo') or 0):.2f}",
+        "pagamento": str(row.get("pagamento") or "").strip().upper(),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _assign_csv_vending_event_keys(rows: List[Dict[str, Any]]) -> None:
+    """Assegna chiavi stabili anche quando nello stesso minuto sono venduti più pezzi uguali."""
+    occurrences: Dict[str, int] = {}
+    for row in rows:
+        base = _csv_vending_event_base(row)
+        occurrence = occurrences.get(base, 0) + 1
+        occurrences[base] = occurrence
+        row["csv_event_occurrence"] = occurrence
+        row["csv_event_key"] = f"{base}:{occurrence}"
+
+
+def _local_sale_datetime(value: Any) -> Optional[datetime]:
+    """Confronta timestamp UTC di sistema e orari locali esportati dalla vending."""
+    parsed = _parse_sale_datetime(value)
+    if not parsed:
+        return None
+    text = str(value or "")
+    if parsed.tzinfo is None and not re.search(r"(?:Z|[+-]\d\d:\d\d)$", text):
+        return parsed
+    aware = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return aware.astimezone(ZoneInfo("Europe/Rome")).replace(tzinfo=None)
+
+
+async def _latest_restored_vending_snapshot_at() -> Optional[str]:
+    restored = await db.backup_snapshots.find_one(
+        {"last_restored_at": {"$exists": True}},
+        {"_id": 0, "created_at": 1},
+        sort=[("last_restored_at", -1)],
+    )
+    return str((restored or {}).get("created_at") or "") or None
+
+
+async def _annotate_csv_vending_stock_effects(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Decide quali vendite sono successive alla fotografia fisica di ogni colonna."""
+    column_codes = sorted({str(row.get("colonna") or "") for row in rows if row.get("colonna")})
+    columns = await db.vending.find(
+        {"colonna": {"$in": column_codes}},
+        {"_id": 0},
+    ).to_list(5000) if column_codes else []
+    by_code = {str(column.get("colonna") or ""): column for column in columns}
+    restored_snapshot = await _latest_restored_vending_snapshot_at()
+    missing_baseline = set()
+    stock_rows = 0
+    reflected_rows = 0
+    required_by_column: Dict[str, int] = {}
+
+    for row in rows:
+        column_code = str(row.get("colonna") or "")
+        column = by_code.get(column_code)
+        row["scala_giacenza"] = False
+        if not column:
+            row["giacenza_motivo"] = "COLONNA_NON_TROVATA"
+            continue
+        snapshot_value = column.get("giacenza_aggiornata_il") or restored_snapshot
+        sale_at = _local_sale_datetime(row.get("data"))
+        snapshot_at = _local_sale_datetime(snapshot_value)
+        row["giacenza_rilevata_il"] = snapshot_value
+        if not snapshot_at:
+            missing_baseline.add(column_code)
+            row["giacenza_motivo"] = "RIFERIMENTO_GIACENZA_MANCANTE"
+            continue
+        if sale_at and sale_at <= snapshot_at:
+            reflected_rows += 1
+            row["giacenza_motivo"] = "GIA_COMPRESA_NELLA_GIACENZA"
+            continue
+        row["scala_giacenza"] = True
+        row["giacenza_motivo"] = "VENDITA_SUCCESSIVA_ALLA_GIACENZA"
+        stock_rows += 1
+        required_by_column[column_code] = required_by_column.get(column_code, 0) + 1
+
+    stock_errors = []
+    for column_code, required in sorted(required_by_column.items()):
+        available = max(0, int(by_code[column_code].get("giacenza") or 0))
+        if required > available:
+            stock_errors.append({
+                "colonna": column_code,
+                "giacenza": available,
+                "vendite_da_scalare": required,
+                "mancanti": required - available,
+            })
+    return {
+        "righe_da_scalare": stock_rows,
+        "righe_gia_comprese_nella_giacenza": reflected_rows,
+        "colonne_senza_riferimento_giacenza": sorted(missing_baseline),
+        "errori_giacenza": stock_errors,
+        "importabile": not missing_baseline and not stock_errors,
+    }
+
+
 async def _prepare_csv_vending_import(raw: str, pagamento: str) -> tuple[Dict[str, Any], Any, int]:
     parsed = _parse_csv_vending(raw, pagamento)
     historical_documents = await db.db_storico_vending_ext.find(
         {}, {"_id": 0, "raw": 1}
     ).to_list(None)
     all_rows = parsed["righe"]
-    parsed["righe"], cutoff = _filter_new_csv_vending_rows(all_rows, historical_documents)
+    historical_rows, cutoff = _filter_new_csv_vending_rows(all_rows, historical_documents)
+    _assign_csv_vending_event_keys(historical_rows)
+    keys = [row["csv_event_key"] for row in historical_rows]
+    existing = await db.vendite.find(
+        {"csv_event_key": {"$in": keys}},
+        {"_id": 0, "csv_event_key": 1},
+    ).to_list(len(keys)) if keys else []
+    existing_keys = {str(row.get("csv_event_key") or "") for row in existing}
+    parsed["righe"] = [row for row in historical_rows if row["csv_event_key"] not in existing_keys]
+    parsed["righe_storico_excel"] = len(all_rows) - len(historical_rows)
+    parsed["righe_csv_gia_importate"] = len(historical_rows) - len(parsed["righe"])
+    parsed["stock"] = await _annotate_csv_vending_stock_effects(parsed["righe"])
     return parsed, cutoff, len(all_rows)
 
 
@@ -2074,8 +2200,9 @@ async def _adjust_vending_cash_balance(amount: float) -> float:
 
 @api.post("/vendite/preview-csv-vending")
 async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
-    """Mostra solo le vendite successive allo storico vending importato da Excel."""
-    raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
+    """Mostra vendite nuove e impatto stock senza ripetere eventi già importati."""
+    content = await _read_capped(file)
+    raw = content.decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
     payment_counts: Dict[str, int] = {}
     payment_amounts: Dict[str, float] = {}
@@ -2098,7 +2225,11 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
         "data_a": max(dates, default=None),
         "righe_file": file_rows,
         "righe_gia_presenti": file_rows - len(parsed["righe"]),
+        "righe_storico_excel": parsed["righe_storico_excel"],
+        "righe_csv_gia_importate": parsed["righe_csv_gia_importate"],
         "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
+        "file_sha256": hashlib.sha256(content).hexdigest(),
+        **parsed["stock"],
         "vendite": parsed["righe"],
     }
 
@@ -2106,10 +2237,23 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
 @api.post("/vendite/import-csv-vending")
 async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
     """Importa il CSV gia' validato dall'anteprima della UI."""
-    raw = (await _read_capped(file)).decode("utf-8-sig", errors="replace")
+    content = await _read_capped(file)
+    raw = content.decode("utf-8-sig", errors="replace")
     parsed, cutoff, file_rows = await _prepare_csv_vending_import(raw, pagamento)
+    stock_summary = parsed["stock"]
+    if not stock_summary["importabile"]:
+        details = []
+        if stock_summary["colonne_senza_riferimento_giacenza"]:
+            details.append(
+                "riferimento giacenza mancante per "
+                + ", ".join(stock_summary["colonne_senza_riferimento_giacenza"])
+            )
+        if stock_summary["errori_giacenza"]:
+            details.append("vendite superiori alla giacenza disponibile")
+        raise HTTPException(409, "Import CSV bloccato: " + "; ".join(details))
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
+    file_sha256 = hashlib.sha256(content).hexdigest()
     inserted = 0
     imported_cash = 0.0
     errors = list(parsed["errori"])
@@ -2146,7 +2290,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 slug = re.sub(r"\s+", "_", nome.strip().lower())[:20]
                 codice = f"CSV-{slug}"
 
-            # aggiorna vending column giacenza se colonna presente
+            # Scala soltanto vendite successive alla fotografia fisica della colonna.
             if colonna:
                 col = await db.vending.find_one({"colonna": colonna})
                 if col:
@@ -2154,11 +2298,17 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                         raise ValueError(
                             f"colonna {colonna} associata a {col.get('codice')}, CSV indica {codice}"
                         )
-                    old_g = int(col.get("giacenza") or 0)
-                    new_g = max(0, old_g - 1)
-                    await db.vending.update_one({"id": col["id"]}, {"$set": {"giacenza": new_g}})
                     undo_meta["vending_column_id"] = col["id"]
-                    undo_meta["vending_stock_decremented"] = old_g > 0
+                    undo_meta["vending_stock_decremented"] = False
+                    undo_meta["vending_stock_skip_reason"] = csv_row.get("giacenza_motivo")
+                    if csv_row.get("scala_giacenza"):
+                        result = await db.vending.update_one(
+                            {"id": col["id"], "giacenza": {"$gte": 1}},
+                            {"$inc": {"giacenza": -1}},
+                        )
+                        if result.modified_count != 1:
+                            raise ValueError(f"giacenza insufficiente nella colonna {colonna}")
+                        undo_meta["vending_stock_decremented"] = True
             # aggiorna prodotto
             prod = prod or await db.prodotti.find_one({"codice": codice})
             if prod:
@@ -2182,9 +2332,17 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             v = VenditaGiornaliera(
                 data=data_iso, codice=codice, descrizione=nome, quantita=1, importo=prezzo_f,
                 canale="VENDING", pagamento=pag, sorgente="CSV_VENDING",
-                batch_id=batch_id, undo_meta=undo_meta,
+                colonna=colonna or None, batch_id=batch_id, undo_meta=undo_meta,
             )
-            await db.vendite.insert_one(v.model_dump())
+            sale_doc = v.model_dump()
+            sale_doc.update({
+                "csv_event_key": csv_row["csv_event_key"],
+                "csv_event_occurrence": csv_row["csv_event_occurrence"],
+                "csv_file_sha256": file_sha256,
+                "stock_effect_applied": bool(undo_meta.get("vending_stock_decremented")),
+                "stock_effect_reason": csv_row.get("giacenza_motivo"),
+            })
+            await db.vendite.insert_one(sale_doc)
             inserted += 1
             payment_counts[pag] = payment_counts.get(pag, 0) + 1
             payment_amounts[pag] = round(payment_amounts.get(pag, 0) + prezzo_f, 2)
@@ -2217,6 +2375,12 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             "pagamento": pagamento,
             "inseriti": inserted,
             "saltati": parsed["saltati"],
+            "file_sha256": file_sha256,
+            "file_name": Path(file.filename or "vendite-vending.csv").name,
+            "righe_file": file_rows,
+            "righe_storico_excel": parsed["righe_storico_excel"],
+            "righe_csv_gia_importate": parsed["righe_csv_gia_importate"],
+            **stock_summary,
             "status": "active",
         })
     return {
@@ -2229,7 +2393,11 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
         "contanti_aggiunti_giacenza": round(imported_cash, 2),
         "righe_file": file_rows,
         "righe_gia_presenti": file_rows - len(parsed["righe"]),
+        "righe_storico_excel": parsed["righe_storico_excel"],
+        "righe_csv_gia_importate": parsed["righe_csv_gia_importate"],
         "ultima_vendita_excel": cutoff.isoformat() if cutoff else None,
+        "file_sha256": file_sha256,
+        **stock_summary,
         "batch_id": batch_id if inserted else None,
         "created_at": created_at if inserted else None,
         "sorgente": "CSV_VENDING",
@@ -2632,9 +2800,16 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
         )
     qta_caricata = qta
     nuovo = giacenza + qta_caricata
+    stock_updated_at = datetime.now(timezone.utc).isoformat()
     vending_result = await db.vending.update_one(
         {"id": v_id, "giacenza": v.get("giacenza", 0)},
-        {"$inc": {"giacenza": qta}},
+        {
+            "$inc": {"giacenza": qta},
+            "$set": {
+                "giacenza_aggiornata_il": stock_updated_at,
+                "giacenza_sorgente": "RICARICA",
+            },
+        },
     )
     if vending_result.matched_count == 0:
         raise HTTPException(409, "La colonna è cambiata nel frattempo: aggiorna la pagina e riprova")
@@ -2648,7 +2823,13 @@ async def ricarica_vending(v_id: str, body: Dict[str, Any]):
     except Exception as exc:
         await db.vending.update_one(
             {"id": v_id, "giacenza": nuovo},
-            {"$inc": {"giacenza": -qta}},
+            {
+                "$inc": {"giacenza": -qta},
+                "$set": {
+                    "giacenza_aggiornata_il": v.get("giacenza_aggiornata_il"),
+                    "giacenza_sorgente": v.get("giacenza_sorgente"),
+                },
+            },
         )
         raise HTTPException(409, f"Ricarica annullata: {exc}")
     return {
@@ -2746,11 +2927,21 @@ async def ricarica_vending_completa(body: Dict[str, Any]):
 
     vending_applicate = []
     prodotti_applicati = []
+    stock_updated_at = datetime.now(timezone.utc).isoformat()
     try:
         for item in preparate:
+            original = vending_per_id[item["id"]]
+            item["giacenza_aggiornata_il"] = original.get("giacenza_aggiornata_il")
+            item["giacenza_sorgente"] = original.get("giacenza_sorgente")
             result = await db.vending.update_one(
                 {"id": item["id"], "giacenza": item["giacenza"]},
-                {"$inc": {"giacenza": item["quantita"]}},
+                {
+                    "$inc": {"giacenza": item["quantita"]},
+                    "$set": {
+                        "giacenza_aggiornata_il": stock_updated_at,
+                        "giacenza_sorgente": "RICARICA_COMPLETA",
+                    },
+                },
             )
             if result.matched_count == 0:
                 raise RuntimeError(f"La colonna {item['colonna']} è cambiata durante il caricamento")
@@ -2773,7 +2964,13 @@ async def ricarica_vending_completa(body: Dict[str, Any]):
         for item in reversed(vending_applicate):
             await db.vending.update_one(
                 {"id": item["id"]},
-                {"$inc": {"giacenza": -item["quantita"]}},
+                {
+                    "$inc": {"giacenza": -item["quantita"]},
+                    "$set": {
+                        "giacenza_aggiornata_il": item.get("giacenza_aggiornata_il"),
+                        "giacenza_sorgente": item.get("giacenza_sorgente"),
+                    },
+                },
             )
         raise HTTPException(409, f"Caricamento annullato: {exc}")
 
@@ -4460,6 +4657,7 @@ async def _import_vending(ws) -> Dict[str, int]:
     operations = []
     codici_importati = set()
     err = 0
+    snapshot_at = datetime.now(timezone.utc).isoformat()
     for row in ws.iter_rows(min_row=4, values_only=True):
         try:
             if not row[0]:
@@ -4474,6 +4672,8 @@ async def _import_vending(ws) -> Dict[str, int]:
                 "giacenza": int(row[3]) if row[3] is not None else 0,
                 "capacita_max": int(row[4] or 5),
                 "soglia_minima": int(row[5]) if row[5] is not None else 2,
+                "giacenza_aggiornata_il": snapshot_at,
+                "giacenza_sorgente": "IMPORT_EXCEL",
             }
             operations.append(UpdateOne({"colonna": colonna}, {"$set": data_p}, upsert=True))
             if data_p["codice"]:

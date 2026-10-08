@@ -271,7 +271,7 @@ export default function Vendite() {
       if (!r.ok) throw new Error((await r.text()) || r.statusText);
       const j = await r.json();
       setCsvPreview(j);
-      if (!j.righe) toast.error("Il file non contiene righe valide");
+      if (!j.righe) toast.info("Nessuna nuova vendita da importare");
     } catch (err) {
       setCsvFile(null);
       if (csvRef.current) csvRef.current.value = "";
@@ -299,7 +299,7 @@ export default function Vendite() {
   };
 
   const uploadCsv = async () => {
-    if (!csvFile || !csvPreview?.righe || csvUndoing) return;
+    if (!csvFile || !csvPreview?.righe || !csvPreview?.importabile || csvUndoing) return;
     setCsvImporting(true);
     const fd = new FormData();
     fd.append("file", csvFile);
@@ -309,7 +309,7 @@ export default function Vendite() {
       const j = await r.json();
       setCsvResult(j);
       if (j.batch_id) setLastCsvImport({ id: j.batch_id, ...j, status: "active" });
-      toast.success(`CSV vending: ${j.inseriti} righe importate e vendite aggiornate`);
+      toast.success(`CSV vending: ${j.inseriti} vendite importate, ${j.righe_da_scalare || 0} applicate alla giacenza`);
       clearCsv();
       await load();
     } catch (err) {
@@ -590,13 +590,16 @@ export default function Vendite() {
                 </div>
                 {csvPreview.ultima_vendita_excel && (
                   <div className="mt-1 text-xs text-slate-500">
-                    Dopo l'ultima vendita Excel del {new Date(csvPreview.ultima_vendita_excel).toLocaleString("it-IT")} · {formatNum(csvPreview.righe_gia_presenti || 0)} righe storiche escluse
+                    Dopo l'ultima vendita Excel del {new Date(csvPreview.ultima_vendita_excel).toLocaleString("it-IT")} · {formatNum(csvPreview.righe_storico_excel || 0)} righe storiche escluse
                   </div>
                 )}
+                <div className="mt-1 text-xs text-slate-500">
+                  Già importate da CSV: {formatNum(csvPreview.righe_csv_gia_importate || 0)} · già comprese nella giacenza rilevata: {formatNum(csvPreview.righe_gia_comprese_nella_giacenza || 0)} · da scalare: {formatNum(csvPreview.righe_da_scalare || 0)}
+                </div>
               </div>
               <div className="flex gap-2">
                 <button data-testid="csv-cancel" onClick={clearCsv} disabled={csvImporting || csvUndoing} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-100 disabled:opacity-40">Annulla</button>
-                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || csvUndoing || !csvPreview.righe} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
+                <button data-testid="csv-confirm" onClick={uploadCsv} disabled={csvImporting || csvUndoing || !csvPreview.righe || !csvPreview.importabile} className="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
                   {csvImporting ? "Aggiornamento…" : "Conferma e aggiorna vendite"}
                 </button>
               </div>
@@ -620,6 +623,7 @@ export default function Vendite() {
                       <th className="px-3 py-2">Colonna</th>
                       <th className="px-3 py-2 text-right">Prezzo</th>
                       <th className="px-3 py-2">Pagamento</th>
+                      <th className="px-3 py-2">Effetto giacenza</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -631,6 +635,9 @@ export default function Vendite() {
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{sale.colonna || "—"}</td>
                         <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{formatEur(sale.prezzo)}</td>
                         <td className="whitespace-nowrap px-3 py-2">{sale.pagamento}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs">
+                          {sale.scala_giacenza ? "Scala 1 pezzo" : sale.giacenza_motivo === "GIA_COMPRESA_NELLA_GIACENZA" ? "Già compresa" : "Da verificare"}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -639,7 +646,14 @@ export default function Vendite() {
             )}
             {csvPreview.righe === 0 && (
               <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-                Nessuna nuova vendita: il file è già interamente compreso nello storico Excel.
+                Nessuna nuova vendita: tutte le righe sono già presenti nello storico Excel o in un precedente CSV.
+              </div>
+            )}
+            {!csvPreview.importabile && (
+              <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                Import bloccato per proteggere la giacenza.
+                {csvPreview.colonne_senza_riferimento_giacenza?.length > 0 && <> Manca la data della rilevazione per: {csvPreview.colonne_senza_riferimento_giacenza.join(", ")}.</>}
+                {csvPreview.errori_giacenza?.length > 0 && <> Alcune vendite successive superano i pezzi disponibili.</>}
               </div>
             )}
             {csvPreview.errori?.length > 0 && (
