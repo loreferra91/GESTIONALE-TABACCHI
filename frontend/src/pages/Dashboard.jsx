@@ -105,10 +105,15 @@ export default function Dashboard() {
     ? balances.giacenzaVendingContanti
     : balances.totalePrelievi;
   const giacenzaInizialeVending = balances.giacenzaInizialeVendingContanti ?? 0;
-  const prelievoVending = balances.prelievoVending
+  const scontriniVending = balances.scontriniVending ?? 0;
+  const prelievoVendingLordo = balances.prelievoVendingLordo
+    ?? balances.prelievoVending
     ?? (venditeVendingContanti !== undefined && giacenzaVending !== undefined
       ? giacenzaInizialeVending + venditeVendingContanti - giacenzaVending
       : undefined);
+  const prelievoVending = balances.prelievoVendingNetto ?? (prelievoVendingLordo === undefined
+    ? undefined
+    : prelievoVendingLordo - scontriniVending);
   const saldoCasse = prelievoVending !== undefined && balances.saldoCassa !== undefined
     ? prelievoVending + balances.saldoCassa
     : balances.saldoCassaNegozioEVending ?? balances.differenzaCassaVendingContanti;

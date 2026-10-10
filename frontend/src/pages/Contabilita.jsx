@@ -108,13 +108,14 @@ export default function Contabilita() {
       ?? balances.giacenzaAttualeCassaVending;
   const scontriniVending = balances.scontriniVending ?? 0;
   const giacenzaInizialeVending = balances.giacenzaInizialeVendingContanti ?? 0;
-  const prelievoVending = balances.prelievoVending
+  const prelievoVendingLordo = balances.prelievoVendingLordo
+    ?? balances.prelievoVending
     ?? (venditeVendingContanti !== undefined && giacenzaVending !== undefined
       ? giacenzaInizialeVending + venditeVendingContanti - giacenzaVending
       : undefined);
-  const prelievoVendingVisuale = prelievoVending === undefined
+  const prelievoVending = balances.prelievoVendingNetto ?? (prelievoVendingLordo === undefined
     ? undefined
-    : prelievoVending + scontriniVending;
+    : prelievoVendingLordo - scontriniVending);
   const saldoCasse = prelievoVending !== undefined && balances.saldoCassa !== undefined
     ? prelievoVending + balances.saldoCassa
     : balances.saldoCassaNegozioEVending ?? balances.differenzaCassaVendingContanti;
@@ -209,8 +210,8 @@ export default function Contabilita() {
         />
         <BalanceCard
           label="Prelievo da vending"
-          value={prelievoVendingVisuale}
-          tone={prelievoVendingVisuale > 0 ? "negative" : "default"}
+          value={prelievoVending}
+          tone={prelievoVending > 0 ? "negative" : "default"}
           testId="prelievo-da-vending"
         />
         <BalanceCard

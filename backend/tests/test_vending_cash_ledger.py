@@ -312,7 +312,7 @@ def test_updating_opening_cash_adjusts_current_balance_by_the_delta(monkeypatch)
     assert balance == 275.0
 
 
-def test_receipts_are_separate_from_cash_withdrawal_and_combined_balance():
+def test_receipts_reduce_net_withdrawal_and_combined_balance():
     result = server._calculate_dashboard_balances(
         [(3445.30, "Contanti"), (2445, "Carte")],
         saldo_cassa=-664.72,
@@ -320,7 +320,9 @@ def test_receipts_are_separate_from_cash_withdrawal_and_combined_balance():
         totale_scontrini=100,
     )
 
-    assert result["prelievoVending"] == 3207.75
+    assert result["prelievoVendingLordo"] == 3207.75
+    assert result["prelievoVendingNetto"] == 3107.75
+    assert result["prelievoVending"] == 3107.75
     assert result["giacenzaVendingContanti"] == 237.55
     assert result["scontriniVending"] == 100
-    assert result["saldoCassaNegozioEVending"] == 2543.03
+    assert result["saldoCassaNegozioEVending"] == 2443.03

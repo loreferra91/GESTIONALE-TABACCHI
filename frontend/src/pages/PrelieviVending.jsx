@@ -29,9 +29,12 @@ export default function PrelieviVending() {
         ?? saldi.saldoVendingContanti
         ?? 0;
       const giacenzaInizialeVending = saldi.giacenzaInizialeVendingContanti ?? 0;
-      const prelievoVending = Number(prelievi.data?.totale ?? 0);
+      const prelievoVendingLordo = Number(prelievi.data?.totale ?? 0);
       const scontriniVending = Number(scontrini.data?.totale ?? 0);
-      const giacenzaVending = giacenzaInizialeVending + venditeVendingContanti - prelievoVending;
+      const prelievoVending = Number(
+        saldi.prelievoVendingNetto ?? prelievoVendingLordo - scontriniVending
+      );
+      const giacenzaVending = giacenzaInizialeVending + venditeVendingContanti - prelievoVendingLordo;
       setData({
         movimenti: prelievi.data.movimenti,
         totale: prelievi.data.totale,

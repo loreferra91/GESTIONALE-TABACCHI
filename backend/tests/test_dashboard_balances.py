@@ -78,6 +78,8 @@ def test_calculates_all_dashboard_balances_from_historical_vending(monkeypatch):
         "venditeVendingContanti": 1225.0,
         "giacenzaInizialeVendingContanti": 0.0,
         "giacenzaVendingContanti": 1225.0,
+        "prelievoVendingLordo": 0.0,
+        "prelievoVendingNetto": 0.0,
         "prelievoVending": 0.0,
         "scontriniVending": 0.0,
         "prelievoDaVending": 0.0,
@@ -366,7 +368,7 @@ def test_opening_vending_cash_is_included_in_reconciliation():
     assert result["saldoCassaNegozioEVending"] == 700.0
 
 
-def test_vending_cash_inventory_withdrawals_and_receipts_are_exposed_separately():
+def test_vending_receipts_reduce_net_withdrawal_and_combined_balance():
     result = server._calculate_dashboard_balances(
         [(1000, "Contanti"), (250, "POS")], 300, 400, 50
     )
@@ -374,13 +376,26 @@ def test_vending_cash_inventory_withdrawals_and_receipts_are_exposed_separately(
     assert result["venditeVendingContanti"] == 1000.0
     assert result["giacenzaVendingContanti"] == 600.0
     assert result["scontriniVending"] == 50.0
-    assert result["prelievoVending"] == 400.0
-    assert result["prelievoDaVending"] == 400.0
-    assert result["prelieviContantiDaVending"] == 400.0
-    assert result["prelieviContantiCassaVending"] == 400.0
+    assert result["prelievoVendingLordo"] == 400.0
+    assert result["prelievoVendingNetto"] == 350.0
+    assert result["prelievoVending"] == 350.0
+    assert result["prelievoDaVending"] == 350.0
+    assert result["prelieviContantiDaVending"] == 350.0
+    assert result["prelieviContantiCassaVending"] == 350.0
     assert result["giacenzaAttualeCassaVending"] == 600.0
     assert result["cassaVending"] == 600.0
-    assert result["saldoCassaNegozioEVending"] == 700.0
+    assert result["saldoCassaNegozioEVending"] == 650.0
+
+
+def test_vending_net_withdrawal_matches_accounting_example():
+    result = server._calculate_dashboard_balances(
+        [], 0, totale_prelievi_vending=3527.05, totale_scontrini=327.90
+    )
+
+    assert result["prelievoVendingLordo"] == 3527.05
+    assert result["scontriniVending"] == 327.90
+    assert result["prelievoVendingNetto"] == 3199.15
+    assert result["prelievoVending"] == 3199.15
 
 
 def test_supplemental_store_cash_sales_only_counts_new_unimported_cash(monkeypatch):

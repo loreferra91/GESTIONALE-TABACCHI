@@ -4159,9 +4159,10 @@ def _calculate_dashboard_balances(
 ) -> Dict[str, float]:
     """Calcola in un solo punto i saldi monetari esposti dalla dashboard.
 
-    I prelievi registrati sono la fonte autorevole. La giacenza è la giacenza
-    iniziale più le vendite cash, meno quei prelievi. Gli scontrini sono
-    esposti separatamente e non rappresentano un movimento di contante.
+    I prelievi registrati sono la fonte autorevole per la giacenza fisica. La
+    giacenza è la giacenza iniziale più le vendite cash, meno quei prelievi.
+    Il prelievo contabile netto e il saldo combinato sottraggono invece gli
+    scontrini vending dal totale lordo prelevato.
     """
     cash = 0.0
     cards = 0.0
@@ -4186,16 +4187,19 @@ def _calculate_dashboard_balances(
     electronic = round(electronic, 2)
     total = round(cash + electronic, 2)
     saldo_cassa = round(float(saldo_cassa or 0), 2)
-    prelievo_vending = round(float(totale_prelievi_vending or 0), 2)
+    prelievo_vending_lordo = round(float(totale_prelievi_vending or 0), 2)
     totale_scontrini = round(float(totale_scontrini or 0), 2)
+    prelievo_vending = round(prelievo_vending_lordo - totale_scontrini, 2)
     giacenza_iniziale_vending = round(float(giacenza_iniziale_vending or 0), 2)
-    giacenza_vending = round(giacenza_iniziale_vending + cash - prelievo_vending, 2)
+    giacenza_vending = round(giacenza_iniziale_vending + cash - prelievo_vending_lordo, 2)
     saldo_casse = round(prelievo_vending + saldo_cassa, 2)
     return {
         "saldoVendingTotale": total,
         "venditeVendingContanti": cash,
         "giacenzaInizialeVendingContanti": giacenza_iniziale_vending,
         "giacenzaVendingContanti": giacenza_vending,
+        "prelievoVendingLordo": prelievo_vending_lordo,
+        "prelievoVendingNetto": prelievo_vending,
         "prelievoVending": prelievo_vending,
         "scontriniVending": totale_scontrini,
         "prelievoDaVending": prelievo_vending,
