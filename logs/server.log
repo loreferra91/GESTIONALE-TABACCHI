@@ -1,0 +1,85 @@
+INFO:     Started server process [15912]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18085 (Press CTRL+C to quit)
+INFO:     127.0.0.1:51811 - "GET /api/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51812 - "GET /api/ HTTP/1.1" 200 OK
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/openpyxl/reader/workbook.py:118: UserWarning: Print area cannot be set to Defined name: Tabella19[#All].
+  warn(f"Print area cannot be set to Defined name: {defn.value}.")
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/openpyxl/reader/workbook.py:118: UserWarning: Print area cannot be set to Defined name: tblRicaricaVendingS52[[COLONNA]:[GIACENZA_REALE]].
+  warn(f"Print area cannot be set to Defined name: {defn.value}.")
+INFO:     127.0.0.1:51813 - "POST /api/import/excel-full HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51814 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51815 - "GET /manifest.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51814 - "GET /static/js/main.b58fc175.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51816 - "GET /static/css/main.01ba1d96.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51814 - "GET /api/ordini?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51815 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51817 - "GET /api/versamenti?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51818 - "GET /api/prelievi-vending?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51816 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51821 - "GET /api/parametri HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51820 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51822 - "GET /api/import/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51823 - "GET /api/backup HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51824 - "POST /api/backup/restore-file HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51824 - "GET /api/parametri HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51825 - "GET /api/import/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51826 - "GET /api/backup HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51826 - "GET /api/ordini?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51824 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51827 - "GET /api/versamenti?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51828 - "GET /api/prelievi-vending?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51825 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51824 - "GET /api/prodotti?limit=5000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51827 - "GET /api/vendite?giorno=2026-10-03 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51826 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51829 - "POST /api/vendite/preview-csv-vending?pagamento=CONTANTI HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51830 - "POST /api/vendite/import-csv-vending?pagamento=CONTANTI HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51830 - "GET /api/vendite?giorno=2026-10-03 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51830 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51833 - "GET /api/ordini?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51834 - "GET /api/versamenti?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51835 - "GET /api/prelievi-vending?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51832 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51836 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51837 - "GET /api/vending HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51839 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51840 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51846 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51852 - "GET /api/vendite HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51856 - "GET /contabilita HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51856 - "GET /static/css/main.01ba1d96.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51856 - "GET /static/js/main.b58fc175.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51856 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51860 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51921 - "GET /contabilita HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51921 - "GET /static/css/main.01ba1d96.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51921 - "GET /static/js/main.b0a330ee.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51921 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51925 - "GET /api/dashboard?_ts=1791025060841 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51947 - "GET /contabilita HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51947 - "GET /manifest.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51949 - "GET /static/css/main.01ba1d96.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51948 - "GET /static/js/main.b0a330ee.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51947 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51949 - "GET /api/dashboard?_ts=1791025279035 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51954 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51956 - "GET /api/ordini?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51957 - "GET /api/versamenti?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51958 - "GET /api/prelievi-vending?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51955 - "GET /api/dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51963 - "GET /api/data-status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51964 - "GET /api/vending HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51969 - "GET /api/vending HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52000 - "POST /api/backup/create HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52002 - "GET /api/backup/047d86e6-00bc-4b54-9ac1-430f6d283f2d/download HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [15912]
+INFO:     Started server process [16861]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18085 (Press CTRL+C to quit)
+INFO:     127.0.0.1:52007 - "GET /api/ HTTP/1.1" 200 OK
