@@ -2004,6 +2004,102 @@ def _assign_csv_vending_event_keys(rows: List[Dict[str, Any]]) -> None:
         row["csv_event_key"] = f"{base}:{occurrence}"
 
 
+def _csv_vending_compatibility_key(row: Dict[str, Any]) -> str:
+    """Chiave al minuto per confrontare export vecchi e nuovi del distributore.
+
+    Gli export storici omettevano i secondi (``07/10/2026 23:58``), mentre
+    quelli recenti li includono (``07-10-2026 23:58:16``). La chiave evento
+    esatta resta la deduplicazione principale; questa firma viene usata solo
+    come compatibilita' per le righe che non hanno trovato una corrispondenza
+    esatta.
+    """
+    parsed = _parse_sale_datetime(row.get("data"))
+    minute = parsed.strftime("%Y-%m-%dT%H:%M") if parsed else str(row.get("data") or "")[:16]
+    raw_code = _product_code_text(row.get("codice"))
+    numeric_code = adm_numeric_code(raw_code) if raw_code.isdigit() or raw_code.startswith("AMMS") else ""
+    identity = numeric_code or raw_code
+    if not identity:
+        identity = re.sub(
+            r"\s+", " ", str(row.get("nome") or row.get("descrizione") or "").strip().upper()
+        )
+    payload = {
+        "minuto": minute,
+        "colonna": _normalize_vending_column(row.get("colonna")),
+        "prodotto": identity,
+        "prezzo": f"{float(row.get('prezzo', row.get('importo', 0)) or 0):.2f}",
+        "pagamento": _vending_payment_bucket(row.get("pagamento")),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _exclude_imported_csv_vending_rows(
+    rows: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], int]:
+    """Esclude eventi gia' importati, inclusi quelli salvati senza secondi."""
+    if not rows:
+        return [], 0
+
+    keys = [row["csv_event_key"] for row in rows]
+    parsed_dates = [
+        parsed for parsed in (_parse_sale_datetime(row.get("data")) for row in rows) if parsed
+    ]
+    date_floor = min(parsed_dates).replace(second=0, microsecond=0).isoformat()
+    date_ceiling = (max(parsed_dates).replace(second=0, microsecond=0) + timedelta(minutes=1)).isoformat()
+    existing_rows = await db.vendite.find(
+        {
+            "sorgente": "CSV_VENDING",
+            "data": {"$gte": date_floor, "$lt": date_ceiling},
+        },
+        {
+            "_id": 0,
+            "csv_event_key": 1,
+            "data": 1,
+            "codice": 1,
+            "descrizione": 1,
+            "importo": 1,
+            "colonna": 1,
+            "pagamento": 1,
+        },
+    ).to_list(None)
+
+    existing_exact_keys = {
+        str(row.get("csv_event_key") or "") for row in existing_rows if row.get("csv_event_key")
+    }
+    exact_matches = {key for key in keys if key in existing_exact_keys}
+
+    # Conta le vendite persistite per firma al minuto. Sottrai quelle gia'
+    # abbinate esattamente, poi usa il residuo per assorbire soltanto le righe
+    # legacy la cui precisione temporale e' cambiata tra due export.
+    compatibility_counts: Dict[str, int] = {}
+    for existing in existing_rows:
+        compatibility_key = _csv_vending_compatibility_key(existing)
+        compatibility_counts[compatibility_key] = compatibility_counts.get(compatibility_key, 0) + 1
+    for row in rows:
+        if row["csv_event_key"] not in exact_matches:
+            continue
+        compatibility_key = _csv_vending_compatibility_key(row)
+        compatibility_counts[compatibility_key] = max(
+            0, compatibility_counts.get(compatibility_key, 0) - 1
+        )
+
+    duplicate_ids = {id(row) for row in rows if row["csv_event_key"] in exact_matches}
+    # Il file e' ordinato dal piu' recente al piu' vecchio. In caso di nuove
+    # vendite identiche nello stesso minuto, abbina prima le piu' vecchie al
+    # vecchio export e conserva come nuove le piu' recenti.
+    for row in reversed(rows):
+        if id(row) in duplicate_ids:
+            continue
+        compatibility_key = _csv_vending_compatibility_key(row)
+        if compatibility_counts.get(compatibility_key, 0) <= 0:
+            continue
+        compatibility_counts[compatibility_key] -= 1
+        duplicate_ids.add(id(row))
+
+    new_rows = [row for row in rows if id(row) not in duplicate_ids]
+    return new_rows, len(rows) - len(new_rows)
+
+
 def _local_sale_datetime(value: Any) -> Optional[datetime]:
     """Confronta timestamp UTC di sistema e orari locali esportati dalla vending."""
     parsed = _parse_sale_datetime(value)
@@ -2090,15 +2186,9 @@ async def _prepare_csv_vending_import(raw: str, pagamento: str) -> tuple[Dict[st
     all_rows = parsed["righe"]
     historical_rows, cutoff = _filter_new_csv_vending_rows(all_rows, historical_documents)
     _assign_csv_vending_event_keys(historical_rows)
-    keys = [row["csv_event_key"] for row in historical_rows]
-    existing = await db.vendite.find(
-        {"csv_event_key": {"$in": keys}},
-        {"_id": 0, "csv_event_key": 1},
-    ).to_list(len(keys)) if keys else []
-    existing_keys = {str(row.get("csv_event_key") or "") for row in existing}
-    parsed["righe"] = [row for row in historical_rows if row["csv_event_key"] not in existing_keys]
+    parsed["righe"], imported_count = await _exclude_imported_csv_vending_rows(historical_rows)
     parsed["righe_storico_excel"] = len(all_rows) - len(historical_rows)
-    parsed["righe_csv_gia_importate"] = len(historical_rows) - len(parsed["righe"])
+    parsed["righe_csv_gia_importate"] = imported_count
     parsed["stock"] = await _annotate_csv_vending_stock_effects(parsed["righe"])
     return parsed, cutoff, len(all_rows)
 
@@ -2379,6 +2469,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             sale_doc.update({
                 "csv_event_key": csv_row["csv_event_key"],
                 "csv_event_occurrence": csv_row["csv_event_occurrence"],
+                "csv_event_compatibility_key": _csv_vending_compatibility_key(csv_row),
                 "csv_file_sha256": file_sha256,
                 "stock_effect_applied": bool(undo_meta.get("vending_stock_decremented")),
                 "stock_effect_reason": csv_row.get("giacenza_motivo"),
