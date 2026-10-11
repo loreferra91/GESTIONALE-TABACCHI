@@ -80,7 +80,7 @@ export default function Contabilita() {
   };
 
   const alignAccountingCsv = async () => {
-    if (!csvFile || !csvPreview?.righe || csvBusy) return;
+    if (!csvFile || !csvPreview?.righe || csvPreview?.errori?.length || csvBusy) return;
     setCsvBusy(true);
     try {
       const formData = new FormData();
@@ -168,7 +168,7 @@ export default function Contabilita() {
               type="button"
               data-testid="align-accounting-csv"
               onClick={alignAccountingCsv}
-              disabled={!csvPreview?.righe || csvBusy}
+              disabled={!csvPreview?.righe || csvPreview?.errori?.length > 0 || csvBusy}
               className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <UploadSimple size={17} /> {csvBusy ? "Controllo…" : "Allinea al CSV"}
@@ -176,13 +176,21 @@ export default function Contabilita() {
           </div>
         </div>
         {csvPreview ? (
-          <div className="mt-4 grid grid-cols-2 gap-3 border-t border-slate-200 pt-4 sm:grid-cols-3 lg:grid-cols-6">
-            <div><div className="overline">Righe</div><b>{csvPreview.righe}</b></div>
-            <div><div className="overline">Contanti</div><b>{formatDashboardEur(csvPreview.importi_pagamenti?.CONTANTI)}</b></div>
-            <div><div className="overline">Carte</div><b>{formatDashboardEur(csvPreview.importi_pagamenti?.CARTE)}</b></div>
-            <div><div className="overline">PagoBancomat</div><b>{formatDashboardEur(csvPreview.importi_pagamenti?.PAGOBANCOMAT)}</b></div>
-            <div><div className="overline">Elettronici</div><b>{formatDashboardEur(csvPreview.totale_elettronici)}</b></div>
-            <div><div className="overline">Totale</div><b>{formatDashboardEur(csvPreview.totale)}</b></div>
+          <div className="mt-4 border-t border-slate-200 pt-4">
+            {csvPreview.errori?.length > 0 ? (
+              <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+                <b>{csvPreview.errori.length} righe non valide.</b>{" "}
+                Prima anomalia alla riga {csvPreview.errori[0].riga}: {csvPreview.errori[0].errore}
+              </div>
+            ) : null}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <div><div className="overline">Righe valide</div><b>{csvPreview.righe}</b></div>
+              <div><div className="overline">Contanti</div><b>{formatDashboardEur(csvPreview.importi_pagamenti?.CONTANTI)}</b></div>
+              <div><div className="overline">Carte</div><b>{formatDashboardEur(csvPreview.importi_pagamenti?.CARTE)}</b></div>
+              <div><div className="overline">PagoBancomat</div><b>{formatDashboardEur(csvPreview.importi_pagamenti?.PAGOBANCOMAT)}</b></div>
+              <div><div className="overline">Elettronici</div><b>{formatDashboardEur(csvPreview.totale_elettronici)}</b></div>
+              <div><div className="overline">Totale</div><b>{formatDashboardEur(csvPreview.totale)}</b></div>
+            </div>
           </div>
         ) : null}
       </Card>

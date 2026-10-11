@@ -114,6 +114,27 @@ def test_csv_preview_preserves_payment_types_and_normalizes_dates():
     assert parsed["saltati"] == 0
 
 
+def test_csv_preview_accepts_vending_dates_with_two_digit_years():
+    raw = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "11/10/26 02:33;CAMEL BLUE SOFT;5,80;1-C11;632;Sigarette;Contanti\n"
+        "10-10-26 22:17:05;MARLBORO RED;6,80;1-E09;395;Sigarette;Carte\n"
+        "18/7/26 15:48;TEREA AZURE;5,50;1-F04;20659;Tabacchi;PagoBancomat\n"
+    )
+
+    summary = server._summarize_vending_csv(server._parse_csv_vending(raw))
+
+    assert summary["righe"] == 3
+    assert summary["errori"] == []
+    assert summary["importi_pagamenti"] == {
+        "CONTANTI": 5.8,
+        "CARTE": 6.8,
+        "PAGOBANCOMAT": 5.5,
+    }
+    assert summary["data_da"] == "2026-07-18T15:48:00"
+    assert summary["data_a"] == "2026-10-11T02:33:00"
+
+
 def test_accounting_csv_summary_matches_payment_totals_without_stock_changes():
     raw = (
         "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
