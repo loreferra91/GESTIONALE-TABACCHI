@@ -97,7 +97,9 @@ client o lo snapshot corrente. Non incrementa `giacenza_negozio`, non incrementa
 `acquistati` e non scrive in `storico_ordini`. Il carico merce resta
 `POST /api/ordini/bulk`: usare quell'endpoint quando la merce arriva fisicamente;
 quello e il percorso che registra lo storico di ricezione e aumenta scorte e
-acquistati.
+acquistati. Per i prodotti presenti in SMART VENUE, lo stesso carico incrementa
+anche il relativo saldo Smart Venue: cosi la merce ricevuta non appare come una
+differenza negativa da correggere manualmente.
 
 Le finestre Auto-Order sono configurabili con `AUTO_ORDER_FINESTRA_BREVE_GG` e
 `AUTO_ORDER_FINESTRA_LUNGA_GG`. Le API espongono i campi generici

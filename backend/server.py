@@ -511,6 +511,13 @@ async def on_start():
         products_reconciled = await reconcile_all_vending_stock()
         if products_reconciled:
             logging.info("Reconciled %s product vending stock caches", products_reconciled)
+        smart_venue_repair = await repair_smart_venue_auto_order_2026_10_12()
+        if smart_venue_repair.get("righe_riparate"):
+            logging.info(
+                "Repaired Smart Venue for %s receipt rows (%s pieces)",
+                smart_venue_repair["righe_riparate"],
+                smart_venue_repair["pezzi_ripristinati"],
+            )
     except Exception as e:
         logging.exception("seed failed: %s", e)
 
@@ -3243,6 +3250,7 @@ async def add_ordine(o: OrdineIn):
     # aggiorna giacenza / acquisti
     if o.codice:
         await db.prodotti.update_one({"codice": o.codice}, {"$inc": {"giacenza_negozio": o.quantita, "acquistati": o.quantita}})
+        await _increment_smart_venue_for_receipt(o.codice, o.quantita)
     return oo.model_dump()
 
 
@@ -3256,6 +3264,156 @@ class BulkOrdineIn(BaseModel):
     file_sorgente: str = "carico manuale"
     data: Optional[str] = None
     righe: List[Dict[str, Any]]  # {codice, descrizione, quantita, prezzo}
+
+
+async def _increment_smart_venue_for_receipt(codice: str, quantita: int) -> bool:
+    """Mantiene il saldo operativo Smart Venue allineato a un carico merce.
+
+    SMART VENUE e il gestionale partono dalla stessa disponibilita fisica. Il
+    carico deve quindi incrementare entrambi; le vendite successive tornano a
+    emergere come differenza positiva da confermare. I prodotti non gestiti da
+    Smart Venue restano esclusi: questa funzione non crea nuove righe.
+    """
+    if not codice or quantita <= 0:
+        return False
+    result = await db.smart_venue.update_one(
+        {"codice": codice},
+        {
+            "$inc": {"smart_venue": quantita},
+            "$set": {
+                "ultimo_carico_smart_venue": quantita,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        },
+    )
+    return bool(result.matched_count)
+
+
+SMART_VENUE_AUTO_ORDER_REPAIR_ID = "smart-venue-auto-order-2026-10-12-v1"
+SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED = {
+    "AMMS338": 150,
+    "AMMS9": 60,
+    "AMMS478": 40,
+    "AMMS20155": 40,
+    "AMMS20154": 40,
+    "AMMS536": 60,
+    "AMMS1784": 30,
+    "AMMS20659": 60,
+    "AMMS2982": 30,
+    "AMMS3422": 20,
+    "AMMS134": 20,
+    "AMMS3906": 10,
+    "AMMS3907": 30,
+    "AMMS91": 30,
+    "AMMS20041": 10,
+    "AMMS20151": 20,
+    "AMMS21037": 20,
+    "AMMS3221": 20,
+    "AMMS3458": 10,
+    "AMMS951": 10,
+    "AMMS81": 10,
+    "AMMS177": 10,
+    "AMMS3688": 20,
+    "AMMS1733": 20,
+    "AMMS20153": 20,
+    "AMMS21460": 10,
+    "AMMS245": 10,
+}
+
+
+def _receipt_quantities_by_code(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    quantities: Dict[str, int] = {}
+    for row in rows:
+        code = str(row.get("codice") or "").strip()
+        quantity = int(row.get("quantita", 0) or 0)
+        if code and quantity > 0:
+            quantities[code] = quantities.get(code, 0) + quantity
+    return quantities
+
+
+async def repair_smart_venue_auto_order_2026_10_12() -> Dict[str, Any]:
+    """Ripara una sola volta il carico Auto-Order che non aggiorno Smart Venue.
+
+    La riparazione si rifiuta di partire se lo storico reale non coincide con
+    le 27 righe gia verificate. Ogni riga Smart Venue conserva inoltre un
+    marcatore idempotente, cosi un'interruzione a meta non puo raddoppiare le
+    quantita al tentativo successivo.
+    """
+    migration = await db.app_migrations.find_one(
+        {"id": SMART_VENUE_AUTO_ORDER_REPAIR_ID},
+        {"_id": 0},
+    )
+    if migration:
+        return {"ok": True, "gia_applicata": True, **migration}
+
+    rows = await db.storico_ordini.find(
+        {"file_sorgente": "da auto-order (modificato)"},
+        {"_id": 0, "data": 1, "codice": 1, "quantita": 1},
+    ).to_list(1000)
+    rows = [row for row in rows if str(row.get("data") or "").startswith("2026-10-12")]
+    if not rows:
+        return {"ok": True, "non_applicabile": True}
+    actual = _receipt_quantities_by_code(rows)
+    if actual != SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED:
+        raise RuntimeError(
+            "Riparazione annullata: il carico storico del 12/10/2026 non "
+            f"coincide con quello verificato (atteso {SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED}, "
+            f"trovato {actual})."
+        )
+
+    codes = list(SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED)
+    smart_rows = await db.smart_venue.find(
+        {"codice": {"$in": codes}},
+        {"_id": 0, "codice": 1, "riparazioni_applicate": 1},
+    ).to_list(1000)
+    by_code = {row["codice"]: row for row in smart_rows}
+    missing = sorted(set(codes) - set(by_code))
+    if missing:
+        raise RuntimeError(
+            "Riparazione annullata: mancano righe Smart Venue per " + ", ".join(missing)
+        )
+
+    backup = await create_backup_snapshot(
+        "Prima riparazione Smart Venue carico Auto-Order 12/10/2026",
+        "riparazione-smart-venue-carico",
+        ["smart_venue", "storico_ordini"],
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    operations = [
+        UpdateOne(
+            {
+                "codice": code,
+                "riparazioni_applicate": {"$ne": SMART_VENUE_AUTO_ORDER_REPAIR_ID},
+            },
+            {
+                "$inc": {"smart_venue": quantity},
+                "$addToSet": {"riparazioni_applicate": SMART_VENUE_AUTO_ORDER_REPAIR_ID},
+                "$set": {"updated_at": now},
+            },
+        )
+        for code, quantity in SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.items()
+    ]
+    if operations:
+        await db.smart_venue.bulk_write(operations, ordered=True)
+
+    repaired = await db.smart_venue.count_documents({
+        "codice": {"$in": codes},
+        "riparazioni_applicate": SMART_VENUE_AUTO_ORDER_REPAIR_ID,
+    })
+    if repaired != len(codes):
+        raise RuntimeError(
+            f"Riparazione incompleta: marcate {repaired} righe Smart Venue su {len(codes)}."
+        )
+
+    migration = {
+        "id": SMART_VENUE_AUTO_ORDER_REPAIR_ID,
+        "created_at": now,
+        "backup_id": backup["id"],
+        "righe_riparate": len(codes),
+        "pezzi_ripristinati": sum(SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.values()),
+    }
+    await db.app_migrations.insert_one(migration.copy())
+    return {"ok": True, "gia_applicata": False, **migration}
 
 
 @api.post("/ordini/bulk")
@@ -3285,6 +3443,7 @@ async def bulk_carico(body: BulkOrdineIn):
                     {"codice": codice},
                     {"$inc": {"giacenza_negozio": qta, "acquistati": qta}},
                 )
+                await _increment_smart_venue_for_receipt(codice, qta)
             else:
                 # crea prodotto minimale
                 await db.prodotti.insert_one(Prodotto(

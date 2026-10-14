@@ -126,12 +126,27 @@ class FakeCursor:
 
 
 class FakeCollection:
-    def __init__(self):
-        self.documents = []
+    def __init__(self, documents=None):
+        self.documents = [dict(document) for document in (documents or [])]
 
     @staticmethod
     def _matches(document, query):
-        return all(document.get(key) == value for key, value in query.items())
+        for key, value in query.items():
+            current = document.get(key)
+            if isinstance(value, dict):
+                if "$in" in value and current not in value["$in"]:
+                    return False
+                if "$ne" in value:
+                    if isinstance(current, list) and value["$ne"] in current:
+                        return False
+                    if not isinstance(current, list) and current == value["$ne"]:
+                        return False
+            elif isinstance(current, list):
+                if value not in current:
+                    return False
+            elif current != value:
+                return False
+        return True
 
     async def insert_one(self, document):
         self.documents.append(dict(document))
@@ -160,11 +175,26 @@ class FakeCollection:
         for row in self.documents:
             if self._matches(row, query):
                 row.update(update.get("$set", {}))
+                for key, value in update.get("$inc", {}).items():
+                    row[key] = row.get(key, 0) + value
+                for key, value in update.get("$addToSet", {}).items():
+                    if value not in row.setdefault(key, []):
+                        row[key].append(value)
                 return SimpleNamespace(matched_count=1)
         if upsert:
             self.documents.append({**query, **update.get("$set", {})})
             return SimpleNamespace(matched_count=0, upserted_id="fake-id")
         return SimpleNamespace(matched_count=0)
+
+    async def count_documents(self, query):
+        return sum(1 for row in self.documents if self._matches(row, query))
+
+    async def bulk_write(self, operations, ordered=True):
+        matched = 0
+        for operation in operations:
+            result = await self.update_one(operation._filter, operation._doc)
+            matched += result.matched_count
+        return SimpleNamespace(matched_count=matched)
 
 
 def isolated_db(monkeypatch):
@@ -174,9 +204,139 @@ def isolated_db(monkeypatch):
         smart_venue_values=FakeCollection(),
         vending=FakeCollection(),
         prodotti=FakeCollection(),
+        storico_ordini=FakeCollection(),
+        app_migrations=FakeCollection(),
     )
     monkeypatch.setattr(server, "db", database)
     return database
+
+
+def test_bulk_receipt_increments_existing_smart_venue_balance_only(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def seed_and_receive():
+        await database.prodotti.insert_many([
+            {"codice": "P1", "descrizione": "Prodotto Smart", "acquistati": 10, "giacenza_negozio": 5},
+            {"codice": "P2", "descrizione": "Prodotto normale", "acquistati": 4, "giacenza_negozio": 2},
+        ])
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 8,
+        })
+        response = await server.bulk_carico(server.BulkOrdineIn(
+            file_sorgente="TEST",
+            data="2026-10-14T00:00:00+00:00",
+            righe=[
+                {"codice": "P1", "descrizione": "Prodotto Smart", "quantita": 3, "prezzo": 5},
+                {"codice": "P2", "descrizione": "Prodotto normale", "quantita": 2, "prezzo": 4},
+            ],
+        ))
+        return (
+            response,
+            await database.prodotti.find_one({"codice": "P1"}),
+            await database.prodotti.find_one({"codice": "P2"}),
+            await database.smart_venue.find_one({"codice": "P1"}),
+        )
+
+    response, smart_product, normal_product, smart_row = asyncio.run(seed_and_receive())
+
+    assert response["caricate"] == 2
+    assert smart_product["giacenza_negozio"] == 8
+    assert smart_product["acquistati"] == 13
+    assert smart_row["smart_venue"] == 11
+    assert smart_row["ultimo_carico_smart_venue"] == 3
+    assert normal_product["giacenza_negozio"] == 4
+    assert count_rows_for_code(database.smart_venue.documents, "P2") == 0
+
+
+def count_rows_for_code(rows, code):
+    return sum(1 for row in rows if row.get("codice") == code)
+
+
+def test_single_receipt_increments_smart_venue_balance(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def seed_and_receive():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto Smart", "acquistati": 10, "giacenza_negozio": 5,
+        })
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 8,
+        })
+        await server.add_ordine(server.OrdineIn(
+            data="2026-10-14T00:00:00+00:00",
+            file_sorgente="TEST",
+            codice="P1",
+            descrizione="Prodotto Smart",
+            quantita=2,
+            prezzo=5,
+        ))
+        return await database.smart_venue.find_one({"codice": "P1"})
+
+    smart_row = asyncio.run(seed_and_receive())
+
+    assert smart_row["smart_venue"] == 10
+
+
+def test_verified_auto_order_repair_totals_27_rows_and_810_pieces():
+    rows = [
+        {"codice": code, "quantita": quantity}
+        for code, quantity in server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.items()
+    ]
+
+    assert server._receipt_quantities_by_code(rows) == server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED
+    assert len(rows) == 27
+    assert sum(row["quantita"] for row in rows) == 810
+
+
+def test_verified_auto_order_repair_is_backed_up_and_idempotent(monkeypatch):
+    database = isolated_db(monkeypatch)
+    backup_calls = []
+
+    async def fake_backup(*args):
+        backup_calls.append(args)
+        return {"id": "backup-before-repair"}
+
+    monkeypatch.setattr(server, "create_backup_snapshot", fake_backup)
+
+    async def seed_and_repair_twice():
+        await database.storico_ordini.insert_many([
+            {
+                "data": "2026-10-12T00:00:00+00:00",
+                "file_sorgente": "da auto-order (modificato)",
+                "codice": code,
+                "quantita": quantity,
+            }
+            for code, quantity in server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.items()
+        ])
+        await database.smart_venue.insert_many([
+            {"codice": code, "smart_venue": 5}
+            for code in server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED
+        ])
+        first = await server.repair_smart_venue_auto_order_2026_10_12()
+        after_first = {
+            row["codice"]: row["smart_venue"] for row in database.smart_venue.documents
+        }
+        second = await server.repair_smart_venue_auto_order_2026_10_12()
+        after_second = {
+            row["codice"]: row["smart_venue"] for row in database.smart_venue.documents
+        }
+        return first, second, after_first, after_second
+
+    first, second, after_first, after_second = asyncio.run(seed_and_repair_twice())
+
+    assert first["gia_applicata"] is False
+    assert first["pezzi_ripristinati"] == 810
+    assert second["gia_applicata"] is True
+    assert backup_calls == [(
+        "Prima riparazione Smart Venue carico Auto-Order 12/10/2026",
+        "riparazione-smart-venue-carico",
+        ["smart_venue", "storico_ordini"],
+    )]
+    assert after_second == after_first
+    assert after_first == {
+        code: 5 + quantity
+        for code, quantity in server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.items()
+    }
 
 
 def test_smart_venue_uses_product_acquired_and_stock_with_excel_smart_value(monkeypatch):
