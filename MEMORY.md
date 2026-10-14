@@ -9,3 +9,7 @@
   registrato; il saldo combinato di negozio e vending usa invece il prelievo
   netto. Questa decisione sostituisce la regola annotata il 2026-10-07 che
   lasciava gli scontrini separati anche dal prelievo e dal saldo combinato.
+- Dal 2026-10-14 ogni carico merce incrementa anche il saldo Smart Venue dei
+  prodotti gia presenti in Smart Venue, oltre a `giacenza_negozio` e
+  `acquistati`. Il carico Auto-Order del 12/10/2026 è stato riallineato con una
+  migrazione idempotente di 27 righe/810 pezzi e backup preventivo.
