@@ -370,6 +370,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
 }
 
 BACKUP_RETENTION_LIMIT = 3
+BACKUP_RETENTION_POLICY_ID = "backup-retention-v1"
 EXCEL_IMPORT_BACKUP_COLLECTIONS = [
     "prodotti",
     "listino_adm",
@@ -1533,13 +1534,16 @@ async def create_backup_snapshot(
     # Manteniamo pulito l'oggetto restituito all'API: ObjectId non e' JSON
     # serializzabile e faceva apparire fallito un backup gia' creato.
     await db.backup_snapshots.insert_one(meta.copy())
-    try:
-        await prune_backup_snapshots(BACKUP_RETENTION_LIMIT)
-    except Exception:
-        # Il backup appena creato resta valido anche se la pulizia non riesce.
-        # L'errore viene tracciato, ma non deve trasformare un backup riuscito
-        # in un falso errore di importazione.
-        logging.exception("Impossibile applicare la retention dei backup MongoDB")
+    migration_collection = getattr(db, "app_migrations", None)
+    retention_enabled = await migration_collection.find_one(
+        {"id": BACKUP_RETENTION_POLICY_ID}, {"_id": 0, "id": 1}
+    ) if migration_collection is not None else None
+    if retention_enabled:
+        try:
+            await prune_backup_snapshots(BACKUP_RETENTION_LIMIT)
+        except Exception:
+            # Il backup appena creato resta valido anche se la pulizia non riesce.
+            logging.exception("Impossibile applicare la retention dei backup MongoDB")
     return meta
 
 
@@ -1660,7 +1664,18 @@ async def backup_cleanup_preview(keep: int = BACKUP_RETENTION_LIMIT):
 
 @api.post("/backup/prune")
 async def backup_cleanup(keep: int = BACKUP_RETENTION_LIMIT):
-    return await prune_backup_snapshots(keep)
+    result = await prune_backup_snapshots(keep)
+    await db.app_migrations.update_one(
+        {"id": BACKUP_RETENTION_POLICY_ID},
+        {"$set": {
+            "id": BACKUP_RETENTION_POLICY_ID,
+            "enabled_at": datetime.now(timezone.utc).isoformat(),
+            "keep": result["keep"],
+        }},
+        upsert=True,
+    )
+    result["retention_enabled"] = True
+    return result
 
 
 @api.get("/backup")
