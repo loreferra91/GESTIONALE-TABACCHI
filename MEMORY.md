@@ -19,3 +19,8 @@
   La pagina **GIACENZE REALI** usa `prodotti.giacenza_negozio` e la somma delle
   colonne `vending`, registra le correzioni in `rettifiche_inventario` senza
   creare vendite, e offre le stampe A4 inventario in bianco e giacenze attuali.
+- Dal 2026-10-15 la contabilità CSV vending è un registro incrementale: ogni
+  export mobile aggiunge soltanto gli eventi nuovi tramite `csv_event_key` e
+  non elimina più le vendite uscite dalla finestra delle ultime 1.000 righe.
+  I backup MongoDB interni hanno retention di 3 copie e gli import Excel usano
+  snapshot parziali delle sole collezioni modificate, per restare entro Atlas M0.

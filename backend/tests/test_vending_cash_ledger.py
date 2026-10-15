@@ -35,16 +35,14 @@ def test_cash_csv_increments_vending_cash_but_cards_do_not(monkeypatch):
     upload = UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
 
     result = asyncio.run(server.import_csv_vending(upload))
-    snapshot = asyncio.run(database.vending_accounting_snapshots.find_one(
-        {"status": "active"}, {"_id": 0}
-    ))
+    ledger = asyncio.run(server._vending_accounting_ledger_summary())
 
     assert result["contanti_aggiunti_giacenza"] == 5.8
     assert asyncio.run(server._vending_cash_balance()) == 243.35
     assert result["contabilita_allineata"] is True
     assert result["contabilita_importi_pagamenti"] == {"CONTANTI": 5.8, "CARTE": 6.0}
-    assert snapshot["importi_pagamenti"] == {"CONTANTI": 5.8, "CARTE": 6.0}
-    assert snapshot["totale"] == 11.8
+    assert ledger["importi_pagamenti"] == {"CONTANTI": 5.8, "CARTE": 6.0}
+    assert ledger["totale"] == 11.8
 
 
 def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatch):
@@ -90,19 +88,17 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
         active_accounting = await database.vending_accounting_snapshots.find_one(
             {"status": "active"}, {"_id": 0}
         )
-        reverted_accounting = await database.vending_accounting_snapshots.find_one(
-            {"source_batch_id": imported["batch_id"]}, {"_id": 0}
-        )
+        ledger_events = await database.vending_accounting_events.find({}).to_list(10)
         return (
             imported, product_after_import, column_after_import, cash_after_import, latest,
             undone, product_after_undo, column_after_undo, cash_after_undo, remaining,
-            active_accounting, reverted_accounting,
+            active_accounting, ledger_events,
         )
 
     (
         imported, product_after_import, column_after_import, cash_after_import, latest,
         undone, product_after_undo, column_after_undo, cash_after_undo, remaining,
-        active_accounting, reverted_accounting,
+        active_accounting, ledger_events,
     ) = asyncio.run(scenario())
 
     assert imported["inseriti"] == 1
@@ -121,7 +117,7 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
     assert remaining == []
     assert undone["contabilita_ripristinata"] is True
     assert active_accounting["id"] == "previous-accounting"
-    assert reverted_accounting["status"] == "reverted"
+    assert ledger_events == []
 
 
 def test_same_csv_is_idempotent_and_does_not_change_stock_or_cash_twice(monkeypatch):
@@ -156,6 +152,91 @@ def test_same_csv_is_idempotent_and_does_not_change_stock_or_cash_twice(monkeypa
     assert product["venduti_vending"] == 1
     assert len(sales) == 1
     assert cash == 5.8
+
+
+def test_accounting_ledger_keeps_rows_that_leave_the_vending_window(monkeypatch):
+    database = fresh_db(monkeypatch)
+    first = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "04/10/2026 10:00;A;1,0;1-A01;1001;Sigarette;Contanti\n"
+        "04/10/2026 10:01;B;2,0;1-A02;1002;Sigarette;Carte\n"
+        "04/10/2026 10:02;C;3,0;1-A03;1003;Sigarette;PagoBancomat\n"
+    )
+    second = (
+        "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+        "04/10/2026 10:01;B;2,0;1-A02;1002;Sigarette;Carte\n"
+        "04/10/2026 10:02;C;3,0;1-A03;1003;Sigarette;PagoBancomat\n"
+        "04/10/2026 10:03;D;4,0;1-A04;1004;Sigarette;Contanti\n"
+    )
+
+    async def scenario():
+        first_result, _ = await server._store_vending_accounting_snapshot(
+            first.encode(), "first.csv"
+        )
+        second_result, _ = await server._store_vending_accounting_snapshot(
+            second.encode(), "second.csv"
+        )
+        return first_result, second_result, await database.vending_accounting_events.count_documents({})
+
+    first_result, second_result, event_count = asyncio.run(scenario())
+
+    assert first_result["totale"] == 6.0
+    assert first_result["eventi_nuovi"] == 3
+    assert second_result["totale"] == 10.0
+    assert second_result["eventi_nuovi"] == 1
+    assert second_result["importi_pagamenti"] == {
+        "CONTANTI": 5.0,
+        "CARTE": 2.0,
+        "PAGOBANCOMAT": 3.0,
+    }
+    assert event_count == 4
+
+
+def test_ledger_migration_recovers_imported_sales_outside_latest_snapshot(monkeypatch):
+    database = fresh_db(monkeypatch)
+    rows = [
+        {
+            "data": "2026-10-04T10:00:00", "colonna": "A01", "codice": "1001",
+            "prezzo": 10.0, "pagamento": "CONTANTI", "nome": "CURRENT",
+        },
+        {
+            "data": "2026-09-01T10:00:00", "colonna": "A02", "codice": "1002",
+            "prezzo": 5.0, "pagamento": "CARTE", "nome": "OLDER",
+        },
+    ]
+    server._assign_csv_vending_event_keys(rows)
+
+    async def scenario():
+        await database.vending_accounting_snapshots.insert_one({
+            "id": "latest-snapshot",
+            "status": "active",
+            "created_at": "2026-10-04T11:00:00+00:00",
+            "file_name": "latest.csv",
+            "righe": 1,
+            "data_da": rows[0]["data"],
+            "data_a": rows[0]["data"],
+            "importi_pagamenti": {"CONTANTI": 10.0},
+            "csv_event_keys": [rows[0]["csv_event_key"]],
+        })
+        for row in rows:
+            await database.vendite.insert_one({
+                "id": row["nome"],
+                "sorgente": "CSV_VENDING",
+                "canale": "VENDING",
+                "csv_event_key": row["csv_event_key"],
+                "data": row["data"],
+                "importo": row["prezzo"],
+                "pagamento": row["pagamento"],
+                "created_at": "2026-10-04T10:30:00+00:00",
+            })
+        await server._ensure_vending_accounting_state()
+        return await server._vending_accounting_ledger_summary()
+
+    summary = asyncio.run(scenario())
+
+    assert summary["righe"] == 2
+    assert summary["totale"] == 15.0
+    assert summary["importi_pagamenti"] == {"CONTANTI": 10.0, "CARTE": 5.0}
 
 
 def test_cumulative_csv_imports_only_the_additional_identical_occurrence(monkeypatch):

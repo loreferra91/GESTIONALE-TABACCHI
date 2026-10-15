@@ -310,8 +310,8 @@ export default function Vendite() {
       setCsvResult(j);
       if (j.batch_id) setLastCsvImport({ id: j.batch_id, ...j, status: "active" });
       toast.success(j.inseriti
-        ? `CSV vending: ${j.inseriti} vendite importate, ${j.righe_da_scalare || 0} applicate alla giacenza; contabilità allineata`
-        : "Nessuna nuova vendita; contabilità vending allineata al CSV completo"
+        ? `CSV vending: ${j.inseriti} vendite importate, ${j.righe_da_scalare || 0} applicate alla giacenza; registro contabile aggiornato`
+        : "Nessuna nuova vendita; il registro contabile non contiene duplicati"
       );
       clearCsv();
       await load();

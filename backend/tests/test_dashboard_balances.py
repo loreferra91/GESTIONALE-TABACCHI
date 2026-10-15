@@ -276,6 +276,53 @@ def test_accounting_snapshot_does_not_duplicate_csv_sales_imported_after_alignme
     assert result["saldoVendingTotale"] == 305
 
 
+def test_incremental_ledger_skips_csv_app_rows_but_adds_later_manual_sales(monkeypatch):
+    historical = FakeCollection([])
+    app_sales = FakeCollection([
+        {
+            "created_at": "2026-10-07T10:01:00+00:00",
+            "importo": 10,
+            "pagamento": "CONTANTI",
+            "sorgente": "CSV_VENDING",
+            "csv_event_key": "already-in-ledger:1",
+        },
+        {
+            "created_at": "2026-10-07T10:02:00+00:00",
+            "importo": 5,
+            "pagamento": "CARTE",
+            "sorgente": "MANUALE",
+        },
+    ])
+
+    async def ledger_summary():
+        return {
+            "created_at": "2026-10-07T10:03:00+00:00",
+            "ledger_started_at": "2026-10-07T10:00:00+00:00",
+            "file_name": "latest.csv",
+            "righe": 1001,
+            "data_da": "2026-08-01T00:00:00",
+            "data_a": "2026-10-07T10:01:00",
+            "importi_pagamenti": {"CONTANTI": 100},
+        }
+
+    monkeypatch.setattr(server, "_vending_accounting_ledger_summary", ledger_summary)
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            db_storico_vending_ext=historical,
+            vendite=app_sales,
+            vending_accounting_snapshots=SnapshotCollection(None),
+        ),
+    )
+
+    result = asyncio.run(server._dashboard_balances(0))
+
+    assert result["venditeVendingContanti"] == 100
+    assert result["venditeVendingCarte"] == 5
+    assert result["saldoVendingTotale"] == 105
+
+
 def test_legacy_accounting_snapshot_uses_file_hash_to_avoid_duplicate_payments(monkeypatch):
     historical = FakeCollection([])
     app_sales = FakeCollection([{

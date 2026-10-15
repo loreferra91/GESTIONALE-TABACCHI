@@ -52,6 +52,7 @@ export default function Parametri() {
   const [importFileName, setImportFileName] = useState("");
   const [history, setHistory] = useState([]);
   const [backups, setBackups] = useState([]);
+  const [backupRetention, setBackupRetention] = useState(null);
   const [restoreTarget, setRestoreTarget] = useState(null);
   const [restoreFile, setRestoreFile] = useState(null);
   const [workingBackup, setWorkingBackup] = useState(false);
@@ -67,12 +68,14 @@ export default function Parametri() {
     setOpeningVendingCash(String(openingCash?.valore ?? 0));
   };
   const loadAudit = async () => {
-    const [h, b] = await Promise.all([
+    const [h, b, retention] = await Promise.all([
       api.get("/import/history"),
       api.get("/backup"),
+      api.get("/backup/retention-preview"),
     ]);
     setHistory(h.data || []);
     setBackups(b.data || []);
+    setBackupRetention(retention.data || null);
   };
   useEffect(() => { load(); loadAudit(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -184,6 +187,26 @@ export default function Parametri() {
       await loadAudit();
     } catch (err) {
       toast.error(apiErrorMessage(err, "Errore creazione backup"));
+    } finally {
+      setWorkingBackup(false);
+    }
+  };
+
+  const pruneOldBackups = async () => {
+    const count = backupRetention?.snapshot_da_svuotare || 0;
+    if (!count || workingBackup) return;
+    if (!window.confirm(
+      `Liberare lo spazio occupato da ${count} backup interni vecchi? Verranno conservati i 3 più recenti.`
+    )) return;
+    setWorkingBackup(true);
+    try {
+      const response = await api.post("/backup/prune");
+      toast.success(
+        `Spazio liberato: ${formatNum(response.data.documenti_eliminati)} documenti duplicati rimossi`
+      );
+      await loadAudit();
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Pulizia backup non riuscita"));
     } finally {
       setWorkingBackup(false);
     }
@@ -394,6 +417,30 @@ export default function Parametri() {
               disabled={workingBackup}
               className="mt-3 block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-2 file:font-semibold file:text-blue-900"
             />
+          </div>
+          <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-amber-900">Spazio MongoDB</div>
+                <p className="mt-1 text-xs text-amber-800">
+                  Il gestionale conserva al massimo 3 backup interni. I file scaricati sul Mac non vengono toccati.
+                </p>
+                {backupRetention?.snapshot_da_svuotare > 0 ? (
+                  <p className="mt-1 text-xs font-semibold text-amber-900">
+                    {formatNum(backupRetention.snapshot_da_svuotare)} backup vecchi · circa {formatNum(backupRetention.documenti_da_eliminare_stimati)} documenti duplicati da rimuovere
+                  </p>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                data-testid="backup-prune"
+                onClick={pruneOldBackups}
+                disabled={workingBackup || !backupRetention?.snapshot_da_svuotare}
+                className="rounded-md border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100 disabled:opacity-40"
+              >
+                Libera spazio
+              </button>
+            </div>
           </div>
           <div className="space-y-2">
             {backups.slice(0, 6).map(b => (

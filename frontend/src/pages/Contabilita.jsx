@@ -86,7 +86,7 @@ export default function Contabilita() {
       const formData = new FormData();
       formData.append("file", csvFile);
       await api.post("/contabilita/vending/allinea-csv", formData);
-      toast.success("Contabilità vending allineata al CSV senza modificare le giacenze");
+      toast.success("Nuove vendite aggiunte al registro contabile senza modificare le giacenze");
       setCsvFile(null);
       setCsvPreview(null);
       if (csvRef.current) csvRef.current.value = "";
@@ -152,7 +152,7 @@ export default function Contabilita() {
             ) : (
               <p className="mt-1 text-sm text-amber-700">Attualmente calcolata dallo storico Excel e dalle vendite dell'app.</p>
             )}
-            <p className="mt-1 text-xs text-slate-500">L'allineamento aggiorna solo i totali contabili. Giacenze e quantità vendute non vengono modificate.</p>
+            <p className="mt-1 text-xs text-slate-500">Ogni CSV aggiunge solo le vendite mai viste: le righe più vecchie non vengono perse quando escono dalla finestra delle ultime 1.000. Giacenze e quantità vendute non vengono modificate.</p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <input

@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+from mongomock_motor import AsyncMongoMockClient
+
 from backend import server
 
 
@@ -74,6 +76,40 @@ def test_backup_snapshot_can_be_limited_to_changed_collections(monkeypatch):
     }
     assert result["total_docs"] == 3
     assert result["partial"] is True
+
+
+def test_backup_retention_keeps_three_recent_snapshots_and_frees_old_items(monkeypatch):
+    database = AsyncMongoMockClient()["backup_retention_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        for index in range(5):
+            snapshot_id = f"backup-{index}"
+            await database.backup_snapshots.insert_one({
+                "id": snapshot_id,
+                "status": "READY",
+                "created_at": f"2026-10-{index + 1:02d}T10:00:00+00:00",
+                "label": snapshot_id,
+                "reason": "test",
+                "total_docs": 2,
+            })
+            await database.backup_snapshot_items.insert_many([
+                {"snapshot_id": snapshot_id, "collection": "prodotti", "doc": {"id": 1}},
+                {"snapshot_id": snapshot_id, "collection": "prodotti", "doc": {"id": 2}},
+            ])
+        preview = await server.backup_retention_preview(3)
+        result = await server.prune_backup_snapshots(3)
+        remaining = await database.backup_snapshot_items.count_documents({})
+        pruned = await database.backup_snapshots.count_documents({"status": "PRUNED"})
+        return preview, result, remaining, pruned
+
+    preview, result, remaining, pruned = asyncio.run(scenario())
+
+    assert preview["snapshot_da_svuotare"] == 2
+    assert preview["documenti_da_eliminare_stimati"] == 4
+    assert result["documenti_eliminati"] == 4
+    assert remaining == 6
+    assert pruned == 2
 
 
 def test_backup_file_validation_requires_every_operational_collection():

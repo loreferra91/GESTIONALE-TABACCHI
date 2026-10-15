@@ -337,6 +337,8 @@ BACKUP_COLLECTIONS = [
     "scontrini_vending",
     "cassa_vending_stato",
     "vending_accounting_snapshots",
+    "vending_accounting_state",
+    "vending_accounting_events",
     "cassa",
     "ordini_fornitore",
     "ordini_fornitore_righe",
@@ -357,6 +359,8 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "scontrini_vending",
     "cassa_vending_stato",
     "vending_accounting_snapshots",
+    "vending_accounting_state",
+    "vending_accounting_events",
     "anomalie_ignorate",
     "smart_venue",
     "smart_venue_hidden",
@@ -364,6 +368,20 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "ricezioni_merce",
     "rettifiche_inventario",
 }
+
+BACKUP_RETENTION_LIMIT = 3
+EXCEL_IMPORT_BACKUP_COLLECTIONS = [
+    "prodotti",
+    "listino_adm",
+    "vending",
+    "storico_ordini",
+    "parametri",
+    "db_storico_vend",
+    "db_storico_vending_ext",
+    "smart_venue",
+    "smart_venue_hidden",
+    "smart_venue_values",
+]
 
 
 # Stato effimero degli import in corso. Serve soltanto a mostrare alla UI la
@@ -521,6 +539,10 @@ async def on_start():
             db.prelievi_vending.create_index("data"),
             db.scontrini_vending.create_index("data"),
             db.cassa_vending_stato.create_index("id", unique=True),
+            db.vending_accounting_state.create_index("id", unique=True),
+            db.vending_accounting_events.create_index("csv_event_key", unique=True),
+            db.vending_accounting_events.create_index("data"),
+            db.vending_accounting_events.create_index("source_batch_id"),
             db.listino_adm.create_index("adm_codice"),
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
@@ -1511,7 +1533,68 @@ async def create_backup_snapshot(
     # Manteniamo pulito l'oggetto restituito all'API: ObjectId non e' JSON
     # serializzabile e faceva apparire fallito un backup gia' creato.
     await db.backup_snapshots.insert_one(meta.copy())
+    try:
+        await prune_backup_snapshots(BACKUP_RETENTION_LIMIT)
+    except Exception:
+        # Il backup appena creato resta valido anche se la pulizia non riesce.
+        # L'errore viene tracciato, ma non deve trasformare un backup riuscito
+        # in un falso errore di importazione.
+        logging.exception("Impossibile applicare la retention dei backup MongoDB")
     return meta
+
+
+async def backup_retention_preview(keep: int = BACKUP_RETENTION_LIMIT) -> Dict[str, Any]:
+    """Mostra quali snapshot interni verrebbero svuotati dalla retention."""
+    keep = max(1, min(int(keep or BACKUP_RETENTION_LIMIT), 20))
+    snapshots = await db.backup_snapshots.find(
+        {"status": {"$ne": "PRUNED"}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(None)
+    candidates = snapshots[keep:]
+    return {
+        "keep": keep,
+        "snapshot_totali": len(snapshots),
+        "snapshot_conservati": len(snapshots[:keep]),
+        "snapshot_da_svuotare": len(candidates),
+        "documenti_da_eliminare_stimati": sum(int(row.get("total_docs") or 0) for row in candidates),
+        "candidati": [
+            {
+                "id": row.get("id"),
+                "label": row.get("label"),
+                "reason": row.get("reason"),
+                "created_at": row.get("created_at"),
+                "total_docs": int(row.get("total_docs") or 0),
+            }
+            for row in candidates
+        ],
+    }
+
+
+async def prune_backup_snapshots(keep: int = BACKUP_RETENTION_LIMIT) -> Dict[str, Any]:
+    """Libera i documenti duplicati, mantenendo i backup interni più recenti."""
+    preview = await backup_retention_preview(keep)
+    pruned_at = datetime.now(timezone.utc).isoformat()
+    deleted_items = 0
+    for candidate in preview["candidati"]:
+        snapshot_id = candidate.get("id")
+        if not snapshot_id:
+            continue
+        deletion = await db.backup_snapshot_items.delete_many({"snapshot_id": snapshot_id})
+        deleted_items += int(getattr(deletion, "deleted_count", 0) or 0)
+        await db.backup_snapshots.update_one(
+            {"id": snapshot_id, "status": {"$ne": "PRUNED"}},
+            {"$set": {
+                "status": "PRUNED",
+                "pruned_at": pruned_at,
+                "pruned_docs": int(candidate.get("total_docs") or 0),
+            }},
+        )
+    return {
+        **preview,
+        "snapshot_svuotati": len(preview["candidati"]),
+        "documenti_eliminati": deleted_items,
+        "pruned_at": pruned_at,
+    }
 
 
 async def _backup_documents(
@@ -1570,16 +1653,30 @@ async def backup_create(body: Optional[Dict[str, Any]] = None):
     return await create_backup_snapshot(label, reason)
 
 
+@api.get("/backup/retention-preview")
+async def backup_cleanup_preview(keep: int = BACKUP_RETENTION_LIMIT):
+    return await backup_retention_preview(keep)
+
+
+@api.post("/backup/prune")
+async def backup_cleanup(keep: int = BACKUP_RETENTION_LIMIT):
+    return await prune_backup_snapshots(keep)
+
+
 @api.get("/backup")
 async def backup_list(limit: int = 20):
     capped_limit = max(1, min(int(limit or 20), 100))
-    docs = await db.backup_snapshots.find({}, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
+    docs = await db.backup_snapshots.find(
+        {"status": {"$ne": "PRUNED"}}, {"_id": 0}
+    ).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
     return docs
 
 
 @api.get("/backup/{snapshot_id}/download")
 async def backup_download(snapshot_id: str):
-    meta = await db.backup_snapshots.find_one({"id": snapshot_id}, {"_id": 0})
+    meta = await db.backup_snapshots.find_one(
+        {"id": snapshot_id, "status": {"$ne": "PRUNED"}}, {"_id": 0}
+    )
     if not meta:
         raise HTTPException(404, "backup non trovato")
     backed_up_names = list((meta.get("counts") or {}).keys())
@@ -1618,7 +1715,9 @@ async def backup_download(snapshot_id: str):
 
 @api.post("/backup/{snapshot_id}/restore")
 async def backup_restore(snapshot_id: str):
-    meta = await db.backup_snapshots.find_one({"id": snapshot_id}, {"_id": 0})
+    meta = await db.backup_snapshots.find_one(
+        {"id": snapshot_id, "status": {"$ne": "PRUNED"}}, {"_id": 0}
+    )
     if not meta:
         raise HTTPException(404, "backup non trovato")
     restore_backup = await create_backup_snapshot(
@@ -1722,7 +1821,9 @@ async def data_status_payload() -> Dict[str, Any]:
         db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
         asyncio.gather(*[db[name].count_documents({}) for name in BACKUP_COLLECTIONS]),
         db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
-        db.backup_snapshots.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
+        db.backup_snapshots.find_one(
+            {"status": {"$ne": "PRUNED"}}, {"_id": 0}, sort=[("created_at", -1)]
+        ),
     )
 
     count_map = dict(zip(BACKUP_COLLECTIONS, counts))
@@ -2281,6 +2382,144 @@ def _public_vending_accounting_snapshot(document: Dict[str, Any]) -> Dict[str, A
     }
 
 
+VENDING_ACCOUNTING_STATE_ID = "ledger"
+
+
+async def _ensure_vending_accounting_state() -> Dict[str, Any]:
+    """Migra una sola volta l'ultima fotografia nel nuovo registro incrementale."""
+    state = await db.vending_accounting_state.find_one(
+        {"id": VENDING_ACCOUNTING_STATE_ID}, {"_id": 0}
+    )
+    if not state:
+        previous = await _latest_vending_accounting_snapshot()
+        now = datetime.now(timezone.utc).isoformat()
+        initial = {
+            "id": VENDING_ACCOUNTING_STATE_ID,
+            "created_at": now,
+            "ledger_started_at": (previous or {}).get("created_at") or now,
+            "updated_at": now,
+            "baseline_importi_pagamenti": dict((previous or {}).get("importi_pagamenti") or {}),
+            "baseline_righe": int((previous or {}).get("righe") or 0),
+            "baseline_data_da": (previous or {}).get("data_da"),
+            "baseline_data_a": (previous or {}).get("data_a"),
+            # La vecchia fotografia contiene al massimo le 1.000 chiavi dell'ultimo
+            # export. Servono solo a non reinserire quel blocco durante la migrazione.
+            "baseline_event_keys": list((previous or {}).get("csv_event_keys") or []),
+            "migrated_from_snapshot_id": (previous or {}).get("id"),
+            "last_file_name": (previous or {}).get("file_name"),
+            "last_file_sha256": (previous or {}).get("sha256"),
+            "last_file_rows": int((previous or {}).get("righe") or 0),
+            "last_data_da": (previous or {}).get("data_da"),
+            "last_data_a": (previous or {}).get("data_a"),
+            "last_aligned_at": (previous or {}).get("created_at"),
+        }
+        await db.vending_accounting_state.update_one(
+            {"id": VENDING_ACCOUNTING_STATE_ID},
+            {"$setOnInsert": initial},
+            upsert=True,
+        )
+        state = await db.vending_accounting_state.find_one(
+            {"id": VENDING_ACCOUNTING_STATE_ID}, {"_id": 0}
+        )
+
+    if not state.get("legacy_sales_seeded_at"):
+        baseline_keys = set(state.get("baseline_event_keys") or [])
+        legacy_sales = await db.vendite.find(
+            {"sorgente": "CSV_VENDING", "csv_event_key": {"$exists": True}},
+            {
+                "_id": 0, "csv_event_key": 1, "data": 1, "importo": 1,
+                "pagamento": 1, "batch_id": 1, "created_at": 1, "csv_file_sha256": 1,
+            },
+        ).to_list(None)
+        operations = [
+            UpdateOne(
+                {"csv_event_key": sale["csv_event_key"]},
+                {"$setOnInsert": {
+                    "id": str(uuid.uuid4()),
+                    "csv_event_key": sale["csv_event_key"],
+                    "data": sale.get("data"),
+                    "importo": round(float(sale.get("importo") or 0), 2),
+                    "pagamento": _vending_payment_bucket(sale.get("pagamento")),
+                    "source_batch_id": sale.get("batch_id"),
+                    "first_seen_at": sale.get("created_at") or state.get("created_at"),
+                    "file_sha256": sale.get("csv_file_sha256"),
+                    "migrated_from_vendite": True,
+                }},
+                upsert=True,
+            )
+            for sale in legacy_sales
+            if sale.get("csv_event_key") not in baseline_keys
+        ]
+        seed_result = await _bulk_upsert(db.vending_accounting_events, operations, batch_size=500)
+        if seed_result["errori"]:
+            raise HTTPException(500, "Migrazione del registro contabile CSV incompleta")
+        seeded_at = datetime.now(timezone.utc).isoformat()
+        await db.vending_accounting_state.update_one(
+            {"id": VENDING_ACCOUNTING_STATE_ID},
+            {"$set": {
+                "legacy_sales_seeded_at": seeded_at,
+                "legacy_sales_seeded": seed_result["inseriti"],
+            }},
+        )
+        state["legacy_sales_seeded_at"] = seeded_at
+        state["legacy_sales_seeded"] = seed_result["inseriti"]
+    return state
+
+
+async def _vending_accounting_ledger_summary() -> Optional[Dict[str, Any]]:
+    state_collection = getattr(db, "vending_accounting_state", None)
+    event_collection = getattr(db, "vending_accounting_events", None)
+    if state_collection is None or event_collection is None:
+        return None
+    state = await state_collection.find_one(
+        {"id": VENDING_ACCOUNTING_STATE_ID}, {"_id": 0}
+    )
+    if not state:
+        return None
+    event_groups = await event_collection.aggregate([
+        {"$group": {
+            "_id": "$pagamento",
+            "totale": {"$sum": "$importo"},
+            "righe": {"$sum": 1},
+            "data_da": {"$min": "$data"},
+            "data_a": {"$max": "$data"},
+        }},
+    ]).to_list(None)
+    amounts = {
+        str(bucket): round(float(amount or 0), 2)
+        for bucket, amount in (state.get("baseline_importi_pagamenti") or {}).items()
+    }
+    dates = [value for value in [state.get("baseline_data_da"), state.get("baseline_data_a")] if value]
+    event_count = 0
+    for group in event_groups:
+        bucket = _vending_payment_bucket(group.get("_id"))
+        amounts[bucket] = round(amounts.get(bucket, 0) + float(group.get("totale") or 0), 2)
+        event_count += int(group.get("righe") or 0)
+        dates.extend(value for value in [group.get("data_da"), group.get("data_a")] if value)
+    cash = round(amounts.get("CONTANTI", 0), 2)
+    electronic = round(sum(
+        value for bucket, value in amounts.items() if bucket != "CONTANTI"
+    ), 2)
+    return {
+        "id": VENDING_ACCOUNTING_STATE_ID,
+        "status": "active",
+        "created_at": state.get("last_aligned_at") or state.get("updated_at") or state.get("created_at"),
+        "file_name": state.get("last_file_name"),
+        "righe": int(state.get("baseline_righe") or 0) + event_count,
+        "eventi_incrementali": event_count,
+        "importi_pagamenti": amounts,
+        "totale_contanti": cash,
+        "totale_elettronici": electronic,
+        "totale": round(cash + electronic, 2),
+        "data_da": min(dates, default=None),
+        "data_a": max(dates, default=None),
+        "last_file_rows": int(state.get("last_file_rows") or 0),
+        "baseline_event_keys": list(state.get("baseline_event_keys") or []),
+        "migrated_from_snapshot_id": state.get("migrated_from_snapshot_id"),
+        "ledger_started_at": state.get("ledger_started_at") or state.get("created_at"),
+    }
+
+
 async def _store_vending_accounting_snapshot(
     content: bytes,
     file_name: str,
@@ -2288,7 +2527,7 @@ async def _store_vending_accounting_snapshot(
     source_batch_id: Optional[str] = None,
     backup_reason: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Salva l'intero CSV come fotografia contabile autorevole."""
+    """Accumula soltanto gli eventi nuovi del CSV, senza perdere quelli usciti dalla finestra."""
     parsed = _parse_csv_vending(content.decode("utf-8-sig", errors="replace"))
     _assign_csv_vending_event_keys(parsed["righe"])
     summary = _summarize_vending_csv(parsed)
@@ -2300,28 +2539,53 @@ async def _store_vending_accounting_snapshot(
             f"Il CSV contiene {len(summary['errori'])} righe non valide: correggile prima dell'allineamento",
         )
 
-    backup = await create_backup_snapshot(backup_reason) if backup_reason else None
-    previous = await _latest_vending_accounting_snapshot()
+    backup = await create_backup_snapshot(
+        backup_reason,
+        "pre-allineamento-contabile-vending",
+        [
+            "vending_accounting_snapshots",
+            "vending_accounting_state",
+            "vending_accounting_events",
+        ],
+    ) if backup_reason else None
     created_at = datetime.now(timezone.utc).isoformat()
-    snapshot_id = str(uuid.uuid4())
-    document = {
-        "id": snapshot_id,
-        "status": "active",
-        "created_at": created_at,
-        "file_name": Path(file_name or "vendite-vending.csv").name,
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "previous_snapshot_id": (previous or {}).get("id"),
-        "source_batch_id": source_batch_id,
-        # Permette al dashboard di riconoscere esattamente le vendite gia'
-        # comprese nella fotografia, anche se vengono importate dopo.
-        "csv_event_keys": [row["csv_event_key"] for row in parsed["righe"]],
-        **{key: value for key, value in summary.items() if key != "errori"},
-    }
-    await db.vending_accounting_snapshots.insert_one(document)
-    await db.vending_accounting_snapshots.update_many(
-        {"id": {"$ne": snapshot_id}, "status": "active"},
-        {"$set": {"status": "superseded", "superseded_at": created_at}},
+    state = await _ensure_vending_accounting_state()
+    baseline_keys = set(state.get("baseline_event_keys") or [])
+    operations = []
+    for row in parsed["righe"]:
+        if row["csv_event_key"] in baseline_keys:
+            continue
+        operations.append(UpdateOne(
+            {"csv_event_key": row["csv_event_key"]},
+            {"$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "csv_event_key": row["csv_event_key"],
+                "data": row.get("data"),
+                "importo": round(float(row.get("prezzo") or 0), 2),
+                "pagamento": _vending_payment_bucket(row.get("pagamento")),
+                "source_batch_id": source_batch_id,
+                "first_seen_at": created_at,
+                "file_sha256": hashlib.sha256(content).hexdigest(),
+            }},
+            upsert=True,
+        ))
+    write_result = await _bulk_upsert(db.vending_accounting_events, operations, batch_size=500)
+    if write_result["errori"]:
+        raise HTTPException(500, "Registro contabile CSV incompleto: riprova")
+    await db.vending_accounting_state.update_one(
+        {"id": VENDING_ACCOUNTING_STATE_ID},
+        {"$set": {
+            "updated_at": created_at,
+            "last_aligned_at": created_at,
+            "last_file_name": Path(file_name or "vendite-vending.csv").name,
+            "last_file_sha256": hashlib.sha256(content).hexdigest(),
+            "last_file_rows": int(summary.get("righe") or 0),
+            "last_data_da": summary.get("data_da"),
+            "last_data_a": summary.get("data_a"),
+        }},
     )
+    document = await _vending_accounting_ledger_summary()
+    document["eventi_nuovi"] = write_result["inseriti"]
     return document, backup
 
 
@@ -2349,10 +2613,11 @@ async def align_vending_accounting_csv(file: UploadFile = File(...)):
 
 @api.get("/contabilita/vending/fonte")
 async def vending_accounting_source():
+    ledger = await _vending_accounting_ledger_summary()
+    if ledger:
+        return _public_vending_accounting_snapshot(ledger)
     snapshot = await _latest_vending_accounting_snapshot()
-    if not snapshot:
-        return None
-    return _public_vending_accounting_snapshot(snapshot)
+    return _public_vending_accounting_snapshot(snapshot) if snapshot else None
 
 
 VENDING_CASH_STATE_ID = "saldo"
@@ -2703,8 +2968,20 @@ async def annulla_csv_vending(batch_id: str):
         if cash_to_restore:
             await _adjust_vending_cash_balance(-cash_to_restore)
         accounting_restored = False
+        ledger_deletion = await db.vending_accounting_events.delete_many(
+            {"source_batch_id": batch_id}
+        )
+        if int(getattr(ledger_deletion, "deleted_count", 0) or 0):
+            accounting_restored = True
+            await db.vending_accounting_state.update_one(
+                {"id": VENDING_ACCOUNTING_STATE_ID},
+                {"$set": {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "last_undo_batch_id": batch_id,
+                }},
+            )
         snapshot_id = (batch or {}).get("accounting_snapshot_id")
-        if snapshot_id:
+        if snapshot_id and snapshot_id != VENDING_ACCOUNTING_STATE_ID:
             snapshot = await db.vending_accounting_snapshots.find_one(
                 {"id": snapshot_id, "status": "active"}, {"_id": 0}
             )
@@ -4954,7 +5231,7 @@ async def _dashboard_balances(
     # pagamento. Le vendite dell'app successive all'ultima data importata si
     # aggiungono allo storico; il filtro temporale impedisce doppi conteggi al
     # successivo import Excel.
-    historical_docs, app_docs, accounting_snapshot = await asyncio.gather(
+    historical_docs, app_docs, accounting_ledger, accounting_snapshot = await asyncio.gather(
         db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
         db.vendite.find(
             {"canale": {"$regex": "^VENDING$", "$options": "i"}},
@@ -4964,15 +5241,28 @@ async def _dashboard_balances(
                 "csv_file_sha256": 1,
             },
         ).to_list(None),
+        _vending_accounting_ledger_summary(),
         _latest_vending_accounting_snapshot(),
     )
-    if accounting_snapshot:
-        amounts = accounting_snapshot.get("importi_pagamenti") or {}
+    accounting_source = accounting_ledger or accounting_snapshot
+    if accounting_source:
+        amounts = accounting_source.get("importi_pagamenti") or {}
         payments = [(float(amount or 0), bucket) for bucket, amount in amounts.items()]
-        aligned_at = _parse_utc_datetime(accounting_snapshot.get("created_at"))
-        snapshot_event_keys = set(accounting_snapshot.get("csv_event_keys") or [])
-        snapshot_file_sha256 = str(accounting_snapshot.get("sha256") or "")
+        aligned_at = _parse_utc_datetime(
+            accounting_source.get("ledger_started_at") or accounting_source.get("created_at")
+        )
+        snapshot_event_keys = set(
+            accounting_source.get("csv_event_keys")
+            or [
+                *(accounting_source.get("baseline_event_keys") or []),
+                *(accounting_source.get("event_keys") or []),
+            ]
+        )
+        snapshot_file_sha256 = str(accounting_source.get("sha256") or "")
         for document in app_docs:
+            if accounting_ledger and str(document.get("sorgente") or "").upper() == "CSV_VENDING":
+                # Ogni import CSV alimenta già il registro incrementale.
+                continue
             # La fotografia CSV contiene gia' questi importi. Il confronto per
             # evento copre anche CSV cumulativi; lo SHA mantiene compatibili le
             # fotografie create prima dell'introduzione delle chiavi evento.
@@ -4995,11 +5285,11 @@ async def _dashboard_balances(
         )
         result.update({
             "fonteVendingContabile": "CSV_VENDING",
-            "fonteVendingFile": accounting_snapshot.get("file_name"),
-            "fonteVendingRighe": accounting_snapshot.get("righe"),
-            "fonteVendingDataDa": accounting_snapshot.get("data_da"),
-            "fonteVendingDataA": accounting_snapshot.get("data_a"),
-            "fonteVendingAllineataIl": accounting_snapshot.get("created_at"),
+            "fonteVendingFile": accounting_source.get("file_name"),
+            "fonteVendingRighe": accounting_source.get("righe"),
+            "fonteVendingDataDa": accounting_source.get("data_da"),
+            "fonteVendingDataA": accounting_source.get("data_a"),
+            "fonteVendingAllineataIl": accounting_source.get("created_at"),
         })
         return result
 
@@ -6233,6 +6523,7 @@ async def import_excel_full(
     backup = await create_backup_snapshot(
         f"Prima import {file.filename or 'Excel'}",
         "pre-import",
+        EXCEL_IMPORT_BACKUP_COLLECTIONS,
     )
 
     fogli_trovati: List[str] = []
