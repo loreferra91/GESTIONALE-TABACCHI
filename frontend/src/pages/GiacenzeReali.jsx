@@ -1,32 +1,121 @@
-import { useEffect, useMemo, useState } from "react";
-import { FloppyDisk, Printer, WarningCircle } from "@phosphor-icons/react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { FloppyDisk, Printer, WarningCircle, FunnelSimple, X, ArrowsDownUp } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import Layout from "../components/Layout";
 import { Badge, Card, formatNum } from "../components/UI";
 import { SearchBar } from "../lib/tableHooks";
 import { api, apiErrorMessage } from "../lib/api";
+import { shortCategory } from "../lib/categories";
 import InventoryPrint from "../components/InventoryPrint";
 import "./GiacenzeReali.css";
 
 const integerDraft = value => /^\d+$/.test(String(value ?? "")) ? Number(value) : null;
 
+const STORAGE_KEY = "giacenze_reali_prefs";
+
+const SORT_OPTIONS = [
+  { value: "nome_az", label: "Nome A → Z" },
+  { value: "nome_za", label: "Nome Z → A" },
+  { value: "cat_nome", label: "Categoria + Nome A → Z" },
+  { value: "neg_asc", label: "Giacenza negozio ↑" },
+  { value: "neg_desc", label: "Giacenza negozio ↓" },
+  { value: "vend_asc", label: "Giacenza vending ↑" },
+  { value: "vend_desc", label: "Giacenza vending ↓" },
+  { value: "tot_asc", label: "Giacenza totale ↑" },
+  { value: "tot_desc", label: "Giacenza totale ↓" },
+];
+
+const SENZA_CATEGORIA = "(senza categoria)";
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+function savePrefs(prefs) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
+}
+
+function sortRows(list, sortValue) {
+  const copy = [...list];
+  const secondary = (a, b) => a.descrizione.localeCompare(b.descrizione, "it", { sensitivity: "base" }) || a.codice.localeCompare(b.codice, "it");
+  switch (sortValue) {
+    case "nome_az":
+      copy.sort((a, b) => secondary(a, b));
+      break;
+    case "nome_za":
+      copy.sort((a, b) => -secondary(a, b));
+      break;
+    case "cat_nome":
+      copy.sort((a, b) => {
+        const ca = (a.categoria || "").localeCompare(b.categoria || "", "it", { sensitivity: "base" });
+        return ca !== 0 ? ca : secondary(a, b);
+      });
+      break;
+    case "neg_asc":
+      copy.sort((a, b) => (a.giacenza_negozio - b.giacenza_negozio) || secondary(a, b));
+      break;
+    case "neg_desc":
+      copy.sort((a, b) => (b.giacenza_negozio - a.giacenza_negozio) || secondary(a, b));
+      break;
+    case "vend_asc":
+      copy.sort((a, b) => (a.giacenza_vending - b.giacenza_vending) || secondary(a, b));
+      break;
+    case "vend_desc":
+      copy.sort((a, b) => (b.giacenza_vending - a.giacenza_vending) || secondary(a, b));
+      break;
+    case "tot_asc":
+      copy.sort((a, b) => (a.giacenza_totale - b.giacenza_totale) || secondary(a, b));
+      break;
+    case "tot_desc":
+      copy.sort((a, b) => (b.giacenza_totale - a.giacenza_totale) || secondary(a, b));
+      break;
+    default:
+      copy.sort((a, b) => secondary(a, b));
+  }
+  return copy;
+}
+
 export default function GiacenzeReali() {
   const [rows, setRows] = useState([]);
   const [history, setHistory] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [query, setQuery] = useState("");
   const [drafts, setDrafts] = useState({});
   const [reasons, setReasons] = useState({});
   const [saving, setSaving] = useState(null);
   const [printMode, setPrintMode] = useState(null);
   const [printedAt, setPrintedAt] = useState(null);
+  const [printScope, setPrintScope] = useState(null); // "filtered" | "all"
+
+  // Filter state
+  const prefs = loadPrefs();
+  const [filterMode, setFilterMode] = useState(prefs?.filterMode || "include"); // "include" | "exclude"
+  const [selectedCats, setSelectedCats] = useState(new Set(prefs?.selectedCats || []));
+  const [sortValue, setSortValue] = useState(prefs?.sortValue || "nome_az");
+  const [showFilterPanel, setShowFilterPanel] = useState(false);
+
+  // Persist preferences
+  const persistPrefs = useCallback((mode, cats, sort) => {
+    savePrefs({ filterMode: mode, selectedCats: [...cats], sortValue: sort });
+  }, []);
+
+  useEffect(() => {
+    persistPrefs(filterMode, selectedCats, sortValue);
+  }, [filterMode, selectedCats, sortValue, persistPrefs]);
 
   const load = async () => {
-    const [stockResponse, historyResponse] = await Promise.all([
+    const [stockResponse, historyResponse, catResponse] = await Promise.all([
       api.get("/giacenze-reali"),
       api.get("/giacenze-reali/rettifiche/storico", { params: { limit: 50 } }),
+      api.get("/categorie-prodotti"),
     ]);
     setRows(stockResponse.data || []);
     setHistory(historyResponse.data || []);
+    setCategories(catResponse.data || []);
   };
 
   useEffect(() => {
@@ -35,7 +124,7 @@ export default function GiacenzeReali() {
 
   useEffect(() => {
     if (!printMode) return undefined;
-    const clear = () => setPrintMode(null);
+    const clear = () => { setPrintMode(null); setPrintScope(null); };
     window.addEventListener("afterprint", clear, { once: true });
     const timer = window.setTimeout(() => window.print(), 100);
     return () => {
@@ -44,16 +133,60 @@ export default function GiacenzeReali() {
     };
   }, [printMode]);
 
-  const visibleRows = useMemo(() => {
+  // Detect products without a category
+  const hasUncategorized = useMemo(() => rows.some(r => !r.categoria), [rows]);
+
+  // All available category labels for the filter UI
+  const availableCats = useMemo(() => {
+    const set = [...categories];
+    if (hasUncategorized && !set.includes(SENZA_CATEGORIA)) set.push(SENZA_CATEGORIA);
+    return set;
+  }, [categories, hasUncategorized]);
+
+  // --- Filtering pipeline ---
+  const filteredRows = useMemo(() => {
+    let out = rows;
+
+    // Category filter
+    if (selectedCats.size > 0) {
+      if (filterMode === "include") {
+        out = out.filter(r => {
+          const cat = r.categoria || "";
+          if (!cat) return selectedCats.has(SENZA_CATEGORIA);
+          return selectedCats.has(cat);
+        });
+      } else {
+        out = out.filter(r => {
+          const cat = r.categoria || "";
+          if (!cat) return !selectedCats.has(SENZA_CATEGORIA);
+          return !selectedCats.has(cat);
+        });
+      }
+    }
+
+    // Text search
     const needle = query.trim().toLocaleLowerCase("it-IT");
-    if (!needle) return rows;
-    return rows.filter(row => `${row.codice} ${row.descrizione}`.toLocaleLowerCase("it-IT").includes(needle));
-  }, [query, rows]);
+    if (needle) {
+      out = out.filter(row => `${row.codice} ${row.descrizione}`.toLocaleLowerCase("it-IT").includes(needle));
+    }
+
+    return out;
+  }, [rows, selectedCats, filterMode, query]);
+
+  const visibleRows = useMemo(() => sortRows(filteredRows, sortValue), [filteredRows, sortValue]);
+
+  // Rows used for printing
+  const printRows = useMemo(() => {
+    if (printScope === "all") return sortRows(rows, sortValue);
+    return visibleRows;
+  }, [printScope, rows, visibleRows, sortValue]);
 
   const dirtyCodes = Object.keys(drafts);
   const hasUnsavedChanges = dirtyCodes.length > 0;
   const totalShop = rows.reduce((sum, row) => sum + row.giacenza_negozio, 0);
   const totalVending = rows.reduce((sum, row) => sum + row.giacenza_vending, 0);
+
+  const hasActiveFilters = selectedCats.size > 0 || query.trim().length > 0;
 
   const displayedValue = (row, field) => drafts[row.codice]?.[field] ?? row[field];
   const updateDraft = (row, field, value) => {
@@ -119,13 +252,33 @@ export default function GiacenzeReali() {
     }
   };
 
-  const startPrint = mode => {
+  const startPrint = (mode, scope) => {
     if (hasUnsavedChanges) {
       toast.error("Salva o annulla le modifiche prima di stampare");
       return;
     }
     setPrintedAt(new Date());
+    setPrintScope(scope);
     setPrintMode(mode);
+  };
+
+  const toggleCat = cat => {
+    setSelectedCats(current => {
+      const next = new Set(current);
+      if (next.has(cat)) next.delete(cat); else next.add(cat);
+      return next;
+    });
+  };
+
+  const selectAllCats = () => setSelectedCats(new Set(availableCats));
+  const deselectAllCats = () => setSelectedCats(new Set());
+
+  const resetFilters = () => {
+    setSelectedCats(new Set());
+    setQuery("");
+    setSortValue("nome_az");
+    setFilterMode("include");
+    savePrefs({ filterMode: "include", selectedCats: [], sortValue: "nome_az" });
   };
 
   return (
@@ -136,15 +289,91 @@ export default function GiacenzeReali() {
         <Card className="p-4"><div className="overline">Giacenza totale</div><div className="kpi-value mt-2 text-2xl">{formatNum(totalShop + totalVending)}</div></Card>
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+      {/* Search + filter toggle + sort + actions */}
+      <div className="mb-2 flex flex-wrap items-center gap-3">
         <SearchBar value={query} onChange={setQuery} placeholder="Cerca prodotto…" className="min-w-64 flex-1" data-testid="real-stock-search" />
+
+        <button type="button" onClick={() => setShowFilterPanel(p => !p)} className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm font-bold transition ${showFilterPanel || selectedCats.size > 0 ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`} data-testid="toggle-filter-panel">
+          <FunnelSimple size={17} /> Filtri{selectedCats.size > 0 ? ` (${selectedCats.size})` : ""}
+        </button>
+
+        <div className="inline-flex items-center gap-1.5">
+          <ArrowsDownUp size={17} className="text-slate-500" />
+          <select value={sortValue} onChange={e => setSortValue(e.target.value)} className="rounded-md border border-slate-300 bg-white px-2 py-2 text-sm font-medium" data-testid="sort-select">
+            {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+
+        {hasActiveFilters && (
+          <button type="button" onClick={resetFilters} className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-bold text-red-700 hover:bg-red-100" data-testid="reset-filters">
+            <X size={15} /> Azzera filtri
+          </button>
+        )}
+      </div>
+
+      {/* Result count */}
+      <div className="mb-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
+        <span data-testid="result-count">
+          {visibleRows.length === rows.length
+            ? <>{rows.length} prodotti</>
+            : <><strong>{visibleRows.length}</strong> di {rows.length} prodotti</>}
+        </span>
         {hasUnsavedChanges && <Badge tone="warning">{dirtyCodes.length} modifiche non salvate</Badge>}
-        <button type="button" onClick={() => startPrint("blank")} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold hover:bg-slate-50">
-          <Printer size={17} /> STAMPA INVENTARIO IN BIANCO
-        </button>
-        <button type="button" onClick={() => startPrint("current")} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold hover:bg-slate-50">
-          <Printer size={17} /> STAMPA GIACENZE ATTUALI
-        </button>
+      </div>
+
+      {/* Category filter panel */}
+      {showFilterPanel && (
+        <Card className="mb-4 p-4" data-testid="filter-panel">
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <span className="text-sm font-bold text-slate-700">Modalità:</span>
+            <button type="button" onClick={() => setFilterMode("include")} className={`rounded-full px-3 py-1 text-xs font-bold transition ${filterMode === "include" ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`} data-testid="filter-mode-include">INCLUDI</button>
+            <button type="button" onClick={() => setFilterMode("exclude")} className={`rounded-full px-3 py-1 text-xs font-bold transition ${filterMode === "exclude" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`} data-testid="filter-mode-exclude">ESCLUDI</button>
+            <span className="mx-2 text-slate-300">|</span>
+            <button type="button" onClick={selectAllCats} className="text-xs font-medium text-blue-600 hover:underline">Seleziona tutte</button>
+            <button type="button" onClick={deselectAllCats} className="text-xs font-medium text-blue-600 hover:underline">Deseleziona tutte</button>
+          </div>
+          <div className="flex flex-wrap gap-2" data-testid="category-chips">
+            {availableCats.map(cat => {
+              const selected = selectedCats.has(cat);
+              return (
+                <button key={cat} type="button" onClick={() => toggleCat(cat)} className={`rounded-full border px-3 py-1 text-xs font-bold transition ${selected ? (filterMode === "include" ? "border-emerald-400 bg-emerald-100 text-emerald-800" : "border-red-400 bg-red-100 text-red-800") : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`} data-testid={`cat-chip-${cat}`}>
+                  {cat === SENZA_CATEGORIA ? cat : shortCategory(cat)}
+                </button>
+              );
+            })}
+          </div>
+          {selectedCats.size > 0 && (
+            <div className="mt-2 text-xs text-slate-500">
+              {filterMode === "include" ? "Mostra solo" : "Escludi"}: {[...selectedCats].map(c => c === SENZA_CATEGORIA ? c : shortCategory(c)).join(", ")}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Print buttons */}
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="relative group">
+          <button type="button" onClick={() => startPrint("blank", "filtered")} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold hover:bg-slate-50">
+            <Printer size={17} /> STAMPA INVENTARIO IN BIANCO
+          </button>
+          {hasActiveFilters && (
+            <div className="mt-1 flex flex-col gap-1">
+              <span className="text-xs text-slate-500">{visibleRows.length} prodotti filtrati</span>
+              <button type="button" onClick={() => startPrint("blank", "all")} className="text-xs font-medium text-blue-600 hover:underline">Stampa tutti i {rows.length} prodotti</button>
+            </div>
+          )}
+        </div>
+        <div className="relative group">
+          <button type="button" onClick={() => startPrint("current", "filtered")} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold hover:bg-slate-50">
+            <Printer size={17} /> STAMPA GIACENZE ATTUALI
+          </button>
+          {hasActiveFilters && (
+            <div className="mt-1 flex flex-col gap-1">
+              <span className="text-xs text-slate-500">{visibleRows.length} prodotti filtrati</span>
+              <button type="button" onClick={() => startPrint("current", "all")} className="text-xs font-medium text-blue-600 hover:underline">Stampa tutti i {rows.length} prodotti</button>
+            </div>
+          )}
+        </div>
         <button type="button" onClick={saveAll} disabled={!hasUnsavedChanges || Boolean(saving)} className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-40">
           <FloppyDisk size={17} /> Salva modifiche
         </button>
@@ -163,7 +392,10 @@ export default function GiacenzeReali() {
                   <tr key={row.codice} data-testid={`real-stock-row-${row.codice}`} className={dirty ? "bg-amber-50" : ""}>
                     <td>
                       <div className="font-semibold text-slate-900">{row.descrizione}</div>
-                      <div className="font-mono text-xs text-slate-500">{row.codice}</div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-slate-500">{row.codice}</span>
+                        {row.categoria && <Badge tone="info">{row.categoria}</Badge>}
+                      </div>
                       {dirty && <input value={reasons[row.codice] || ""} onChange={event => setReasons(current => ({ ...current, [row.codice]: event.target.value }))} maxLength={500} placeholder="Motivazione rettifica (facoltativa)" className="mt-2 w-full max-w-sm rounded border px-2 py-1 text-xs" />}
                     </td>
                     <td className="text-right"><input aria-label={`Giacenza negozio ${row.descrizione}`} type="number" min="0" step="1" value={displayedValue(row, "giacenza_negozio")} onChange={event => updateDraft(row, "giacenza_negozio", event.target.value)} className="w-24 rounded-md border px-2 py-1 text-right font-mono" /></td>
@@ -196,7 +428,7 @@ export default function GiacenzeReali() {
 
       {hasUnsavedChanges && <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-900 shadow-lg"><WarningCircle size={18} /> Modifiche non salvate</div>}
 
-      {printMode && <InventoryPrint mode={printMode} rows={rows} printedAt={printedAt} />}
+      {printMode && <InventoryPrint mode={printMode} rows={printRows} printedAt={printedAt} totalCatalog={rows.length} />}
     </Layout>
   );
 }

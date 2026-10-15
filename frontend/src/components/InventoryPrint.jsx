@@ -1,14 +1,19 @@
-export default function InventoryPrint({ mode, rows, printedAt }) {
+export default function InventoryPrint({ mode, rows, printedAt, totalCatalog }) {
   const current = mode === "current";
   const headers = current
     ? ["DESCRIZIONE PRODOTTO", "GIACENZA NEGOZIO", "GIACENZA VENDING", "GIACENZA TOTALE"]
     : ["DESCRIZIONE PRODOTTO", "VETRINETTA", "ARMADIO", "TOTALE"];
+
+  const countLabel = totalCatalog && totalCatalog !== rows.length
+    ? `${rows.length} di ${totalCatalog} prodotti`
+    : `${rows.length} prodotti`;
 
   return (
     <section className="inventory-print-root" aria-label={current ? "Controllo giacenze reali" : "Inventario fisico negozio"}>
       <h1>{current ? "CONTROLLO GIACENZE REALI" : "INVENTARIO FISICO NEGOZIO"}</h1>
       <div className="inventory-print-meta">
         {current ? `Fotografia del ${printedAt?.toLocaleString("it-IT")}` : "Data conteggio: ____________________"}
+        {" — "}{countLabel}
       </div>
       <table>
         <thead><tr>{headers.map(label => <th key={label}>{label}</th>)}</tr></thead>

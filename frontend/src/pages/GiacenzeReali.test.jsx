@@ -10,7 +10,7 @@ const rows = [{
 }];
 
 test("la stampa inventario in bianco usa solo Vetrinetta, Armadio e Totale senza quantità", () => {
-  const html = renderToStaticMarkup(<InventoryPrint mode="blank" rows={rows} printedAt={new Date()} />);
+  const html = renderToStaticMarkup(<InventoryPrint mode="blank" rows={rows} printedAt={new Date()} totalCatalog={227} />);
 
   expect(html).toContain("INVENTARIO FISICO NEGOZIO");
   expect(html).toContain("VETRINETTA");
@@ -25,7 +25,7 @@ test("la stampa inventario in bianco usa solo Vetrinetta, Armadio e Totale senza
 
 test("la stampa di controllo usa le quattro giacenze salvate e il totale", () => {
   const html = renderToStaticMarkup(
-    <InventoryPrint mode="current" rows={rows} printedAt={new Date("2026-10-15T10:00:00Z")} />,
+    <InventoryPrint mode="current" rows={rows} printedAt={new Date("2026-10-15T10:00:00Z")} totalCatalog={227} />,
   );
 
   expect(html).toContain("CONTROLLO GIACENZE REALI");
@@ -36,4 +36,19 @@ test("la stampa di controllo usa le quattro giacenze salvate e il totale", () =>
   expect(html).toContain(">148<");
   expect(html).toContain(">300<");
   expect(html).toContain(">448<");
+});
+
+test("la stampa mostra il conteggio filtrato rispetto al catalogo", () => {
+  const html = renderToStaticMarkup(
+    <InventoryPrint mode="current" rows={rows} printedAt={new Date()} totalCatalog={227} />,
+  );
+  expect(html).toContain("1 di 227 prodotti");
+});
+
+test("la stampa mostra il conteggio totale quando non filtrato", () => {
+  const html = renderToStaticMarkup(
+    <InventoryPrint mode="blank" rows={rows} printedAt={new Date()} totalCatalog={1} />,
+  );
+  expect(html).toContain("1 prodotti");
+  expect(html).not.toContain("di 1");
 });
