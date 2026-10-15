@@ -3335,6 +3335,13 @@ def _plan_vending_inventory(columns: List[Dict[str, Any]], target: int) -> List[
     ]
 
 
+@api.get("/categorie-prodotti")
+async def list_categorie_prodotti():
+    """Restituisce le categorie distinte realmente presenti nell'anagrafica prodotti."""
+    raw = await db.prodotti.distinct("categoria")
+    cats = sorted(set(str(c or "").strip() for c in raw if str(c or "").strip()))
+    return cats
+
 @api.get("/giacenze-reali")
 async def list_giacenze_reali():
     products, columns = await asyncio.gather(
