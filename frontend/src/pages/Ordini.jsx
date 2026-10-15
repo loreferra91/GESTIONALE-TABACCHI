@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { api } from "../lib/api";
-import { Card, formatEur, formatNum } from "../components/UI";
+import { Badge, Card, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
@@ -70,6 +70,7 @@ export default function Ordini() {
                 <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
                 <th className="text-right">Totale</th>
                 <Th sortKey="file_sorgente" currentKey={sortKey} dir={sortDir} onClick={toggle}>Sorgente</Th>
+                <th>Smart Venue</th>
                 <th></th>
               </tr>
             </thead>
@@ -83,6 +84,7 @@ export default function Ordini() {
                   <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
                   <td className="font-mono text-right font-semibold">{formatEur(r.quantita * r.prezzo)}</td>
                   <td className="text-xs text-slate-500">{r.file_sorgente}</td>
+                  <td>{r.smart_venue_applicabile ? <Badge tone={r.caricato_smart_venue ? "ok" : "warning"}>{r.caricato_smart_venue ? "Confermato" : "Da confermare"}</Badge> : <span className="text-xs text-slate-400">Non previsto</span>}</td>
                   <td className="text-right"><button onClick={() => del(r.id)} className="text-red-600 text-xs">✕</button></td>
                 </tr>
               ))}

@@ -1,0 +1,78 @@
+.inventory-print-root {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 14mm 10mm;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .inventory-print-root,
+  .inventory-print-root * {
+    visibility: visible !important;
+  }
+
+  .inventory-print-root {
+    display: block;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    color: #111827;
+    font-family: Arial, sans-serif;
+    background: #fff;
+  }
+
+  .inventory-print-root h1 {
+    margin: 0 0 4mm;
+    text-align: center;
+    font-size: 17pt;
+    letter-spacing: .04em;
+  }
+
+  .inventory-print-meta {
+    margin-bottom: 5mm;
+    font-size: 10pt;
+  }
+
+  .inventory-print-root table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 9pt;
+  }
+
+  .inventory-print-root thead {
+    display: table-header-group;
+  }
+
+  .inventory-print-root tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .inventory-print-root th,
+  .inventory-print-root td {
+    border: 1px solid #4b5563;
+    padding: 2.4mm 2mm;
+  }
+
+  .inventory-print-root th:first-child,
+  .inventory-print-root td:first-child {
+    width: 52%;
+    text-align: left;
+  }
+
+  .inventory-print-root th:not(:first-child),
+  .inventory-print-root td:not(:first-child) {
+    text-align: center;
+  }
+
+  .inventory-print-root .blank-cell {
+    height: 9mm;
+  }
+}

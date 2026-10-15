@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 import openpyxl
 from fastapi import HTTPException
+from fastapi.encoders import jsonable_encoder
+from mongomock_motor import AsyncMongoMockClient
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
@@ -180,11 +182,11 @@ class FakeCollection:
                 for key, value in update.get("$addToSet", {}).items():
                     if value not in row.setdefault(key, []):
                         row[key].append(value)
-                return SimpleNamespace(matched_count=1)
+                return SimpleNamespace(matched_count=1, modified_count=1)
         if upsert:
             self.documents.append({**query, **update.get("$set", {})})
-            return SimpleNamespace(matched_count=0, upserted_id="fake-id")
-        return SimpleNamespace(matched_count=0)
+            return SimpleNamespace(matched_count=0, modified_count=0, upserted_id="fake-id")
+        return SimpleNamespace(matched_count=0, modified_count=0)
 
     async def count_documents(self, query):
         return sum(1 for row in self.documents if self._matches(row, query))
@@ -206,6 +208,8 @@ def isolated_db(monkeypatch):
         prodotti=FakeCollection(),
         storico_ordini=FakeCollection(),
         app_migrations=FakeCollection(),
+        ricezioni_merce=FakeCollection(),
+        rettifiche_inventario=FakeCollection(),
     )
     monkeypatch.setattr(server, "db", database)
     return database
@@ -427,6 +431,20 @@ def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):
     assert response["differenza"] == 5
 
 
+def test_new_smart_venue_product_response_is_json_serializable_with_mongo_ids(monkeypatch):
+    database = AsyncMongoMockClient()["smart_venue_json_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    response = asyncio.run(server.create_smart_venue_product(server.SmartVenueProductIn(
+        codice="NEW2",
+        descrizione="Nuovo prodotto serializzabile",
+        smart_venue=4,
+    )))
+
+    assert jsonable_encoder(response)["smart_venue"] == 4
+    assert "_id" not in response
+
+
 def test_smart_venue_blank_insertion_uses_difference(monkeypatch):
     database = isolated_db(monkeypatch)
 
@@ -547,3 +565,144 @@ def test_delete_smart_venue_row(monkeypatch):
     assert response == {"ok": True, "id": "smart-venue:P1"}
     assert smart_row["codice"] == "P1"
     assert hidden["product_id"] == "smart-venue:P1"
+
+
+def test_receipt_is_idempotent_and_external_confirmation_does_not_increment_stock(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def receive_twice_and_confirm_twice():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "WINSTON BLUE",
+            "acquistati": 150, "giacenza_negozio": 150,
+        })
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 150,
+        })
+        payload = server.BulkOrdineIn(
+            file_sorgente="BOLLA-1",
+            data="2026-10-15T08:00:00+00:00",
+            idempotency_key="receipt-once",
+            righe=[{"codice": "P1", "descrizione": "WINSTON BLUE", "quantita": 150, "prezzo": 5}],
+        )
+        first = await server.bulk_carico(payload)
+        second = await server.bulk_carico(payload)
+        movement_id = first["movimenti"][0]["id"]
+        confirmed = await server.conferma_carico_smart_venue(movement_id)
+        confirmed_again = await server.conferma_carico_smart_venue(movement_id)
+        return (
+            first,
+            second,
+            confirmed,
+            confirmed_again,
+            await database.prodotti.find_one({"codice": "P1"}),
+            await database.smart_venue.find_one({"codice": "P1"}),
+        )
+
+    first, second, confirmed, confirmed_again, product, smart_row = asyncio.run(receive_twice_and_confirm_twice())
+
+    assert first["gia_registrato"] is False
+    assert second["gia_registrato"] is True
+    assert product["giacenza_negozio"] == 300
+    assert smart_row["smart_venue"] == 300
+    assert confirmed["caricato_smart_venue"] is True
+    assert confirmed_again["gia_confermato"] is True
+    assert count_rows_for_code(database.storico_ordini.documents, "P1") == 1
+
+
+def test_real_stock_adjustment_records_history_without_creating_sales(monkeypatch):
+    database = isolated_db(monkeypatch)
+    database.vendite = FakeCollection()
+
+    async def seed_adjust_and_read():
+        await database.prodotti.insert_one({
+            "id": "prod-1", "codice": "P1", "descrizione": "WINSTON BLUE",
+            "giacenza_negozio": 150, "giacenza_vending": 3,
+        })
+        await database.vending.insert_many([
+            {"id": "v1", "colonna": "A01", "codice": "P1", "giacenza": 2, "capacita_max": 5},
+            {"id": "v2", "colonna": "A02", "codice": "P1", "giacenza": 1, "capacita_max": 5},
+        ])
+        response = await server.update_giacenza_reale(
+            "P1",
+            server.GiacenzaRealeIn(
+                giacenza_negozio=148,
+                giacenza_vending=5,
+                attesa_giacenza_negozio=150,
+                attesa_giacenza_vending=3,
+                motivazione="Conteggio fisico",
+            ),
+        )
+        rows = await server.list_giacenze_reali()
+        return response, rows
+
+    response, rows = asyncio.run(seed_adjust_and_read())
+
+    assert response["giacenza_totale"] == 153
+    assert rows[0]["giacenza_negozio"] == 148
+    assert rows[0]["giacenza_vending"] == 5
+    assert rows[0]["giacenza_totale"] == 153
+    assert [(row["ubicazione"], row["differenza"]) for row in database.rettifiche_inventario.documents] == [
+        ("NEGOZIO", -2),
+        ("VENDING", 2),
+    ]
+    assert database.vendite.documents == []
+
+
+def test_real_stock_adjustment_rejects_stale_concurrent_values(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def seed_and_update():
+        await database.prodotti.insert_one({
+            "id": "prod-1", "codice": "P1", "descrizione": "WINSTON BLUE",
+            "giacenza_negozio": 149, "giacenza_vending": 0,
+        })
+        await server.update_giacenza_reale(
+            "P1",
+            server.GiacenzaRealeIn(
+                giacenza_negozio=148,
+                giacenza_vending=0,
+                attesa_giacenza_negozio=150,
+                attesa_giacenza_vending=0,
+            ),
+        )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(seed_and_update())
+
+    assert exc.value.status_code == 409
+
+
+def test_real_stock_adjustment_response_remains_json_serializable_with_mongo_ids(monkeypatch):
+    database = AsyncMongoMockClient()["real_stock_json_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def seed_and_update():
+        await database.prodotti.insert_one({
+            "id": "prod-1", "codice": "P1", "descrizione": "WINSTON BLUE",
+            "giacenza_negozio": 150, "giacenza_vending": 0,
+        })
+        return await server.update_giacenza_reale(
+            "P1",
+            server.GiacenzaRealeIn(
+                giacenza_negozio=148,
+                giacenza_vending=0,
+                attesa_giacenza_negozio=150,
+                attesa_giacenza_vending=0,
+                motivazione="Conteggio fisico",
+            ),
+        )
+
+    response = asyncio.run(seed_and_update())
+
+    assert jsonable_encoder(response)["rettifiche"][0]["differenza"] == -2
+    assert "_id" not in response["rettifiche"][0]
+
+
+def test_existing_over_capacity_vending_stock_does_not_block_shop_only_correction():
+    columns = [{"id": "v1", "colonna": "A01", "giacenza": 6, "capacita_max": 5}]
+
+    assert server._plan_vending_inventory(columns, 6) == []
+    with pytest.raises(HTTPException) as exc:
+        server._plan_vending_inventory(columns, 7)
+
+    assert exc.value.status_code == 422

@@ -3,7 +3,7 @@ import Layout from "../components/Layout";
 import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
-import { Plus, Trash, Warning, Lightning } from "@phosphor-icons/react";
+import { CheckCircle, Clock, Plus, Trash, Warning, Lightning } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { defaultLotForCategory } from "../lib/categories";
 
@@ -16,10 +16,24 @@ export default function Carico() {
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [recentReceipts, setRecentReceipts] = useState([]);
+  const [confirmingReceipt, setConfirmingReceipt] = useState(null);
+  const [idempotencyKey, setIdempotencyKey] = useState(() => createIdempotencyKey());
 
   useEffect(() => {
-    api.get("/prodotti", { params: { limit: 5000 } }).then(r => setProdotti(r.data));
+    Promise.all([
+      api.get("/prodotti", { params: { limit: 5000 } }),
+      api.get("/ordini", { params: { limit: 100 } }),
+    ]).then(([productsResponse, receiptsResponse]) => {
+      setProdotti(productsResponse.data || []);
+      setRecentReceipts((receiptsResponse.data || []).filter(row => row.smart_venue_applicabile));
+    });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const reloadRecentReceipts = async () => {
+    const response = await api.get("/ordini", { params: { limit: 100 } });
+    setRecentReceipts((response.data || []).filter(row => row.smart_venue_applicabile));
+  };
 
   const prodMap = useMemo(() => {
     const m = new Map();
@@ -76,15 +90,33 @@ export default function Carico() {
     try {
       const r = await api.post("/ordini/bulk", {
         file_sorgente: sorgente, data: new Date(data).toISOString(),
+        idempotency_key: idempotencyKey,
         righe: valide,
       });
-      toast.success(`${r.data.caricate} righe caricate · ${r.data.prodotti_nuovi} prodotti nuovi creati`);
+      toast.success(r.data.gia_registrato
+        ? "Carico già registrato: nessuna quantità duplicata"
+        : `${r.data.caricate} righe caricate · ${r.data.prodotti_nuovi} prodotti nuovi creati`);
       setRighe([]);
+      setIdempotencyKey(createIdempotencyKey());
       setConfirmOpen(false);
+      await reloadRecentReceipts();
     } catch (err) {
       toast.error(apiErrorMessage(err, "Errore durante il carico"));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const confirmSmartVenueReceipt = async receipt => {
+    setConfirmingReceipt(receipt.id);
+    try {
+      const response = await api.post(`/ordini/${encodeURIComponent(receipt.id)}/conferma-smart-venue`);
+      setRecentReceipts(current => current.map(item => item.id === receipt.id ? response.data : item));
+      toast.success(response.data.gia_confermato ? "Carico già confermato" : "Caricamento esterno Smart Venue confermato");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile confermare il caricamento Smart Venue"));
+    } finally {
+      setConfirmingReceipt(null);
     }
   };
 
@@ -98,6 +130,8 @@ export default function Carico() {
             <ul className="list-disc list-inside mt-1 space-y-0.5 text-slate-600">
               <li>ogni riga viene registrata in <b>Storico ordini</b> con la data indicata,</li>
               <li>la <b>giacenza negozio</b> e i totali <b>acquistati</b> vengono incrementati,</li>
+              <li>il saldo interno <b>Smart Venue</b> viene incrementato subito per i prodotti gestiti,</li>
+              <li>la conferma dell'inserimento nel software esterno resta separata e non modifica le quantità,</li>
               <li>codici sconosciuti creano un nuovo prodotto automaticamente.</li>
             </ul>
           </div>
@@ -206,6 +240,34 @@ export default function Carico() {
           {saving ? "Carico in corso…" : `Carica in magazzino (${formatEur(totale)})`}
         </button>
       </div>
+
+      <Card className="mt-8 overflow-hidden">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <h2 className="font-bold text-slate-900">Carichi da confermare su Smart Venue</h2>
+          <p className="mt-1 text-xs text-slate-500">La conferma attesta soltanto l'inserimento nel software esterno: la giacenza interna è già stata aggiornata al momento del carico.</p>
+        </div>
+        <div className="overflow-x-auto max-h-[50vh]">
+          <table className="data-table w-full min-w-[760px]">
+            <thead><tr><th>Data</th><th>Prodotto</th><th className="text-right">Quantità caricata</th><th>Sorgente</th><th>Caricato su Smart Venue</th></tr></thead>
+            <tbody>
+              {recentReceipts.map(receipt => <tr key={receipt.id}>
+                <td className="whitespace-nowrap font-mono text-xs">{new Date(receipt.data).toLocaleString("it-IT")}</td>
+                <td><div className="font-semibold">{receipt.descrizione}</div><div className="font-mono text-xs text-slate-500">{receipt.codice}</div></td>
+                <td className="text-right font-mono font-bold">{formatNum(receipt.quantita)}</td>
+                <td className="text-xs text-slate-500">{receipt.file_sorgente}</td>
+                <td>
+                  {receipt.caricato_smart_venue
+                    ? <div><Badge tone="ok">Confermato</Badge><div className="mt-1 text-[11px] text-slate-500">{receipt.caricato_smart_venue_il ? new Date(receipt.caricato_smart_venue_il).toLocaleString("it-IT") : ""}</div></div>
+                    : <button type="button" onClick={() => confirmSmartVenueReceipt(receipt)} disabled={confirmingReceipt === receipt.id} className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50">
+                        {confirmingReceipt === receipt.id ? <Clock size={15} /> : <CheckCircle size={15} weight="bold" />} {confirmingReceipt === receipt.id ? "Conferma…" : "Conferma caricamento esterno"}
+                      </button>}
+                </td>
+              </tr>)}
+              {!recentReceipts.length && <tr><td colSpan="5" className="py-10 text-center text-slate-400">Nessun carico Smart Venue recente da mostrare.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Card>
       <ConfirmDialog
         open={confirmOpen}
         title="Confermare carico merce?"
@@ -219,4 +281,9 @@ export default function Carico() {
       </ConfirmDialog>
     </Layout>
   );
+}
+
+function createIdempotencyKey() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `carico-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }

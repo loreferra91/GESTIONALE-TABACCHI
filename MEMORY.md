@@ -13,3 +13,9 @@
   prodotti gia presenti in Smart Venue, oltre a `giacenza_negozio` e
   `acquistati`. Il carico Auto-Order del 12/10/2026 è stato riallineato con una
   migrazione idempotente di 27 righe/810 pezzi e backup preventivo.
+- Dal 2026-10-15 i carichi merce bulk sono idempotenti tramite
+  `ricezioni_merce.idempotency_key`; ogni riga Smart Venue conserva nello
+  storico ordini una conferma esterna separata, che non modifica le scorte.
+  La pagina **GIACENZE REALI** usa `prodotti.giacenza_negozio` e la somma delle
+  colonne `vending`, registra le correzioni in `rettifiche_inventario` senza
+  creare vendite, e offre le stampe A4 inventario in bianco e giacenze attuali.

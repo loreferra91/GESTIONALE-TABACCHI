@@ -21,6 +21,7 @@ import Report from "./pages/Report";
 import Contabilita from "./pages/Contabilita";
 import SmartVenue from "./pages/SmartVenue";
 import SmartVenueControllo from "./pages/SmartVenueControllo";
+import GiacenzeReali from "./pages/GiacenzeReali";
 
 function App() {
   return (
@@ -34,6 +35,7 @@ function App() {
           <Route path="/vending" element={<Vending />} />
           <Route path="/smart-venue" element={<SmartVenue />} />
           <Route path="/smart-venue-controllo" element={<SmartVenueControllo />} />
+          <Route path="/giacenze-reali" element={<GiacenzeReali />} />
           <Route path="/vendite" element={<Vendite />} />
           <Route path="/auto-order" element={<AutoOrder />} />
           <Route path="/anomalie" element={<Anomalie />} />

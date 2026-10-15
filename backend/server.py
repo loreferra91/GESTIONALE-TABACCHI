@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateMany, UpdateOne
-from pymongo.errors import BulkWriteError, DuplicateKeyError
+from pymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
 import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib, gc, tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -50,6 +50,7 @@ async def optional_basic_auth(request: Request, call_next):
     )
 
     if not username or not password or is_health_check:
+        request.state.authenticated_user = "operatore-locale"
         return await call_next(request)
 
     authorization = request.headers.get("Authorization", "")
@@ -74,6 +75,7 @@ async def optional_basic_auth(request: Request, call_next):
             headers={"WWW-Authenticate": 'Basic realm="Gestionale"'},
         )
 
+    request.state.authenticated_user = supplied_username
     return await call_next(request)
 
 
@@ -205,6 +207,13 @@ class OrdineStorico(BaseModel):
     descrizione: str = ""
     quantita: int
     prezzo: float = 0
+    batch_id: Optional[str] = None
+    smart_venue_applicabile: bool = False
+    caricato_smart_venue: Optional[bool] = None
+    caricato_smart_venue_il: Optional[str] = None
+    caricato_smart_venue_da: Optional[str] = None
+    operatore: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class OrdineIn(BaseModel):
@@ -214,6 +223,14 @@ class OrdineIn(BaseModel):
     quantita: int
     prezzo: float = 0
     file_sorgente: Optional[str] = "manuale"
+
+
+class GiacenzaRealeIn(BaseModel):
+    giacenza_negozio: int
+    giacenza_vending: int
+    attesa_giacenza_negozio: int
+    attesa_giacenza_vending: int
+    motivazione: str = ""
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -329,6 +346,8 @@ BACKUP_COLLECTIONS = [
     "smart_venue",
     "smart_venue_hidden",
     "smart_venue_values",
+    "ricezioni_merce",
+    "rettifiche_inventario",
 ]
 
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
@@ -342,6 +361,8 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "smart_venue",
     "smart_venue_hidden",
     "smart_venue_values",
+    "ricezioni_merce",
+    "rettifiche_inventario",
 }
 
 
@@ -485,8 +506,12 @@ async def on_start():
             db.vendite.create_index("csv_event_key", unique=True, sparse=True),
             db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
+            db.storico_ordini.create_index("batch_id"),
             db.ordini_fornitore.create_index("batch_key", unique=True),
             db.ordini_fornitore_righe.create_index("batch_key"),
+            db.ricezioni_merce.create_index("idempotency_key", unique=True),
+            db.ricezioni_merce.create_index("created_at"),
+            db.rettifiche_inventario.create_index([("codice", 1), ("created_at", -1)]),
             db.backup_snapshots.create_index("created_at"),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
             db.import_history.create_index("created_at"),
@@ -527,6 +552,40 @@ def strip_id(d):
     if d and "_id" in d:
         d.pop("_id", None)
     return d
+
+
+def _request_operator(request: Optional[Request]) -> str:
+    """Restituisce l'utente Basic Auth senza accettare identità dal client."""
+    if request is None:
+        return "operatore-locale"
+    return str(getattr(request.state, "authenticated_user", "operatore-locale") or "operatore-locale")
+
+
+def _session_kwargs(session) -> Dict[str, Any]:
+    return {"session": session} if session is not None else {}
+
+
+async def _run_transactionally(operation):
+    """Esegue un'operazione multi-documento in transazione quando Mongo lo supporta.
+
+    I test in memoria e le installazioni Mongo standalone non espongono
+    transazioni. In quei soli casi l'operazione usa i propri CAS e rollback
+    compensativi; su replica set/Atlas viene invece garantito il commit atomico.
+    """
+    database_client = getattr(db, "client", None)
+    if database_client is None or "mongomock" in type(database_client).__module__.lower():
+        return await operation(None)
+    try:
+        async with await database_client.start_session() as session:
+            async with session.start_transaction():
+                return await operation(session)
+    except (AttributeError, NotImplementedError):
+        return await operation(None)
+    except OperationFailure as exc:
+        message = str(exc).lower()
+        if exc.code in {20, 303} or "transaction numbers are only allowed" in message:
+            return await operation(None)
+        raise
 
 
 async def get_params() -> Dict[str, float]:
@@ -3235,6 +3294,227 @@ async def vending_ricarica_pdf():
 
 
 
+# ------------------------- Giacenze reali -------------------------
+def _plan_vending_inventory(columns: List[Dict[str, Any]], target: int) -> List[Dict[str, Any]]:
+    """Distribuisce una rettifica aggregata sulle colonne fisiche esistenti."""
+    ordered = sorted(columns, key=lambda row: str(row.get("colonna") or ""))
+    current = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in ordered)
+    capacity = sum(max(0, int(row.get("capacita_max", 0) or 0)) for row in ordered)
+    if target < 0:
+        raise HTTPException(422, "La giacenza vending non può essere negativa")
+    if not ordered and target:
+        raise HTTPException(422, "Il prodotto non è assegnato ad alcuna colonna vending")
+    if target > capacity and target > current:
+        raise HTTPException(422, f"La giacenza vending supera la capacità complessiva ({capacity})")
+
+    values = {str(row["id"]): max(0, int(row.get("giacenza", 0) or 0)) for row in ordered}
+    delta = target - current
+    if delta > 0:
+        for row in ordered:
+            row_id = str(row["id"])
+            room = max(0, int(row.get("capacita_max", 0) or 0) - values[row_id])
+            added = min(room, delta)
+            values[row_id] += added
+            delta -= added
+            if delta == 0:
+                break
+    elif delta < 0:
+        remaining = -delta
+        for row in reversed(ordered):
+            row_id = str(row["id"])
+            removed = min(values[row_id], remaining)
+            values[row_id] -= removed
+            remaining -= removed
+            if remaining == 0:
+                break
+
+    return [
+        {**row, "giacenza_precedente": int(row.get("giacenza", 0) or 0), "giacenza_nuova": values[str(row["id"])]}
+        for row in ordered
+        if values[str(row["id"])] != int(row.get("giacenza", 0) or 0)
+    ]
+
+
+@api.get("/giacenze-reali")
+async def list_giacenze_reali():
+    products, columns = await asyncio.gather(
+        db.prodotti.find({}, {"_id": 0}).to_list(5000),
+        db.vending.find({}, {"_id": 0}).to_list(5000),
+    )
+    vending_by_code: Dict[str, List[Dict[str, Any]]] = {}
+    for column in columns:
+        code = str(column.get("codice") or "")
+        if code:
+            vending_by_code.setdefault(code, []).append(column)
+
+    rows = []
+    for product in products:
+        code = str(product.get("codice") or "")
+        product_columns = vending_by_code.get(code, [])
+        shop = max(0, int(product.get("giacenza_negozio", 0) or 0))
+        vending = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in product_columns)
+        rows.append({
+            "id": product.get("id"),
+            "codice": code,
+            "descrizione": str(product.get("descrizione") or code),
+            "categoria": str(product.get("categoria") or ""),
+            "giacenza_negozio": shop,
+            "giacenza_vending": vending,
+            "giacenza_totale": shop + vending,
+            "colonne_vending": len(product_columns),
+            "capacita_vending": sum(max(0, int(row.get("capacita_max", 0) or 0)) for row in product_columns),
+        })
+    return sorted(rows, key=lambda row: (row["descrizione"].casefold(), row["codice"]))
+
+
+@api.put("/giacenze-reali/{codice}")
+async def update_giacenza_reale(codice: str, body: GiacenzaRealeIn, request: Request = None):
+    code = _product_code_text(codice)
+    for value in (
+        body.giacenza_negozio,
+        body.giacenza_vending,
+        body.attesa_giacenza_negozio,
+        body.attesa_giacenza_vending,
+    ):
+        if value < 0:
+            raise HTTPException(422, "Le giacenze devono essere numeri interi non negativi")
+    reason = str(body.motivazione or "").strip()
+    if len(reason) > 500:
+        raise HTTPException(422, "La motivazione non può superare 500 caratteri")
+    operator = _request_operator(request)
+
+    async def persist_adjustment(session):
+        kwargs = _session_kwargs(session)
+        product = await db.prodotti.find_one({"codice": code}, **kwargs)
+        if not product:
+            raise HTTPException(404, "Prodotto non trovato")
+        columns = await db.vending.find({"codice": code}, {"_id": 0}, **kwargs).to_list(500)
+        old_shop = int(product.get("giacenza_negozio", 0) or 0)
+        old_vending = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in columns)
+        if old_shop != body.attesa_giacenza_negozio or old_vending != body.attesa_giacenza_vending:
+            raise HTTPException(409, "Le giacenze sono cambiate: aggiorna la pagina prima di salvare")
+
+        vending_plan = _plan_vending_inventory(columns, body.giacenza_vending)
+        now = datetime.now(timezone.utc).isoformat()
+        product_updated = False
+        applied_columns = []
+        adjustment_ids = []
+        try:
+            product_result = await db.prodotti.update_one(
+                {"codice": code, "giacenza_negozio": product.get("giacenza_negozio", 0)},
+                {"$set": {
+                    "giacenza_negozio": body.giacenza_negozio,
+                    "giacenza_vending": body.giacenza_vending,
+                    "giacenza_reale_aggiornata_il": now,
+                }},
+                **kwargs,
+            )
+            if product_result.matched_count != 1:
+                raise HTTPException(409, "La giacenza negozio è cambiata durante il salvataggio")
+            product_updated = True
+
+            for planned in vending_plan:
+                column_result = await db.vending.update_one(
+                    {"id": planned["id"], "giacenza": planned["giacenza_precedente"]},
+                    {"$set": {
+                        "giacenza": planned["giacenza_nuova"],
+                        "giacenza_aggiornata_il": now,
+                        "giacenza_sorgente": "RETTIFICA_INVENTARIO",
+                    }},
+                    **kwargs,
+                )
+                if column_result.matched_count != 1:
+                    raise HTTPException(409, f"La colonna {planned.get('colonna')} è cambiata durante il salvataggio")
+                applied_columns.append(planned)
+
+            adjustments = []
+            if old_shop != body.giacenza_negozio:
+                adjustments.append({
+                    "id": str(uuid.uuid4()),
+                    "codice": code,
+                    "descrizione": str(product.get("descrizione") or code),
+                    "ubicazione": "NEGOZIO",
+                    "quantita_precedente": old_shop,
+                    "quantita_nuova": body.giacenza_negozio,
+                    "differenza": body.giacenza_negozio - old_shop,
+                    "motivazione": reason,
+                    "operatore": operator,
+                    "created_at": now,
+                })
+            if old_vending != body.giacenza_vending:
+                adjustments.append({
+                    "id": str(uuid.uuid4()),
+                    "codice": code,
+                    "descrizione": str(product.get("descrizione") or code),
+                    "ubicazione": "VENDING",
+                    "quantita_precedente": old_vending,
+                    "quantita_nuova": body.giacenza_vending,
+                    "differenza": body.giacenza_vending - old_vending,
+                    "motivazione": reason,
+                    "operatore": operator,
+                    "dettaglio_colonne": [
+                        {
+                            "id": row["id"],
+                            "colonna": row.get("colonna"),
+                            "quantita_precedente": row["giacenza_precedente"],
+                            "quantita_nuova": row["giacenza_nuova"],
+                        }
+                        for row in vending_plan
+                    ],
+                    "created_at": now,
+                })
+            if adjustments:
+                adjustment_ids = [adjustment["id"] for adjustment in adjustments]
+                # PyMongo aggiunge `_id` ai dizionari ricevuti: persistiamo
+                # copie per mantenere la risposta JSON priva di ObjectId.
+                await db.rettifiche_inventario.insert_many(
+                    [dict(adjustment) for adjustment in adjustments],
+                    **kwargs,
+                )
+
+            return {
+                "ok": True,
+                "codice": code,
+                "descrizione": str(product.get("descrizione") or code),
+                "giacenza_negozio": body.giacenza_negozio,
+                "giacenza_vending": body.giacenza_vending,
+                "giacenza_totale": body.giacenza_negozio + body.giacenza_vending,
+                "rettifiche": adjustments,
+                "updated_at": now,
+            }
+        except Exception:
+            if session is None:
+                if adjustment_ids:
+                    await db.rettifiche_inventario.delete_many({"id": {"$in": adjustment_ids}})
+                for planned in reversed(applied_columns):
+                    await db.vending.update_one(
+                        {"id": planned["id"], "giacenza": planned["giacenza_nuova"]},
+                        {"$set": {
+                            "giacenza": planned["giacenza_precedente"],
+                            "giacenza_sorgente": planned.get("giacenza_sorgente"),
+                            "giacenza_aggiornata_il": planned.get("giacenza_aggiornata_il"),
+                        }},
+                    )
+                if product_updated:
+                    await db.prodotti.update_one(
+                        {"codice": code, "giacenza_negozio": body.giacenza_negozio},
+                        {"$set": {
+                            "giacenza_negozio": old_shop,
+                            "giacenza_vending": old_vending,
+                            "giacenza_reale_aggiornata_il": product.get("giacenza_reale_aggiornata_il"),
+                        }},
+                    )
+            raise
+
+    return await _run_transactionally(persist_adjustment)
+
+
+@api.get("/giacenze-reali/rettifiche/storico")
+async def storico_rettifiche_inventario(limit: int = 200):
+    capped_limit = _cap(limit)
+    return await db.rettifiche_inventario.find({}, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
+
+
 # ------------------------- Storico ordini -------------------------
 @api.get("/ordini")
 async def list_ordini(limit: int = 1000):
@@ -3244,14 +3524,51 @@ async def list_ordini(limit: int = 1000):
 
 
 @api.post("/ordini")
-async def add_ordine(o: OrdineIn):
-    oo = OrdineStorico(**o.model_dump())
+async def add_ordine(o: OrdineIn, request: Request = None):
+    if o.quantita <= 0:
+        raise HTTPException(422, "La quantità deve essere maggiore di zero")
+    smart_venue_applicabile = bool(await db.smart_venue.find_one({"codice": o.codice}, {"_id": 1}))
+    oo = OrdineStorico(
+        **o.model_dump(),
+        smart_venue_applicabile=smart_venue_applicabile,
+        caricato_smart_venue=False if smart_venue_applicabile else None,
+        operatore=_request_operator(request),
+    )
     await db.storico_ordini.insert_one(oo.model_dump())
-    # aggiorna giacenza / acquisti
+    # aggiorna giacenza / acquisti. La conferma esterna resta separata.
     if o.codice:
         await db.prodotti.update_one({"codice": o.codice}, {"$inc": {"giacenza_negozio": o.quantita, "acquistati": o.quantita}})
         await _increment_smart_venue_for_receipt(o.codice, o.quantita)
     return oo.model_dump()
+
+
+@api.post("/ordini/{o_id}/conferma-smart-venue")
+async def conferma_carico_smart_venue(o_id: str, request: Request = None):
+    """Conferma soltanto l'operazione esterna, senza toccare alcuna giacenza."""
+    current = await db.storico_ordini.find_one({"id": o_id}, {"_id": 0})
+    if not current:
+        raise HTTPException(404, "Movimento di carico non trovato")
+    if not current.get("smart_venue_applicabile"):
+        raise HTTPException(422, "Il prodotto di questo carico non è gestito in Smart Venue")
+    if current.get("caricato_smart_venue") is True:
+        return {**current, "ok": True, "gia_confermato": True}
+
+    now = datetime.now(timezone.utc).isoformat()
+    result = await db.storico_ordini.update_one(
+        {"id": o_id, "caricato_smart_venue": {"$ne": True}},
+        {"$set": {
+            "caricato_smart_venue": True,
+            "caricato_smart_venue_il": now,
+            "caricato_smart_venue_da": _request_operator(request),
+        }},
+    )
+    if result.modified_count != 1:
+        latest = await db.storico_ordini.find_one({"id": o_id}, {"_id": 0})
+        if latest and latest.get("caricato_smart_venue") is True:
+            return {**latest, "ok": True, "gia_confermato": True}
+        raise HTTPException(409, "Il movimento è cambiato nel frattempo")
+    updated = await db.storico_ordini.find_one({"id": o_id}, {"_id": 0})
+    return {**updated, "ok": True, "gia_confermato": False}
 
 
 @api.delete("/ordini/{o_id}")
@@ -3263,10 +3580,11 @@ async def del_ordine(o_id: str):
 class BulkOrdineIn(BaseModel):
     file_sorgente: str = "carico manuale"
     data: Optional[str] = None
+    idempotency_key: Optional[str] = None
     righe: List[Dict[str, Any]]  # {codice, descrizione, quantita, prezzo}
 
 
-async def _increment_smart_venue_for_receipt(codice: str, quantita: int) -> bool:
+async def _increment_smart_venue_for_receipt(codice: str, quantita: int, session=None) -> bool:
     """Mantiene il saldo operativo Smart Venue allineato a un carico merce.
 
     SMART VENUE e il gestionale partono dalla stessa disponibilita fisica. Il
@@ -3285,6 +3603,7 @@ async def _increment_smart_venue_for_receipt(codice: str, quantita: int) -> bool
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
         },
+        **_session_kwargs(session),
     )
     return bool(result.matched_count)
 
@@ -3417,45 +3736,185 @@ async def repair_smart_venue_auto_order_2026_10_12() -> Dict[str, Any]:
 
 
 @api.post("/ordini/bulk")
-async def bulk_carico(body: BulkOrdineIn):
+async def bulk_carico(body: BulkOrdineIn, request: Request = None):
     """Ricezione merce: registra il ricevuto e incrementa scorte/acquistati.
 
     Un batch Auto-Order è solo un ordine fornitore; passa da questo endpoint
-    esclusivamente quando la merce è fisicamente arrivata.
+    esclusivamente quando la merce è fisicamente arrivata. Una chiave
+    idempotente rende innocui doppio clic e retry di rete.
     """
     data = body.data or datetime.now(timezone.utc).isoformat()
-    inserted = 0
-    creati_prodotti = 0
+    idempotency_key = str(body.idempotency_key or uuid.uuid4()).strip()
+    if len(idempotency_key) > 200:
+        raise HTTPException(422, "Chiave idempotente troppo lunga")
+
+    existing_batch = await db.ricezioni_merce.find_one(
+        {"idempotency_key": idempotency_key},
+        {"_id": 0},
+    )
+    if existing_batch:
+        if existing_batch.get("status") == "completed" and existing_batch.get("response"):
+            return {**existing_batch["response"], "gia_registrato": True}
+        raise HTTPException(409, "Questo carico è già in elaborazione: attendi e aggiorna la pagina")
+
+    prepared = []
     errors = []
     for i, r in enumerate(body.righe):
         try:
             codice = str(r.get("codice") or "").strip()
-            qta = int(float(r.get("quantita") or 0))
-            if not codice or qta == 0:
+            raw_quantity = r.get("quantita")
+            numeric_quantity = float(raw_quantity)
+            if not numeric_quantity.is_integer():
+                raise ValueError("la quantità deve essere intera")
+            qta = int(numeric_quantity)
+            if not codice and qta == 0:
                 continue
+            if not codice:
+                raise ValueError("codice mancante")
+            if qta <= 0:
+                raise ValueError("la quantità deve essere maggiore di zero")
             prezzo = float(r.get("prezzo") or 0)
+            if prezzo < 0:
+                raise ValueError("il prezzo non può essere negativo")
             desc = str(r.get("descrizione") or "")
-            o = OrdineStorico(data=data, file_sorgente=body.file_sorgente, codice=codice, descrizione=desc, quantita=qta, prezzo=prezzo)
-            await db.storico_ordini.insert_one(o.model_dump())
-            prod = await db.prodotti.find_one({"codice": codice})
-            if prod:
-                await db.prodotti.update_one(
-                    {"codice": codice},
-                    {"$inc": {"giacenza_negozio": qta, "acquistati": qta}},
-                )
-                await _increment_smart_venue_for_receipt(codice, qta)
-            else:
-                # crea prodotto minimale
-                await db.prodotti.insert_one(Prodotto(
-                    codice=codice, descrizione=desc or codice,
-                    categoria=_cat_from_desc(desc, codice),
-                    prezzo=prezzo, acquistati=qta, giacenza_negozio=qta,
-                ).model_dump())
-                creati_prodotti += 1
-            inserted += 1
+            prepared.append({
+                "index": i,
+                "codice": codice,
+                "quantita": qta,
+                "prezzo": prezzo,
+                "descrizione": desc,
+            })
         except Exception as e:
             errors.append({"riga": i + 1, "errore": str(e)})
-    return {"caricate": inserted, "prodotti_nuovi": creati_prodotti, "errori": errors}
+    if errors:
+        raise HTTPException(422, {"message": "Correggi le righe non valide", "errori": errors})
+    if not prepared:
+        raise HTTPException(422, "Nessuna riga valida da caricare")
+
+    batch_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
+    operator = _request_operator(request)
+
+    async def persist_receipt(session):
+        kwargs = _session_kwargs(session)
+        await db.ricezioni_merce.insert_one({
+            "id": batch_id,
+            "idempotency_key": idempotency_key,
+            "status": "processing",
+            "created_at": created_at,
+            "data": data,
+            "file_sorgente": body.file_sorgente,
+            "operatore": operator,
+        }, **kwargs)
+
+        inserted = 0
+        creati_prodotti = 0
+        movimenti = []
+        rollback_actions = []
+        try:
+            for row in prepared:
+                codice = row["codice"]
+                qta = row["quantita"]
+                prod = await db.prodotti.find_one({"codice": codice}, session=session) if session else await db.prodotti.find_one({"codice": codice})
+                smart_row = await db.smart_venue.find_one({"codice": codice}, {"_id": 1}, **kwargs)
+                smart_applicable = bool(smart_row)
+                movement = OrdineStorico(
+                    id=f"{batch_id}:{row['index']}",
+                    batch_id=batch_id,
+                    data=data,
+                    file_sorgente=body.file_sorgente,
+                    codice=codice,
+                    descrizione=row["descrizione"] or str((prod or {}).get("descrizione") or codice),
+                    quantita=qta,
+                    prezzo=row["prezzo"],
+                    smart_venue_applicabile=smart_applicable,
+                    caricato_smart_venue=False if smart_applicable else None,
+                    operatore=operator,
+                    created_at=created_at,
+                ).model_dump()
+                await db.storico_ordini.insert_one(dict(movement), **kwargs)
+
+                if prod:
+                    update = await db.prodotti.update_one(
+                        {"codice": codice},
+                        {"$inc": {"giacenza_negozio": qta, "acquistati": qta}},
+                        **kwargs,
+                    )
+                    if update.matched_count != 1:
+                        raise RuntimeError(f"prodotto {codice} cambiato durante il carico")
+                    rollback_actions.append(("existing_product", codice, qta))
+                    if smart_applicable:
+                        updated = await _increment_smart_venue_for_receipt(codice, qta, session=session)
+                        if not updated:
+                            raise RuntimeError(f"riga Smart Venue {codice} cambiata durante il carico")
+                        rollback_actions.append(("smart_venue", codice, qta))
+                else:
+                    new_product = Prodotto(
+                        codice=codice,
+                        descrizione=row["descrizione"] or codice,
+                        categoria=_cat_from_desc(row["descrizione"], codice),
+                        prezzo=row["prezzo"],
+                        acquistati=qta,
+                        giacenza_negozio=qta,
+                    ).model_dump()
+                    await db.prodotti.insert_one(dict(new_product), **kwargs)
+                    rollback_actions.append(("new_product", codice, new_product["id"]))
+                    creati_prodotti += 1
+                inserted += 1
+                movimenti.append(movement)
+
+            response = {
+                "caricate": inserted,
+                "prodotti_nuovi": creati_prodotti,
+                "errori": [],
+                "batch_id": batch_id,
+                "idempotency_key": idempotency_key,
+                "movimenti": movimenti,
+                "gia_registrato": False,
+            }
+            completed = await db.ricezioni_merce.update_one(
+                {"id": batch_id, "status": "processing"},
+                {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat(), "response": response}},
+                **kwargs,
+            )
+            if completed.matched_count != 1:
+                raise RuntimeError("stato del carico cambiato durante il salvataggio")
+            return response
+        except Exception:
+            if session is None:
+                # Compensazione per Mongo standalone: annulla in ordine
+                # inverso ogni effetto già applicato, mantenendo la chiave
+                # occupata per evitare un retry ambiguo.
+                for kind, code, value in reversed(rollback_actions):
+                    if kind == "smart_venue":
+                        await db.smart_venue.update_one(
+                            {"codice": code},
+                            {"$inc": {"smart_venue": -value}},
+                        )
+                    elif kind == "existing_product":
+                        await db.prodotti.update_one(
+                            {"codice": code},
+                            {"$inc": {"giacenza_negozio": -value, "acquistati": -value}},
+                        )
+                    elif kind == "new_product":
+                        await db.prodotti.delete_one({"codice": code, "id": value})
+                await db.storico_ordini.delete_many({"batch_id": batch_id})
+                await db.ricezioni_merce.update_one(
+                    {"id": batch_id},
+                    {"$set": {"status": "failed", "failed_at": datetime.now(timezone.utc).isoformat()}},
+                )
+            raise
+
+    try:
+        return await _run_transactionally(persist_receipt)
+    except DuplicateKeyError:
+        existing_batch = await db.ricezioni_merce.find_one(
+            {"idempotency_key": idempotency_key},
+            {"_id": 0},
+        )
+        if existing_batch and existing_batch.get("status") == "completed" and existing_batch.get("response"):
+            return {**existing_batch["response"], "gia_registrato": True}
+        raise HTTPException(409, "Questo carico è già stato inviato")
 
 
 
@@ -5446,7 +5905,8 @@ async def create_smart_venue_product(body: SmartVenueProductIn):
         "origine": "MANUALE",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    await db.smart_venue.insert_one(smart_row)
+    # Mantieni la risposta priva dell'ObjectId aggiunto in-place da PyMongo.
+    await db.smart_venue.insert_one(dict(smart_row))
     await db.smart_venue_hidden.delete_many({"product_id": row_id})
     rimanenze = int(product.get("giacenza_negozio", 0) or 0) + int(product.get("giacenza_vending", 0) or 0)
     return {
