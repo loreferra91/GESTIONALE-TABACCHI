@@ -6,7 +6,10 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
-from backend.server import app
+from backend import server
+
+
+app = server.app
 
 
 client = TestClient(app)
@@ -16,6 +19,13 @@ def test_unknown_api_is_not_served_by_spa_fallback():
     response = client.get("/api/endpoint-inesistente")
     assert response.status_code == 404
     assert "text/html" not in response.headers.get("content-type", "")
+
+
+def test_spa_index_is_never_cached_across_deploys():
+    response = server._frontend_index_response()
+    assert response.headers["cache-control"] == "no-cache, no-store, must-revalidate"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["expires"] == "0"
 
 
 def test_health_check_bypasses_optional_basic_auth(monkeypatch):

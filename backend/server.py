@@ -6752,6 +6752,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name
 # ------------------------------------------------------------------
 FRONTEND_BUILD_DIR = ROOT_DIR.parent / "frontend" / "build"
 
+
+def _frontend_index_response():
+    # index.html contiene i nomi hashati degli asset del singolo deploy. Se il
+    # browser conserva l'HTML di una rotta SPA (es. /prodotti), al deploy
+    # successivo può richiedere un bundle ormai rimosso e mostrare pagina bianca.
+    return FileResponse(
+        FRONTEND_BUILD_DIR / "index.html",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 if FRONTEND_BUILD_DIR.exists():
     static_dir = FRONTEND_BUILD_DIR / "static"
 
@@ -6770,7 +6785,7 @@ if FRONTEND_BUILD_DIR.exists():
         except ValueError:
             requested = build_root / "index.html"
 
-        if requested.is_file():
+        if requested.is_file() and requested.name != "index.html":
             return FileResponse(requested)
 
-        return FileResponse(build_root / "index.html")
+        return _frontend_index_response()
