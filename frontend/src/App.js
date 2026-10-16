@@ -23,9 +23,42 @@ import SmartVenue from "./pages/SmartVenue";
 import SmartVenueControllo from "./pages/SmartVenueControllo";
 import GiacenzeReali from "./pages/GiacenzeReali";
 
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("Errore non gestito nell'interfaccia", error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="min-h-screen bg-slate-50 p-6 flex items-center justify-center">
+        <section className="w-full max-w-xl rounded-lg border border-red-200 bg-white p-6 shadow-sm">
+          <p className="text-xs font-bold uppercase tracking-wider text-red-700">Errore interfaccia</p>
+          <h1 className="mt-2 text-xl font-bold text-slate-900">La pagina non può essere visualizzata</h1>
+          <p className="mt-2 text-sm text-slate-600">Ricarica la pagina. Se il problema continua, comunica questo dettaglio:</p>
+          <pre className="mt-3 overflow-auto rounded bg-slate-900 p-3 text-xs text-white">{String(this.state.error?.message || this.state.error)}</pre>
+          <button type="button" onClick={() => window.location.reload()} className="mt-4 rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white">
+            Ricarica pagina
+          </button>
+        </section>
+      </main>
+    );
+  }
+}
+
 function App() {
   return (
-    <div className="App">
+    <AppErrorBoundary>
+      <div className="App">
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Dashboard />} />
@@ -52,7 +85,8 @@ function App() {
         </Routes>
       </BrowserRouter>
       <Toaster position="top-right" richColors />
-    </div>
+      </div>
+    </AppErrorBoundary>
   );
 }
 
