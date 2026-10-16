@@ -102,7 +102,7 @@ export default function Prodotti() {
         row.id === vendutiEditor.id ? { ...row, venduti_negozio: response.data.venduti_negozio } : row
       )));
       setVendutiEditor(null);
-      toast.success("Venduti negozio aggiornati");
+      toast.success("Venduti negozio e contabilità aggiornati");
     } catch (error) {
       toast.error(apiErrorMessage(error, "Errore aggiornamento venduti negozio"));
       if (error?.response?.status === 409) {

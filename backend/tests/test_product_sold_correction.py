@@ -32,6 +32,7 @@ def test_update_changes_only_shop_sold_counter_and_writes_audit(monkeypatch):
             "id": "product-1",
             "codice": "AMMS395",
             "descrizione": "MARLBORO KS*AST20",
+            "prezzo": 6.80,
             "venduti_negozio": 100,
             "venduti_vending": 5,
             "giacenza_negozio": 12,
@@ -57,7 +58,34 @@ def test_update_changes_only_shop_sold_counter_and_writes_audit(monkeypatch):
     assert product["giacenza_vending"] == 4
     assert audit["valore_precedente"] == 100
     assert audit["valore_nuovo"] == 120
+    assert audit["delta_quantita"] == 20
+    assert audit["prezzo_unitario"] == 6.8
+    assert audit["importo_contabile"] == 136.0
     assert audit["operatore"] == "test-operatore"
+
+
+def test_decrease_writes_negative_accounting_correction(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def exercise():
+        await database.prodotti.insert_one({
+            "id": "product-1",
+            "codice": "AMMS395",
+            "prezzo": 6.80,
+            "venduti_negozio": 100,
+            "venduti_vending": 5,
+        })
+        await server.update_venduti_negozio(
+            "product-1",
+            server.VendutiNegozioIn(venduti_negozio=97, valore_atteso=100),
+            request_with_operator(),
+        )
+        return await database.rettifiche_venduti.find_one({}, {"_id": 0})
+
+    audit = asyncio.run(exercise())
+
+    assert audit["delta_quantita"] == -3
+    assert audit["importo_contabile"] == -20.4
 
 
 def test_update_rejects_stale_value_without_overwriting(monkeypatch):

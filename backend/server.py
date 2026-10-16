@@ -1056,6 +1056,9 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
             )
 
         if current_value != body.venduti_negozio:
+            delta_quantita = body.venduti_negozio - current_value
+            prezzo_unitario = round(float(product.get("prezzo", 0) or 0), 2)
+            importo_contabile = round(delta_quantita * prezzo_unitario, 2)
             result = await db.prodotti.update_one(
                 {"id": prod_id, "venduti_negozio": current_value},
                 {"$set": {"venduti_negozio": body.venduti_negozio}},
@@ -1074,6 +1077,9 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
                     "campo": "venduti_negozio",
                     "valore_precedente": current_value,
                     "valore_nuovo": body.venduti_negozio,
+                    "delta_quantita": delta_quantita,
+                    "prezzo_unitario": prezzo_unitario,
+                    "importo_contabile": importo_contabile,
                     "operatore": operator,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }, **kwargs)
@@ -5418,6 +5424,30 @@ async def _supplemental_store_cash_sales(
     return round(total, 2)
 
 
+async def _shop_sold_accounting_corrections(latest_import_created_at: Any = None) -> float:
+    """Somma le rettifiche monetarie successive all'ultima fotografia Excel.
+
+    Un nuovo import contabile incorpora nuovamente il totale cumulativo dei
+    venduti; escludere le rettifiche precedenti evita di contarle due volte.
+    Le rettifiche legacy prive di importo non alterano retroattivamente i saldi.
+    """
+    cutoff = _parse_utc_datetime(latest_import_created_at)
+    documents = await db.rettifiche_venduti.find(
+        {"campo": "venduti_negozio"},
+        {"_id": 0, "created_at": 1, "importo_contabile": 1},
+    ).to_list(None)
+    total = 0.0
+    for document in documents:
+        created_at = _parse_utc_datetime(document.get("created_at"))
+        if cutoff and (not created_at or created_at <= cutoff):
+            continue
+        try:
+            total += float(document.get("importo_contabile") or 0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
+
+
 async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
     """Restituisce l'andamento fino all'ultimo giorno di vendita disponibile."""
     # Il raggruppamento applicativo mantiene lo stesso risultato su MongoDB e
@@ -5493,7 +5523,7 @@ async def dashboard():
         {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
     ]).to_list(1)
     v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
-    versamenti, prelievi, scontrini, giacenza_iniziale_doc, venduto_negozio_app_contanti = await asyncio.gather(
+    versamenti, prelievi, scontrini, giacenza_iniziale_doc, venduto_negozio_app_contanti, rettifiche_venduto_negozio = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
         _scontrini_vending_summary(),
@@ -5505,9 +5535,15 @@ async def dashboard():
             ultima_vendita_importata,
             (ultimo_import_contabile or {}).get("created_at"),
         ),
+        _shop_sold_accounting_corrections(
+            (ultimo_import_contabile or {}).get("created_at"),
+        ),
     )
     giacenza_iniziale_vending = round(float((giacenza_iniziale_doc or {}).get("valore") or 0), 2)
-    venduto_negozio_contabilizzato = round(venduto_negozio_excel + venduto_negozio_app_contanti, 2)
+    venduto_negozio_contabilizzato = round(
+        venduto_negozio_excel + venduto_negozio_app_contanti + rettifiche_venduto_negozio,
+        2,
+    )
     liquidita_residua = round(venduto_negozio_contabilizzato - versamenti["totale"], 2)
     saldi, andamento_vendite = await asyncio.gather(
         _dashboard_balances(
@@ -5532,6 +5568,7 @@ async def dashboard():
         "giacenza_iniziale_vending_contanti": giacenza_iniziale_vending,
         "venduto_negozio_excel": round(venduto_negozio_excel, 2),
         "venduto_negozio_app_contanti": venduto_negozio_app_contanti,
+        "rettifiche_venduto_negozio": rettifiche_venduto_negozio,
         "venduto_negozio_contabilizzato": venduto_negozio_contabilizzato,
         "liquidita_residua": liquidita_residua,
         "saldo_cassa": liquidita_residua,

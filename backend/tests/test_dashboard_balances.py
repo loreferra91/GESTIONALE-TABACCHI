@@ -470,6 +470,22 @@ def test_supplemental_store_cash_sales_counts_all_when_no_import_exists(monkeypa
     assert asyncio.run(server._supplemental_store_cash_sales(None)) == 10
 
 
+def test_shop_sold_accounting_corrections_only_count_after_latest_import(monkeypatch):
+    corrections = FakeCollection([
+        {"campo": "venduti_negozio", "created_at": "2026-10-15T09:00:00+00:00", "importo_contabile": 20},
+        {"campo": "venduti_negozio", "created_at": "2026-10-16T09:00:00+00:00", "importo_contabile": 13.6},
+        {"campo": "venduti_negozio", "created_at": "2026-10-16T10:00:00+00:00", "importo_contabile": -6.8},
+        {"campo": "venduti_negozio", "created_at": "2026-10-16T11:00:00+00:00"},
+    ])
+    monkeypatch.setattr(server, "db", SimpleNamespace(rettifiche_venduti=corrections))
+
+    result = asyncio.run(
+        server._shop_sold_accounting_corrections("2026-10-16T08:00:00+00:00")
+    )
+
+    assert result == 6.8
+
+
 def test_parse_sale_date_normalizes_italian_and_iso_dates():
     assert server._parse_sale_date("03/10/2026").isoformat() == "2026-10-03"
     assert server._parse_sale_date("2026-10-03T08:30:00").isoformat() == "2026-10-03"
