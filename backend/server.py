@@ -109,6 +109,11 @@ class ProdottoIn(BaseModel):
     colonna_vending: Optional[str] = None
 
 
+class VendutiNegozioIn(BaseModel):
+    venduti_negozio: int = Field(ge=0)
+    valore_atteso: int = Field(ge=0)
+
+
 PRODUCT_CATEGORIES = {
     "SIGARETTE",
     "SIGARI",
@@ -350,6 +355,7 @@ BACKUP_COLLECTIONS = [
     "smart_venue_values",
     "ricezioni_merce",
     "rettifiche_inventario",
+    "rettifiche_venduti",
 ]
 
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
@@ -367,6 +373,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "smart_venue_values",
     "ricezioni_merce",
     "rettifiche_inventario",
+    "rettifiche_venduti",
 }
 
 BACKUP_RETENTION_LIMIT = 3
@@ -531,6 +538,7 @@ async def on_start():
             db.ricezioni_merce.create_index("idempotency_key", unique=True),
             db.ricezioni_merce.create_index("created_at"),
             db.rettifiche_inventario.create_index([("codice", 1), ("created_at", -1)]),
+            db.rettifiche_venduti.create_index([("codice", 1), ("created_at", -1)]),
             db.backup_snapshots.create_index("created_at"),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
             db.import_history.create_index("created_at"),
@@ -1013,8 +1021,11 @@ async def create_prodotto(p: ProdottoIn):
 @api.put("/prodotti/{prod_id}")
 async def update_prodotto(prod_id: str, p: ProdottoIn):
     payload = await _canonical_manual_product_payload(p)
-    # Non accettare copie manuali della giacenza vending nell'anagrafica.
+    # Le giacenze vending e i contatori venduti hanno flussi dedicati: il form
+    # anagrafico non deve poterli azzerare tramite i default di ProdottoIn.
     payload.pop("giacenza_vending", None)
+    payload.pop("venduti_negozio", None)
+    payload.pop("venduti_vending", None)
     collision = await db.prodotti.find_one({"codice": payload["codice"], "id": {"$ne": prod_id}})
     if collision:
         raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
@@ -1025,6 +1036,60 @@ async def update_prodotto(prod_id: str, p: ProdottoIn):
     vending_totals = await _vending_stock_by_code() or {}
     doc["giacenza_vending"] = vending_totals.get(str(doc.get("codice") or ""), 0)
     return doc
+
+
+@api.patch("/prodotti/{prod_id}/venduti-negozio")
+async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: Request):
+    operator = _request_operator(request)
+
+    async def persist_correction(session):
+        kwargs = _session_kwargs(session)
+        product = await db.prodotti.find_one({"id": prod_id}, {"_id": 0}, **kwargs)
+        if not product:
+            raise HTTPException(404, "Prodotto non trovato")
+
+        current_value = int(product.get("venduti_negozio", 0) or 0)
+        if current_value != body.valore_atteso:
+            raise HTTPException(
+                409,
+                "Il valore dei venduti negozio è cambiato nel frattempo. Ricarica e riprova.",
+            )
+
+        if current_value != body.venduti_negozio:
+            result = await db.prodotti.update_one(
+                {"id": prod_id, "venduti_negozio": current_value},
+                {"$set": {"venduti_negozio": body.venduti_negozio}},
+                **kwargs,
+            )
+            if result.matched_count != 1:
+                raise HTTPException(
+                    409,
+                    "Il valore dei venduti negozio è cambiato nel frattempo. Ricarica e riprova.",
+                )
+            try:
+                await db.rettifiche_venduti.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "prodotto_id": prod_id,
+                    "codice": product.get("codice", ""),
+                    "campo": "venduti_negozio",
+                    "valore_precedente": current_value,
+                    "valore_nuovo": body.venduti_negozio,
+                    "operatore": operator,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }, **kwargs)
+            except Exception:
+                if session is None:
+                    await db.prodotti.update_one(
+                        {"id": prod_id, "venduti_negozio": body.venduti_negozio},
+                        {"$set": {"venduti_negozio": current_value}},
+                    )
+                raise
+
+        product["venduti_negozio"] = body.venduti_negozio
+        product["venduti_totale"] = body.venduti_negozio + int(product.get("venduti_vending", 0) or 0)
+        return product
+
+    return await _run_transactionally(persist_correction)
 
 
 @api.delete("/prodotti/{prod_id}")

@@ -24,3 +24,8 @@
   non elimina più le vendite uscite dalla finestra delle ultime 1.000 righe.
   I backup MongoDB interni hanno retention di 3 copie e gli import Excel usano
   snapshot parziali delle sole collezioni modificate, per restare entro Atlas M0.
+- Dal 2026-10-16 nella pagina **Prodotti** il totale Venduti apre un editor in
+  cui è modificabile soltanto `venduti_negozio`; `venduti_vending` resta in sola
+  lettura e il totale è calcolato. Le correzioni sono protette da confronto col
+  valore atteso, non cambiano le giacenze e vengono registrate in
+  `rettifiche_venduti`.

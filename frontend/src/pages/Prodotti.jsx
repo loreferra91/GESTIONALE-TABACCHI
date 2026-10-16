@@ -13,6 +13,8 @@ export default function Prodotti() {
   const [cat, setCat] = useState("");
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [vendutiEditor, setVendutiEditor] = useState(null);
+  const [savingVenduti, setSavingVenduti] = useState(false);
   const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "" });
 
   const filtered = cat ? allRows.filter(r => r.categoria === cat) : allRows;
@@ -67,6 +69,45 @@ export default function Prodotti() {
     setEditing(r.id);
     setForm({ codice: r.codice, descrizione: r.descrizione, categoria: r.categoria, prezzo: String(r.prezzo ?? ""), giacenza_negozio: String(r.giacenza_negozio ?? "") });
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const startVendutiEdit = (row) => {
+    const vendutiNegozio = Number(row.venduti_negozio || 0);
+    setVendutiEditor({
+      id: row.id,
+      value: String(vendutiNegozio),
+      initialValue: vendutiNegozio,
+      vendutiVending: Number(row.venduti_vending || 0),
+    });
+  };
+
+  const saveVendutiNegozio = async () => {
+    const nextValue = Number(vendutiEditor?.value);
+    if (vendutiEditor?.value.trim() === "" || !Number.isInteger(nextValue) || nextValue < 0) {
+      toast.error("Inserisci un numero intero maggiore o uguale a zero");
+      return;
+    }
+
+    setSavingVenduti(true);
+    try {
+      const response = await api.patch(`/prodotti/${vendutiEditor.id}/venduti-negozio`, {
+        venduti_negozio: nextValue,
+        valore_atteso: vendutiEditor.initialValue,
+      });
+      setAllRows(current => current.map(row => (
+        row.id === vendutiEditor.id ? { ...row, venduti_negozio: response.data.venduti_negozio } : row
+      )));
+      setVendutiEditor(null);
+      toast.success("Venduti negozio aggiornati");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Errore aggiornamento venduti negozio"));
+      if (error?.response?.status === 409) {
+        setVendutiEditor(null);
+        await load();
+      }
+    } finally {
+      setSavingVenduti(false);
+    }
   };
 
   return (
@@ -126,7 +167,54 @@ export default function Prodotti() {
                   <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
                   <td className={`font-mono text-right ${r.giacenza_negozio < 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.giacenza_negozio)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending)}</td>
-                  <td className="font-mono text-right">{formatNum((r.venduti_negozio || 0) + (r.venduti_vending || 0))}</td>
+                  <td className="font-mono text-right">
+                    {vendutiEditor?.id === r.id ? (
+                      <div className="ml-auto w-56 rounded-lg border border-slate-200 bg-white p-3 text-left font-sans shadow-lg" data-testid={`prod-venduti-editor-${r.codice}`}>
+                        <label className="block text-[11px] font-bold uppercase tracking-wide text-slate-500" htmlFor={`venduti-negozio-${r.id}`}>
+                          Venduti negozio
+                        </label>
+                        <input
+                          autoFocus
+                          id={`venduti-negozio-${r.id}`}
+                          data-testid={`prod-venduti-negozio-${r.codice}`}
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={vendutiEditor.value}
+                          onChange={event => setVendutiEditor(current => ({ ...current, value: event.target.value }))}
+                          onKeyDown={event => {
+                            if (event.key === "Enter") saveVendutiNegozio();
+                            if (event.key === "Escape") setVendutiEditor(null);
+                          }}
+                          className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-right font-mono text-sm"
+                        />
+                        <div className="mt-2 flex justify-between text-xs text-slate-500">
+                          <span>Venduti vending</span>
+                          <span className="font-mono text-slate-700">{formatNum(vendutiEditor.vendutiVending)}</span>
+                        </div>
+                        <div className="mt-1 flex justify-between border-t border-slate-100 pt-1 text-xs font-semibold text-slate-700">
+                          <span>Totale</span>
+                          <span className="font-mono">{formatNum((Number(vendutiEditor.value) || 0) + vendutiEditor.vendutiVending)}</span>
+                        </div>
+                        <div className="mt-3 flex justify-end gap-2">
+                          <button type="button" onClick={() => setVendutiEditor(null)} disabled={savingVenduti} className="rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100">Annulla</button>
+                          <button type="button" onClick={saveVendutiNegozio} disabled={savingVenduti} className="rounded bg-slate-900 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50">
+                            {savingVenduti ? "Salvo…" : "Salva"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`prod-venduti-edit-${r.codice}`}
+                        onClick={() => startVendutiEdit(r)}
+                        className="rounded px-2 py-1 font-mono hover:bg-slate-100 hover:text-slate-900"
+                        title="Modifica venduti negozio"
+                      >
+                        {formatNum((r.venduti_negozio || 0) + (r.venduti_vending || 0))}
+                      </button>
+                    )}
+                  </td>
                   <td className="text-right whitespace-nowrap">
                     <button data-testid={`prod-edit-${r.codice}`} onClick={() => startEdit(r)} className="text-slate-600 hover:text-slate-900 text-xs mr-3">Modifica</button>
                     <button data-testid={`prod-del-${r.codice}`} onClick={() => del(r.id)} className="text-red-600 hover:text-red-800 text-xs">Elimina</button>
