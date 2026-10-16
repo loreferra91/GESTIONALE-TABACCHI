@@ -72,6 +72,10 @@ export default function Prodotti() {
   };
 
   const startVendutiEdit = (row) => {
+    if (!row.id) {
+      toast.error("Questo prodotto non ha un identificativo valido e non può essere rettificato");
+      return;
+    }
     const vendutiNegozio = Number(row.venduti_negozio || 0);
     setVendutiEditor({
       id: row.id,
@@ -159,7 +163,7 @@ export default function Prodotti() {
             <tbody>
               {loading && <tr><td colSpan={9} className="text-center py-8 text-slate-400">Caricamento…</td></tr>}
               {rows.map(r => (
-                <tr key={r.id} data-testid={`prod-row-${r.codice}`}>
+                <tr key={r.id || r.codice} data-testid={`prod-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
                   <td className="max-w-sm truncate">{r.descrizione}</td>
                   <td><Badge tone="info">{r.categoria}</Badge></td>
@@ -168,7 +172,7 @@ export default function Prodotti() {
                   <td className={`font-mono text-right ${r.giacenza_negozio < 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.giacenza_negozio)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending)}</td>
                   <td className="font-mono text-right">
-                    {vendutiEditor?.id === r.id ? (
+                    {vendutiEditor !== null && vendutiEditor.id === r.id ? (
                       <div className="ml-auto w-56 rounded-lg border border-slate-200 bg-white p-3 text-left font-sans shadow-lg" data-testid={`prod-venduti-editor-${r.codice}`}>
                         <label className="block text-[11px] font-bold uppercase tracking-wide text-slate-500" htmlFor={`venduti-negozio-${r.id}`}>
                           Venduti negozio
