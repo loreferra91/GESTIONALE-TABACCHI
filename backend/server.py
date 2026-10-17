@@ -1059,9 +1059,15 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
             delta_quantita = body.venduti_negozio - current_value
             prezzo_unitario = round(float(product.get("prezzo", 0) or 0), 2)
             importo_contabile = round(delta_quantita * prezzo_unitario, 2)
+            # Increasing shop sales consumes physical shop stock; decreasing them restores it.
+            giacenza_precedente = int(product.get("giacenza_negozio", 0) or 0)
+            nuova_giacenza = giacenza_precedente - delta_quantita
             result = await db.prodotti.update_one(
                 {"id": prod_id, "venduti_negozio": current_value},
-                {"$set": {"venduti_negozio": body.venduti_negozio}},
+                {"$set": {
+                    "venduti_negozio": body.venduti_negozio,
+                    "giacenza_negozio": nuova_giacenza,
+                }},
                 **kwargs,
             )
             if result.matched_count != 1:
@@ -1080,6 +1086,9 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
                     "delta_quantita": delta_quantita,
                     "prezzo_unitario": prezzo_unitario,
                     "importo_contabile": importo_contabile,
+                    "delta_giacenza_negozio": -delta_quantita,
+                    "giacenza_precedente": giacenza_precedente,
+                    "giacenza_nuova": nuova_giacenza,
                     "operatore": operator,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }, **kwargs)
@@ -1087,11 +1096,17 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
                 if session is None:
                     await db.prodotti.update_one(
                         {"id": prod_id, "venduti_negozio": body.venduti_negozio},
-                        {"$set": {"venduti_negozio": current_value}},
+                        {"$set": {
+                            "venduti_negozio": current_value,
+                            "giacenza_negozio": giacenza_precedente,
+                        }},
                     )
                 raise
 
         product["venduti_negozio"] = body.venduti_negozio
+        product["giacenza_negozio"] = int(product.get("giacenza_negozio", 0) or 0) - (
+            body.venduti_negozio - current_value
+        )
         product["venduti_totale"] = body.venduti_negozio + int(product.get("venduti_vending", 0) or 0)
         return product
 

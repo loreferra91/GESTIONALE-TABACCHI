@@ -24,7 +24,7 @@ def isolated_db(monkeypatch):
     return database
 
 
-def test_update_changes_only_shop_sold_counter_and_writes_audit(monkeypatch):
+def test_update_changes_shop_sold_stock_and_writes_audit(monkeypatch):
     database = isolated_db(monkeypatch)
 
     async def exercise():
@@ -54,13 +54,17 @@ def test_update_changes_only_shop_sold_counter_and_writes_audit(monkeypatch):
     assert response["venduti_totale"] == 125
     assert product["venduti_negozio"] == 120
     assert product["venduti_vending"] == 5
-    assert product["giacenza_negozio"] == 12
+    assert response["giacenza_negozio"] == -8
+    assert product["giacenza_negozio"] == -8
     assert product["giacenza_vending"] == 4
     assert audit["valore_precedente"] == 100
     assert audit["valore_nuovo"] == 120
     assert audit["delta_quantita"] == 20
     assert audit["prezzo_unitario"] == 6.8
     assert audit["importo_contabile"] == 136.0
+    assert audit["delta_giacenza_negozio"] == -20
+    assert audit["giacenza_precedente"] == 12
+    assert audit["giacenza_nuova"] == -8
     assert audit["operatore"] == "test-operatore"
 
 
@@ -74,18 +78,28 @@ def test_decrease_writes_negative_accounting_correction(monkeypatch):
             "prezzo": 6.80,
             "venduti_negozio": 100,
             "venduti_vending": 5,
+            "giacenza_negozio": 12,
+            "giacenza_vending": 4,
         })
-        await server.update_venduti_negozio(
+        response = await server.update_venduti_negozio(
             "product-1",
             server.VendutiNegozioIn(venduti_negozio=97, valore_atteso=100),
             request_with_operator(),
         )
-        return await database.rettifiche_venduti.find_one({}, {"_id": 0})
+        product = await database.prodotti.find_one({"id": "product-1"}, {"_id": 0})
+        audit = await database.rettifiche_venduti.find_one({}, {"_id": 0})
+        return response, product, audit
 
-    audit = asyncio.run(exercise())
+    response, product, audit = asyncio.run(exercise())
 
+    assert response["giacenza_negozio"] == 15
+    assert product["giacenza_negozio"] == 15
+    assert product["giacenza_vending"] == 4
     assert audit["delta_quantita"] == -3
     assert audit["importo_contabile"] == -20.4
+    assert audit["delta_giacenza_negozio"] == 3
+    assert audit["giacenza_precedente"] == 12
+    assert audit["giacenza_nuova"] == 15
 
 
 def test_update_rejects_stale_value_without_overwriting(monkeypatch):
