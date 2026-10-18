@@ -290,6 +290,12 @@ def test_http_money_validation_and_protected_reconciliation(database, monkeypatc
     )
     assert workflow_response.status_code == 200
     assert workflow_response.json()["fingerprint"] == fingerprint
+    audit_response = client.get(
+        "/api/audit/eventi",
+        params={"entita": "SEGNALAZIONE_RICONCILIAZIONE", "entita_id": fingerprint},
+    )
+    assert audit_response.status_code == 200
+    assert [item["entita_id"] for item in audit_response.json()] == [fingerprint]
     assert client.put(
         "/api/contabilita/riconciliazione/segnalazioni/non-valido",
         json={"stato": "aperta"},

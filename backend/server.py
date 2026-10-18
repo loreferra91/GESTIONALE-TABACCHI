@@ -18,9 +18,11 @@ from zoneinfo import ZoneInfo
 from decimal import Decimal
 
 if __package__:
+    from .audit_router import create_audit_router
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
+    from audit_router import create_audit_router
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 
@@ -59,6 +61,9 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="God Services Gestionale Tabacchi", lifespan=lifespan)
 api = APIRouter(prefix="/api")
+audit_router, _record_audit_event, list_audit_events = create_audit_router(
+    get_database=lambda: db,
+)
 
 
 @app.middleware("http")
@@ -643,37 +648,6 @@ def _request_operator(request: Optional[Request]) -> str:
     if request is None:
         return "operatore-locale"
     return str(getattr(request.state, "authenticated_user", "operatore-locale") or "operatore-locale")
-
-
-async def _record_audit_event(
-    azione: str,
-    entita: str,
-    entita_id: Optional[str] = None,
-    *,
-    operatore: str = "operatore-locale",
-    prima: Optional[Dict[str, Any]] = None,
-    dopo: Optional[Dict[str, Any]] = None,
-    idempotency_key: Optional[str] = None,
-    batch_id: Optional[str] = None,
-) -> None:
-    """Scrive un evento append-only senza includere identificativi Mongo interni."""
-    audit_collection = getattr(db, "audit_events", None)
-    # Fixture legacy/read-only che espongono solo le raccolte necessarie alla
-    # singola operazione non devono fallire per l'audit opzionale.
-    if audit_collection is None:
-        return
-    await audit_collection.insert_one({
-        "id": str(uuid.uuid4()),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "azione": azione,
-        "entita": entita,
-        "entita_id": str(entita_id) if entita_id is not None else None,
-        "operatore": operatore,
-        "prima": dict(prima) if prima else None,
-        "dopo": dict(dopo) if dopo else None,
-        "idempotency_key": idempotency_key,
-        "batch_id": batch_id,
-    })
 
 
 def _session_kwargs(session) -> Dict[str, Any]:
@@ -4902,17 +4876,6 @@ async def list_versamenti(limit: int = 500):
     return await _versamenti_summary(limit)
 
 
-@api.get("/audit/eventi")
-async def list_audit_events(limit: int = 100, entita: Optional[str] = None, entita_id: Optional[str] = None):
-    capped_limit = min(max(int(limit or 100), 1), 500)
-    query = {}
-    if entita:
-        query["entita"] = str(entita).strip()
-    if entita_id:
-        query["entita_id"] = str(entita_id).strip()
-    return await db.audit_events.find(query, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
-
-
 @api.post("/versamenti")
 async def add_versamento(m: VersamentoIn):
     if m.importo <= 0:
@@ -7445,6 +7408,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
     record_audit_event=_record_audit_event,
 )
 api.include_router(reconciliation_router)
+api.include_router(audit_router)
 app.include_router(api)
 
 
