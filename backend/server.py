@@ -24,6 +24,10 @@ if __package__:
         ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
         Versamento, VersamentoIn, create_cash_movements_router,
     )
+    from .import_history_router import (
+        create_import_history_router,
+        import_includes_accounting as _import_includes_accounting,
+    )
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
@@ -33,6 +37,10 @@ else:
         MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
         ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
         Versamento, VersamentoIn, create_cash_movements_router,
+    )
+    from import_history_router import (
+        create_import_history_router,
+        import_includes_accounting as _import_includes_accounting,
     )
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
@@ -2192,54 +2200,6 @@ async def backup_restore_file(file: UploadFile = File(...)):
             "restored_docs": sum(len(docs) for docs in collections.values()),
             "pre_restore_backup": restore_backup["id"],
         }
-
-
-def _import_includes_accounting(report: Dict[str, Any]) -> bool:
-    """Indica se l'import contiene la fotografia contabile RIEP_VENDITA."""
-    return "RIEP_VENDITA" in (report.get("fogli_trovati") or [])
-
-
-async def record_import_history(file_name: str, report: Dict[str, Any], backup_id: Optional[str] = None):
-    totals = report.get("totali", {})
-    includes_accounting = _import_includes_accounting(report)
-    doc = {
-        "id": str(uuid.uuid4()),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "file": file_name,
-        "backup_id": backup_id,
-        "tipo_import": report.get("tipo_import") or ("completo" if includes_accounting else "giacenze"),
-        "contabilita_inclusa": includes_accounting,
-        "fogli_trovati": report.get("fogli_trovati", []),
-        "fogli_mancanti": report.get("fogli_mancanti", []),
-        "totali": totals,
-        "errori": sum((v or {}).get("errori", 0) for v in (report.get("dettaglio") or {}).values() if isinstance(v, dict)),
-    }
-    await db.import_history.insert_one(doc)
-    return doc
-
-
-async def _latest_accounting_import():
-    """Trova l'ultimo import completo, ignorando gli upload di sole giacenze.
-
-    La condizione sul nome del foglio mantiene compatibili gli import storici,
-    creati prima dell'introduzione del flag ``contabilita_inclusa``.
-    """
-    return await db.import_history.find_one(
-        {
-            "$or": [
-                {"contabilita_inclusa": True},
-                {"fogli_trovati": "RIEP_VENDITA"},
-            ]
-        },
-        {"_id": 0},
-        sort=[("created_at", -1)],
-    )
-
-
-@api.get("/import/history")
-async def import_history(limit: int = 20):
-    capped_limit = max(1, min(int(limit or 20), 100))
-    return await db.import_history.find({}, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
 
 
 async def data_status_payload() -> Dict[str, Any]:
@@ -7017,6 +6977,14 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+(
+    import_history_router,
+    record_import_history,
+    _latest_accounting_import,
+    import_history,
+) = create_import_history_router(
+    get_database=lambda: db,
+)
 cash_movements = create_cash_movements_router(
     get_database=lambda: db,
     record_audit_event=_record_audit_event,
@@ -7057,6 +7025,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 )
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
+api.include_router(import_history_router)
 api.include_router(cash_movements_router)
 api.include_router(parameters_router)
 app.include_router(api)
