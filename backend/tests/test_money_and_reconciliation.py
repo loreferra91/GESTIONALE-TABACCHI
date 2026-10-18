@@ -245,3 +245,6 @@ def test_accounting_writes_are_idempotent(database):
     assert asyncio.run(database.versamenti.count_documents({})) == 1
     assert asyncio.run(database.scontrini_vending.count_documents({})) == 1
     assert asyncio.run(database.cassa.count_documents({})) == 1
+    audit = asyncio.run(database.audit_events.find({}, {"_id": 0}).to_list(None))
+    assert {row["entita"] for row in audit} == {"VERSAMENTO", "SCONTRINO_VENDING", "MOVIMENTO_CASSA"}
+    assert len(audit) == 3

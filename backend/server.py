@@ -392,6 +392,7 @@ BACKUP_COLLECTIONS = [
     "ricezioni_merce",
     "rettifiche_inventario",
     "rettifiche_venduti",
+    "audit_events",
 ]
 
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
@@ -410,6 +411,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "ricezioni_merce",
     "rettifiche_inventario",
     "rettifiche_venduti",
+    "audit_events",
 }
 
 BACKUP_RETENTION_LIMIT = 3
@@ -578,6 +580,8 @@ async def on_start():
             db.ricezioni_merce.create_index("created_at"),
             db.rettifiche_inventario.create_index([("codice", 1), ("created_at", -1)]),
             db.rettifiche_venduti.create_index([("codice", 1), ("created_at", -1)]),
+            db.audit_events.create_index([("created_at", -1)]),
+            db.audit_events.create_index([("entita", 1), ("entita_id", 1), ("created_at", -1)]),
             db.backup_snapshots.create_index("created_at"),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1), ("position", 1)]),
@@ -635,6 +639,32 @@ def _request_operator(request: Optional[Request]) -> str:
     if request is None:
         return "operatore-locale"
     return str(getattr(request.state, "authenticated_user", "operatore-locale") or "operatore-locale")
+
+
+async def _record_audit_event(
+    azione: str,
+    entita: str,
+    entita_id: Optional[str] = None,
+    *,
+    operatore: str = "operatore-locale",
+    prima: Optional[Dict[str, Any]] = None,
+    dopo: Optional[Dict[str, Any]] = None,
+    idempotency_key: Optional[str] = None,
+    batch_id: Optional[str] = None,
+) -> None:
+    """Scrive un evento append-only senza includere identificativi Mongo interni."""
+    await db.audit_events.insert_one({
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "azione": azione,
+        "entita": entita,
+        "entita_id": str(entita_id) if entita_id is not None else None,
+        "operatore": operatore,
+        "prima": dict(prima) if prima else None,
+        "dopo": dict(dopo) if dopo else None,
+        "idempotency_key": idempotency_key,
+        "batch_id": batch_id,
+    })
 
 
 def _session_kwargs(session) -> Dict[str, Any]:
@@ -4861,6 +4891,17 @@ async def list_versamenti(limit: int = 500):
     return await _versamenti_summary(limit)
 
 
+@api.get("/audit/eventi")
+async def list_audit_events(limit: int = 100, entita: Optional[str] = None, entita_id: Optional[str] = None):
+    capped_limit = min(max(int(limit or 100), 1), 500)
+    query = {}
+    if entita:
+        query["entita"] = str(entita).strip()
+    if entita_id:
+        query["entita_id"] = str(entita_id).strip()
+    return await db.audit_events.find(query, {"_id": 0}).sort("created_at", -1).limit(capped_limit).to_list(capped_limit)
+
+
 @api.post("/versamenti")
 async def add_versamento(m: VersamentoIn):
     if m.importo <= 0:
@@ -4882,12 +4923,16 @@ async def add_versamento(m: VersamentoIn):
         await db.versamenti.insert_one(versamento_doc)
     except DuplicateKeyError:
         return await db.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
+    await _record_audit_event("CREATO", "VERSAMENTO", versamento_doc["id"], dopo=response_doc, idempotency_key=key)
     return response_doc
 
 
 @api.delete("/versamenti/{m_id}")
 async def del_versamento(m_id: str):
+    existing = await db.versamenti.find_one({"id": m_id}, {"_id": 0})
     await db.versamenti.delete_one({"id": m_id})
+    if existing:
+        await _record_audit_event("ELIMINATO", "VERSAMENTO", m_id, prima=existing)
     return {"ok": True}
 
 
@@ -4924,6 +4969,7 @@ async def add_prelievo_vending(m: PrelievoVendingIn):
     except Exception:
         await db.prelievi_vending.delete_one({"id": prelievo.id})
         raise
+    await _record_audit_event("CREATO", "PRELIEVO_VENDING", prelievo.id, dopo=response_doc, idempotency_key=key)
     return response_doc
 
 
@@ -4934,6 +4980,7 @@ async def del_prelievo_vending(m_id: str):
     await db.prelievi_vending.delete_one({"id": m_id})
     if prelievo:
         await _adjust_vending_cash_balance(float(prelievo.get("importo") or 0))
+        await _record_audit_event("ELIMINATO", "PRELIEVO_VENDING", m_id, prima=prelievo)
     return {"ok": True}
 
 
@@ -4967,12 +5014,16 @@ async def add_scontrino_vending(m: ScontrinoVendingIn):
         await db.scontrini_vending.insert_one(doc)
     except DuplicateKeyError:
         return await db.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
+    await _record_audit_event("CREATO", "SCONTRINO_VENDING", scontrino.id, dopo=response_doc, idempotency_key=key)
     return response_doc
 
 
 @api.delete("/scontrini-vending/{m_id}")
 async def del_scontrino_vending(m_id: str):
+    existing = await db.scontrini_vending.find_one({"id": m_id}, {"_id": 0})
     await db.scontrini_vending.delete_one({"id": m_id})
+    if existing:
+        await _record_audit_event("ELIMINATO", "SCONTRINO_VENDING", m_id, prima=existing)
     return {"ok": True}
 
 
@@ -5009,12 +5060,16 @@ async def add_cassa(m: MovimentoIn):
         await db.cassa.insert_one(doc)
     except DuplicateKeyError:
         return await db.cassa.find_one({"idempotency_key": key}, {"_id": 0})
+    await _record_audit_event("CREATO", "MOVIMENTO_CASSA", mm.id, dopo=response_doc, idempotency_key=key)
     return response_doc
 
 
 @api.delete("/cassa/{m_id}")
 async def del_cassa(m_id: str):
+    existing = await db.cassa.find_one({"id": m_id}, {"_id": 0})
     await db.cassa.delete_one({"id": m_id})
+    if existing:
+        await _record_audit_event("ELIMINATO", "MOVIMENTO_CASSA", m_id, prima=existing)
     return {"ok": True}
 
 
