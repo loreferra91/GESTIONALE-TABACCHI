@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ArrowClockwise, ArrowRight, CheckCircle, UploadSimple } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import Layout from "../components/Layout";
+import ReconciliationPanel from "../components/ReconciliationPanel";
 import { api, apiErrorMessage } from "../lib/api";
 import { Card, formatDashboardEur, formatSignedEur } from "../components/UI";
 
@@ -194,6 +195,7 @@ export default function Contabilita() {
           </div>
         ) : null}
       </Card>
+      <ReconciliationPanel />
       <section className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4" aria-label="Incassi vending per pagamento">
         <BalanceCard label="Saldo vending" value={balances.saldoVendingTotale} testId="saldo-vending-totale" />
         <BalanceCard

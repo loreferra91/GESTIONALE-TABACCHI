@@ -15,6 +15,14 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from decimal import Decimal
+
+if __package__:
+    from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
+    from .reconciliation import reconcile
+else:
+    from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
+    from reconciliation import reconcile
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -110,7 +118,7 @@ class Prodotto(BaseModel):
     codice: str
     descrizione: str
     categoria: str = "ACCESSORI"
-    prezzo: float = 0
+    prezzo: NonNegativeMoney = 0
     acquistati: int = 0
     venduti_negozio: int = 0
     venduti_vending: int = 0
@@ -124,7 +132,7 @@ class ProdottoIn(BaseModel):
     codice: str
     descrizione: str
     categoria: str = "ACCESSORI"
-    prezzo: float = 0
+    prezzo: NonNegativeMoney = 0
     acquistati: int = 0
     venduti_negozio: int = 0
     venduti_vending: int = 0
@@ -156,7 +164,7 @@ class SmartVenueProductIn(BaseModel):
     descrizione: str
     barcode: str = ""
     categoria: str = "ACCESSORI"
-    prezzo: float = 0
+    prezzo: NonNegativeMoney = 0
     acquistati: int = 0
     giacenza_negozio: int = 0
     giacenza_vending: int = 0
@@ -172,7 +180,7 @@ class ListinoItem(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     codice: str
     descrizione: str
-    prezzo: float = 0
+    prezzo: NonNegativeMoney = 0
     confezione: str = ""
 
 
@@ -202,7 +210,7 @@ class VenditaGiornaliera(BaseModel):
     codice: str
     descrizione: str = ""
     quantita: int = 1
-    importo: float = 0
+    importo: NonNegativeMoney = 0
     canale: str = "NEGOZIO"  # NEGOZIO / VENDING
     pagamento: str = "CONTANTI"
     colonna: Optional[str] = None
@@ -217,7 +225,7 @@ class VenditaIn(BaseModel):
     codice: str
     descrizione: Optional[str] = ""
     quantita: int = Field(default=1, gt=0)
-    importo: float = Field(default=0, ge=0)
+    importo: NonNegativeMoney = Field(default=0, ge=0)
     canale: str = "NEGOZIO"
     pagamento: str = "CONTANTI"
     colonna: Optional[str] = None
@@ -235,7 +243,7 @@ class OrdineStorico(BaseModel):
     codice: str
     descrizione: str = ""
     quantita: int
-    prezzo: float = 0
+    prezzo: NonNegativeMoney = 0
     batch_id: Optional[str] = None
     smart_venue_applicabile: bool = False
     caricato_smart_venue: Optional[bool] = None
@@ -250,7 +258,7 @@ class OrdineIn(BaseModel):
     codice: str
     descrizione: Optional[str] = ""
     quantita: int
-    prezzo: float = 0
+    prezzo: NonNegativeMoney = 0
     file_sorgente: Optional[str] = "manuale"
 
 
@@ -278,7 +286,7 @@ class MovimentoCassa(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     data: str
     tipo: str  # ENTRATA / USCITA / SALDO_INIZIALE
-    importo: float
+    importo: Money
     descrizione: str = ""
     operatore: str = ""
 
@@ -286,7 +294,7 @@ class MovimentoCassa(BaseModel):
 class MovimentoIn(BaseModel):
     data: str
     tipo: str
-    importo: float
+    importo: Money
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
 
@@ -295,14 +303,14 @@ class Versamento(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     data: str
-    importo: float
+    importo: NonNegativeMoney
     descrizione: str = ""
     operatore: str = ""
 
 
 class VersamentoIn(BaseModel):
     data: str
-    importo: float
+    importo: NonNegativeMoney
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
 
@@ -311,14 +319,14 @@ class PrelievoVending(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     data: str
-    importo: float
+    importo: NonNegativeMoney
     descrizione: str = ""
     operatore: str = ""
 
 
 class PrelievoVendingIn(BaseModel):
     data: str
-    importo: float
+    importo: NonNegativeMoney
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
 
@@ -327,14 +335,14 @@ class ScontrinoVending(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     data: str
-    importo: float
+    importo: NonNegativeMoney
     descrizione: str = ""
     operatore: str = ""
 
 
 class ScontrinoVendingIn(BaseModel):
     data: str
-    importo: float
+    importo: NonNegativeMoney
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
 
@@ -1084,8 +1092,8 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
 
         if current_value != body.venduti_negozio:
             delta_quantita = body.venduti_negozio - current_value
-            prezzo_unitario = round(float(product.get("prezzo", 0) or 0), 2)
-            importo_contabile = round(delta_quantita * prezzo_unitario, 2)
+            prezzo_unitario = money(product.get("prezzo", 0) or 0)
+            importo_contabile = money_product(prezzo_unitario, delta_quantita)
             # Increasing shop sales consumes physical shop stock; decreasing them restores it.
             giacenza_precedente = int(product.get("giacenza_negozio", 0) or 0)
             nuova_giacenza = giacenza_precedente - delta_quantita
@@ -1587,7 +1595,7 @@ async def bulk_vendite(body: BulkVenditaIn):
                 skipped += 1
                 continue
             qta = int(float(r.get("quantita") or 0))
-            imp = float(r.get("importo") or 0)
+            imp = nonnegative_money(r.get("importo", 0))
             if qta <= 0:
                 raise ValueError("quantità non valida")
             if imp < 0:
@@ -2414,7 +2422,7 @@ def _parse_csv_vending(raw: str, pagamento: str = "CONTANTI") -> Dict[str, Any]:
             if not codice and not nome:
                 skipped += 1
                 continue
-            prezzo_f = float(str(prezzo).replace(",", ".")) if prezzo not in (None, "") else 0.0
+            prezzo_f = nonnegative_money(prezzo) if prezzo not in (None, "") else 0.0
             data_iso = _csv_vending_datetime(data)
             rows.append({
                 "riga": i + 2,
@@ -2422,6 +2430,9 @@ def _parse_csv_vending(raw: str, pagamento: str = "CONTANTI") -> Dict[str, Any]:
                 "codice": codice,
                 "nome": nome,
                 "prezzo": prezzo_f,
+                # Freeze the pre-hardening fingerprint: rounding money must not
+                # turn a previously imported fractional-cent row into a new sale.
+                "_identity_price": f"{float(str(prezzo or 0).replace(',', '.')):.2f}",
                 "colonna": colonna,
                 "categoria": categoria,
                 "pagamento": pag,
@@ -2439,19 +2450,12 @@ def _summarize_vending_csv(parsed: Dict[str, Any]) -> Dict[str, Any]:
     for row in parsed.get("righe", []):
         bucket = _vending_payment_bucket(row.get("pagamento"))
         payment_counts[bucket] = payment_counts.get(bucket, 0) + 1
-        payment_amounts[bucket] = round(
-            payment_amounts.get(bucket, 0) + float(row.get("prezzo") or 0), 2
-        )
+        payment_amounts[bucket] = money_sum([payment_amounts.get(bucket, 0), row.get("prezzo") or 0])
         parsed_date = _parse_sale_datetime(row.get("data"))
         if parsed_date:
             dates.append(parsed_date)
-    electronic = round(
-        payment_amounts.get("CARTE", 0)
-        + payment_amounts.get("PAGOBANCOMAT", 0)
-        + payment_amounts.get("ALTRO_ELETTRONICO", 0),
-        2,
-    )
-    total = round(sum(payment_amounts.values()), 2)
+    electronic = money_sum(payment_amounts.get(bucket, 0) for bucket in ("CARTE", "PAGOBANCOMAT", "ALTRO_ELETTRONICO"))
+    total = money_sum(payment_amounts.values())
     return {
         "righe": len(parsed.get("righe", [])),
         "saltati": int(parsed.get("saltati", 0)),
@@ -2522,7 +2526,7 @@ def _csv_vending_event_base(row: Dict[str, Any]) -> str:
         "data": str(row.get("data") or ""),
         "colonna": _normalize_vending_column(row.get("colonna")),
         "codice": _product_code_text(row.get("codice")),
-        "prezzo": f"{float(row.get('prezzo') or 0):.2f}",
+        "prezzo": row.get("_identity_price", f"{float(row.get('prezzo') or 0):.2f}"),
         "pagamento": str(row.get("pagamento") or "").strip().upper(),
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2570,7 +2574,7 @@ def _csv_vending_compatibility_key(row: Dict[str, Any]) -> str:
         "minuto": minute,
         "colonna": _normalize_vending_column(row.get("colonna")),
         "prodotto": identity,
-        "prezzo": f"{float(row.get('prezzo', row.get('importo', 0)) or 0):.2f}",
+        "prezzo": row.get("_identity_price", f"{float(row.get('prezzo', row.get('importo', 0)) or 0):.2f}"),
         "pagamento": _vending_payment_bucket(row.get("pagamento")),
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2862,7 +2866,7 @@ async def _ensure_vending_accounting_state() -> Dict[str, Any]:
                     "csv_accounting_occurrence": sale.get("csv_accounting_occurrence"),
                     "csv_accounting_key": sale["csv_accounting_key"],
                     "data": sale.get("data"),
-                    "importo": round(float(sale.get("importo") or 0), 2),
+                    "importo": money(sale.get("importo") or 0),
                     "pagamento": _vending_payment_bucket(sale.get("pagamento")),
                     "source_batch_id": sale.get("batch_id"),
                     "first_seen_at": sale.get("created_at") or state.get("created_at"),
@@ -2901,30 +2905,23 @@ async def _vending_accounting_ledger_summary() -> Optional[Dict[str, Any]]:
     )
     if not state:
         return None
-    event_groups = await event_collection.aggregate([
-        {"$group": {
-            "_id": "$pagamento",
-            "totale": {"$sum": "$importo"},
-            "righe": {"$sum": 1},
-            "data_da": {"$min": "$data"},
-            "data_a": {"$max": "$data"},
-        }},
-    ]).to_list(None)
     amounts = {
-        str(bucket): round(float(amount or 0), 2)
+        str(bucket): money_decimal(amount or 0)
         for bucket, amount in (state.get("baseline_importi_pagamenti") or {}).items()
     }
     dates = [value for value in [state.get("baseline_data_da"), state.get("baseline_data_a")] if value]
     event_count = 0
-    for group in event_groups:
-        bucket = _vending_payment_bucket(group.get("_id"))
-        amounts[bucket] = round(amounts.get(bucket, 0) + float(group.get("totale") or 0), 2)
-        event_count += int(group.get("righe") or 0)
-        dates.extend(value for value in [group.get("data_da"), group.get("data_a")] if value)
-    cash = round(amounts.get("CONTANTI", 0), 2)
-    electronic = round(sum(
+    async for event in event_collection.find({}, {"_id": 0, "pagamento": 1, "importo": 1, "data": 1}):
+        bucket = _vending_payment_bucket(event.get("pagamento"))
+        amounts[bucket] = amounts.get(bucket, Decimal(0)) + money_decimal(event.get("importo") or 0)
+        event_count += 1
+        if event.get("data"):
+            dates.append(event["data"])
+    amounts = {bucket: money(amount) for bucket, amount in amounts.items()}
+    cash = money(amounts.get("CONTANTI", 0))
+    electronic = money_sum(
         value for bucket, value in amounts.items() if bucket != "CONTANTI"
-    ), 2)
+    )
     return {
         "id": VENDING_ACCOUNTING_STATE_ID,
         "status": "active",
@@ -2935,7 +2932,7 @@ async def _vending_accounting_ledger_summary() -> Optional[Dict[str, Any]]:
         "importi_pagamenti": amounts,
         "totale_contanti": cash,
         "totale_elettronici": electronic,
-        "totale": round(cash + electronic, 2),
+        "totale": money_sum([cash, electronic]),
         "data_da": min(dates, default=None),
         "data_a": max(dates, default=None),
         "last_file_rows": int(state.get("last_file_rows") or 0),
@@ -3014,7 +3011,7 @@ async def _store_vending_accounting_snapshot(
                 "csv_accounting_occurrence": row["csv_accounting_occurrence"],
                 "csv_accounting_key": row["csv_accounting_key"],
                 "data": row.get("data"),
-                "importo": round(float(row.get("prezzo") or 0), 2),
+                "importo": money(row.get("prezzo") or 0),
                 "pagamento": _vending_payment_bucket(row.get("pagamento")),
                 "source_batch_id": source_batch_id,
                 "first_seen_at": created_at,
@@ -3074,6 +3071,11 @@ async def vending_accounting_source():
     return _public_vending_accounting_snapshot(snapshot) if snapshot else None
 
 
+@api.get("/contabilita/riconciliazione")
+async def accounting_reconciliation():
+    return await reconcile(db, _vending_payment_bucket)
+
+
 VENDING_CASH_STATE_ID = "saldo"
 
 
@@ -3084,12 +3086,12 @@ async def _vending_cash_balance(session=None) -> float:
         {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
     )
     if state:
-        return round(float(state.get("giacenza") or 0), 2)
+        return money(state.get("giacenza") or 0)
 
     legacy_docs = await db.prelievi_vending.find(
         {}, {"_id": 0, "importo": 1}, **kwargs
-    ).to_list(10000)
-    legacy_balance = round(sum(float(doc.get("importo") or 0) for doc in legacy_docs), 2)
+    ).to_list(None)
+    legacy_balance = money_sum(doc.get("importo") or 0 for doc in legacy_docs)
     now = datetime.now(timezone.utc).isoformat()
     await db.cassa_vending_stato.update_one(
         {"id": VENDING_CASH_STATE_ID},
@@ -3105,21 +3107,26 @@ async def _vending_cash_balance(session=None) -> float:
     state = await db.cassa_vending_stato.find_one(
         {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
     )
-    return round(float((state or {}).get("giacenza") or 0), 2)
+    return money((state or {}).get("giacenza") or 0)
 
 
 async def _adjust_vending_cash_balance(amount: float, session=None) -> float:
     kwargs = _session_kwargs(session)
+    delta = money_decimal(amount)
     await _vending_cash_balance(session)
-    await db.cassa_vending_stato.update_one(
-        {"id": VENDING_CASH_STATE_ID},
-        {
-            "$inc": {"giacenza": round(float(amount or 0), 2)},
-            "$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
-        },
-        **kwargs,
-    )
-    return await _vending_cash_balance(session)
+    # Compare-and-set preserves concurrent increments without binary $inc drift.
+    for _ in range(20):
+        state = await db.cassa_vending_stato.find_one({"id": VENDING_CASH_STATE_ID}, **kwargs)
+        previous = state.get("giacenza")
+        updated = money(money_decimal(previous or 0) + delta)
+        result = await db.cassa_vending_stato.update_one(
+            {"id": VENDING_CASH_STATE_ID, "giacenza": previous},
+            {"$set": {"giacenza": updated, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            **kwargs,
+        )
+        if result.matched_count:
+            return updated
+    raise HTTPException(409, "Cassa vending modificata contemporaneamente: riprovare")
 
 
 @api.post("/vendite/preview-csv-vending")
@@ -3135,8 +3142,8 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
     for row in parsed["righe"]:
         method = row["pagamento"]
         payment_counts[method] = payment_counts.get(method, 0) + 1
-        payment_amounts[method] = round(payment_amounts.get(method, 0) + row["prezzo"], 2)
-        total += row["prezzo"]
+        payment_amounts[method] = money_sum([payment_amounts.get(method, 0), row["prezzo"]])
+        total = money_sum([total, row["prezzo"]])
     dates = [row["data"][:10] for row in parsed["righe"]]
     return {
         "righe": len(parsed["righe"]),
@@ -3212,7 +3219,7 @@ async def _rollback_csv_import_sales(batch_id: str, session=None) -> Dict[str, A
         if codice:
             touched_codes.add(codice)
         if _is_cash_payment(sale.get("pagamento")):
-            cash_total += float(sale.get("importo") or 0)
+            cash_total = money_sum([cash_total, sale.get("importo") or 0])
         deletion = await db.vendite.delete_one(
             {"id": sale.get("id"), "batch_id": batch_id}, **kwargs
         )
@@ -3337,9 +3344,9 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             await db.vendite.insert_one(sale_doc)
             inserted += 1
             payment_counts[pag] = payment_counts.get(pag, 0) + 1
-            payment_amounts[pag] = round(payment_amounts.get(pag, 0) + prezzo_f, 2)
+            payment_amounts[pag] = money_sum([payment_amounts.get(pag, 0), prezzo_f])
             if _is_cash_payment(pag):
-                imported_cash += prezzo_f
+                imported_cash = money_sum([imported_cash, prezzo_f])
         except Exception as exc:
             if undo_meta.get("product_stock_adjusted"):
                 await db.prodotti.update_one(
@@ -4578,7 +4585,7 @@ async def bulk_carico(body: BulkOrdineIn, request: Request = None):
                 raise ValueError("codice mancante")
             if qta <= 0:
                 raise ValueError("la quantità deve essere maggiore di zero")
-            prezzo = float(r.get("prezzo") or 0)
+            prezzo = nonnegative_money(r.get("prezzo", 0))
             if prezzo < 0:
                 raise ValueError("il prezzo non può essere negativo")
             desc = str(r.get("descrizione") or "")
@@ -4725,12 +4732,18 @@ async def bulk_carico(body: BulkOrdineIn, request: Request = None):
 
 
 # ------------------------- Versamenti / Prelievi vending / Cassa -------------------------
+async def _collection_money_total(collection) -> float:
+    total = Decimal(0)
+    async for document in collection.find({}, {"_id": 0, "importo": 1}):
+        total += money_decimal(document.get("importo") or 0)
+    return money(total)
+
+
 async def _versamenti_summary(limit: int = 500) -> Dict[str, Any]:
     capped_limit = _cap(limit)
     docs = await db.versamenti.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    all_docs = await db.versamenti.find({}, {"_id": 0}).to_list(10000)
-    totale = sum(float(d.get("importo") or 0) for d in all_docs)
-    return {"movimenti": docs, "totale": round(totale, 2)}
+    totale = await _collection_money_total(db.versamenti)
+    return {"movimenti": docs, "totale": totale}
 
 
 @api.get("/versamenti")
@@ -4756,9 +4769,8 @@ async def del_versamento(m_id: str):
 async def _prelievi_vending_summary(limit: int = 500) -> Dict[str, Any]:
     capped_limit = _cap(limit)
     docs = await db.prelievi_vending.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    all_docs = await db.prelievi_vending.find({}, {"_id": 0}).to_list(10000)
-    totale = sum(float(d.get("importo") or 0) for d in all_docs)
-    return {"movimenti": docs, "totale": round(totale, 2)}
+    totale = await _collection_money_total(db.prelievi_vending)
+    return {"movimenti": docs, "totale": totale}
 
 
 @api.get("/prelievi-vending")
@@ -4790,9 +4802,8 @@ async def del_prelievo_vending(m_id: str):
 async def _scontrini_vending_summary(limit: int = 500) -> Dict[str, Any]:
     capped_limit = _cap(limit)
     docs = await db.scontrini_vending.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    all_docs = await db.scontrini_vending.find({}, {"_id": 0}).to_list(10000)
-    totale = sum(float(d.get("importo") or 0) for d in all_docs)
-    return {"movimenti": docs, "totale": round(totale, 2)}
+    totale = await _collection_money_total(db.scontrini_vending)
+    return {"movimenti": docs, "totale": totale}
 
 
 @api.get("/scontrini-vending")
@@ -4819,18 +4830,21 @@ async def del_scontrino_vending(m_id: str):
 async def list_cassa(limit: int = 500):
     capped_limit = _cap(limit)
     docs = await db.cassa.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    saldo = 0.0
-    all_docs = await db.cassa.find({}, {"_id": 0}).to_list(10000)
-    for d in all_docs:
+    saldo = Decimal(0)
+    async for d in db.cassa.find({}, {"_id": 0, "tipo": 1, "importo": 1}):
         if d["tipo"] in ("ENTRATA", "SALDO_INIZIALE"):
-            saldo += d["importo"]
+            saldo += money_decimal(d["importo"])
         else:
-            saldo -= d["importo"]
-    return {"movimenti": docs, "saldo": round(saldo, 2)}
+            saldo -= money_decimal(d["importo"])
+    return {"movimenti": docs, "saldo": money(saldo)}
 
 
 @api.post("/cassa")
 async def add_cassa(m: MovimentoIn):
+    if m.tipo not in {"ENTRATA", "USCITA", "SALDO_INIZIALE"}:
+        raise HTTPException(422, "Tipo movimento cassa non valido")
+    if m.tipo != "SALDO_INIZIALE" and m.importo <= 0:
+        raise HTTPException(422, "Entrate e uscite richiedono un importo positivo")
     mm = MovimentoCassa(**m.model_dump())
     await db.cassa.insert_one(mm.model_dump())
     return mm.model_dump()
@@ -4886,7 +4900,10 @@ PARAM_BOUNDS = {
 
 @api.put("/parametri/{nome}")
 async def update_parametro(nome: str, body: ParametroIn):
-    value = round(float(body.valore), 2) if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING" else body.valore
+    try:
+        value = nonnegative_money(body.valore) if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING" else body.valore
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     bounds = PARAM_BOUNDS.get(nome)
     if bounds is not None:
         lo, hi, msg = bounds
@@ -4900,7 +4917,7 @@ async def update_parametro(nome: str, body: ParametroIn):
     if r.matched_count == 0:
         await db.parametri.insert_one(Parametro(nome=nome, valore=value).model_dump())
     if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING":
-        delta = round(float(value) - previous_value, 2)
+        delta = money_sum([value, -previous_value])
         if delta:
             await _adjust_vending_cash_balance(delta)
     doc = await db.parametri.find_one({"nome": nome}, {"_id": 0})
@@ -5093,7 +5110,7 @@ async def auto_order():
             "lotto_ordine": lotto,
             "motivo": motivo,
             "prezzo": p.get("prezzo", 0),
-            "totale": round(qta * (p.get("prezzo") or 0), 2),
+            "totale": money_product(p.get("prezzo") or 0, qta),
         }
         if stato == "ORDINA ORA" and not anomalia and qta > 0:
             proposte.append(row)
@@ -5103,7 +5120,7 @@ async def auto_order():
     proposte.sort(key=lambda x: (-x["totale"], x["codice"]))
     ordine_stati = {"ANOMALIA": 0, "CONTROLLO MANUALE": 1, "MONITORA": 2, "NESSUN ORDINE": 3}
     esclusi.sort(key=lambda x: (ordine_stati.get(x["stato"], 9), x["descrizione"], x["codice"]))
-    tot = round(sum(x["totale"] for x in proposte), 2)
+    tot = money_sum(x["totale"] for x in proposte)
     riepilogo_stati = {"ORDINA ORA": len(proposte)}
     for row in esclusi:
         riepilogo_stati[row["stato"]] = riepilogo_stati.get(row["stato"], 0) + 1
@@ -5162,7 +5179,7 @@ def _auto_order_selected_rows(
             **row,
             "stato": "ORDINA ORA",
             "qta_da_ordinare": quantity,
-            "totale": round(quantity * float(row.get("prezzo") or 0), 2),
+            "totale": money_product(row.get("prezzo") or 0, quantity),
         })
     return selected
 
@@ -5214,7 +5231,7 @@ async def conferma_auto_order(
         "stato": "CREATO",
         "origine": "AUTO-ORDER",
         "ordinati": len(righe),
-        "totale": round(sum(r.get("totale", 0) or 0 for r in righe), 2),
+        "totale": money_sum(r.get("totale", 0) or 0 for r in righe),
         "data_riferimento_domanda": ao.get("data_riferimento_domanda"),
     }
     inserted_ids = []
@@ -5237,8 +5254,8 @@ async def conferma_auto_order(
                 "descrizione": r.get("descrizione", ""),
                 "categoria": r.get("categoria", ""),
                 "quantita": int(r["qta_da_ordinare"]),
-                "prezzo": float(r.get("prezzo") or 0),
-                "totale": round(float(r.get("totale") or 0), 2),
+                "prezzo": money(r.get("prezzo") or 0),
+                "totale": money(r.get("totale") or 0),
                 "motivo": r.get("motivo", ""),
             }
             await db.ordini_fornitore_righe.insert_one(doc)
@@ -5278,7 +5295,7 @@ async def auto_order_pdf(
     righe = _auto_order_rows_from_query(ao, selezione)
     if categoria_filtro:
         righe = [r for r in righe if r.get("categoria") == categoria_filtro]
-    totale = round(sum(r.get("totale", 0) or 0 for r in righe), 2)
+    totale = money_sum(r.get("totale", 0) or 0 for r in righe)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
@@ -5380,7 +5397,7 @@ async def auto_order_excel(
     righe = _auto_order_rows_from_query(ao, selezione)
     if categoria_filtro:
         righe = [r for r in righe if r.get("categoria") == categoria_filtro]
-    totale = round(sum(float(r.get("totale", 0) or 0) for r in righe), 2)
+    totale = money_sum(r.get("totale", 0) or 0 for r in righe)
 
     def excel_text(value: Any) -> str:
         """Mantiene i campi testuali come testo anche con prefissi da formula."""
@@ -5494,7 +5511,7 @@ async def pivot():
     _apply_vending_stock(prods, vending_totals)
     divisor = params.get("VENDITE_GIORNALIERE_MESE", 6.5)
     aggio = params.get("AGGIO_PCT", 0.10)
-    cost_factor = max(0.0, 1.0 - aggio)  # costo acquisto = prezzo * cost_factor
+    cost_factor = max(Decimal(0), Decimal(1) - Decimal(str(aggio)))
     rows = []
     tot_acq = tot_vend = tot_giac = pezzi_mag = 0
     fermi = negativi = da_riord = lenti = 0
@@ -5505,12 +5522,13 @@ async def pivot():
         g_neg = p.get("giacenza_negozio", 0) or 0
         g_ven = p.get("giacenza_vending", 0) or 0
         g_tot = g_neg + g_ven
-        prz = p.get("prezzo", 0) or 0
+        prz = money_decimal(p.get("prezzo", 0) or 0)
         prz_costo = prz * cost_factor
         acq = p.get("acquistati", 0) or 0
-        ta = acq * prz_costo       # valore acquistato al COSTO (netto aggio)
-        tv = v_tot * prz           # ricavo vendita al PREZZO retail
-        tg = g_tot * prz_costo     # valore giacenza al COSTO (netto aggio)
+        # Round each line, not the discounted unit cost; totals equal displayed lines.
+        ta = money_decimal(acq * prz_costo)
+        tv = money_decimal(v_tot * prz)
+        tg = money_decimal(g_tot * prz_costo)
         vend_mese = v_tot / max(1, divisor) if divisor else 0
         mesi_smalt = round(g_tot / vend_mese, 2) if vend_mese > 0 else 0
         stato = "OK"
@@ -5539,17 +5557,17 @@ async def pivot():
             "categoria": p.get("categoria", ""),
             "acq": acq, "vend_negozio": v_neg, "vend_vending": v_ven, "vend_totale": v_tot,
             "giac_negozio": g_neg, "giac_vending": g_ven, "giac_totale": g_tot,
-            "prezzo": prz, "tot_acquistato": round(ta, 2), "tot_venduto": round(tv, 2), "tot_giacenza": round(tg, 2),
+            "prezzo": money(prz), "tot_acquistato": money(ta), "tot_venduto": money(tv), "tot_giacenza": money(tg),
             "vendite_mese": round(vend_mese, 2), "mesi_smaltimento": mesi_smalt,
             "stato": stato, "azione": azione,
         })
     rows.sort(key=lambda x: -x["tot_giacenza"])
     return {
         "kpi": {
-            "valore_acquistato": round(tot_acq, 2),
-            "valore_venduto": round(tot_vend, 2),
-            "valore_giacenza": round(tot_giac, 2),
-            "margine_lordo": round(tot_vend - tot_acq, 2),
+            "valore_acquistato": money(tot_acq),
+            "valore_venduto": money(tot_vend),
+            "valore_giacenza": money(tot_giac),
+            "margine_lordo": money(tot_vend - tot_acq),
             "aggio_pct": round(aggio, 4),
             "pezzi_magazzino": pezzi_mag,
             "prodotti_totali": len(rows),
@@ -5649,7 +5667,7 @@ def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -
             pagamento = document.get("pagamento")
 
         try:
-            amount = float(str(importo or 0).strip().replace(",", "."))
+            amount = money(importo or 0)
         except (TypeError, ValueError):
             continue
         values.append((amount, str(pagamento or "").strip()))
@@ -5684,11 +5702,9 @@ def _calculate_dashboard_balances(
     Il prelievo contabile netto e il saldo combinato sottraggono invece gli
     scontrini vending dal totale lordo prelevato.
     """
-    cash = 0.0
-    cards = 0.0
-    pagobancomat = 0.0
-    other_electronic = 0.0
+    cash = cards = pagobancomat = other_electronic = Decimal(0)
     for amount, payment_method in vending_payments:
+        amount = money_decimal(amount)
         bucket = _vending_payment_bucket(payment_method)
         if bucket == "CONTANTI":
             cash += amount
@@ -5699,20 +5715,16 @@ def _calculate_dashboard_balances(
         else:
             other_electronic += amount
 
-    cash = round(cash, 2)
-    cards = round(cards, 2)
-    pagobancomat = round(pagobancomat, 2)
-    other_electronic = round(other_electronic, 2)
-    electronic = round(cards + pagobancomat + other_electronic, 2)
-    electronic = round(electronic, 2)
-    total = round(cash + electronic, 2)
-    saldo_cassa = round(float(saldo_cassa or 0), 2)
-    prelievo_vending_lordo = round(float(totale_prelievi_vending or 0), 2)
-    totale_scontrini = round(float(totale_scontrini or 0), 2)
-    prelievo_vending = round(prelievo_vending_lordo - totale_scontrini, 2)
-    giacenza_iniziale_vending = round(float(giacenza_iniziale_vending or 0), 2)
-    giacenza_vending = round(giacenza_iniziale_vending + cash - prelievo_vending_lordo, 2)
-    saldo_casse = round(prelievo_vending + saldo_cassa, 2)
+    cash, cards, pagobancomat, other_electronic = map(money, (cash, cards, pagobancomat, other_electronic))
+    electronic = money_sum([cards, pagobancomat, other_electronic])
+    total = money_sum([cash, electronic])
+    saldo_cassa = money(saldo_cassa or 0)
+    prelievo_vending_lordo = money(totale_prelievi_vending or 0)
+    totale_scontrini = money(totale_scontrini or 0)
+    prelievo_vending = money_sum([prelievo_vending_lordo, -totale_scontrini])
+    giacenza_iniziale_vending = money(giacenza_iniziale_vending or 0)
+    giacenza_vending = money_sum([giacenza_iniziale_vending, cash, -prelievo_vending_lordo])
+    saldo_casse = money_sum([prelievo_vending, saldo_cassa])
     return {
         "saldoVendingTotale": total,
         "venditeVendingContanti": cash,
@@ -5845,7 +5857,7 @@ async def _supplemental_store_cash_sales(
     documents = await db.vendite.find(
         {}, {"_id": 0, "data": 1, "created_at": 1, "canale": 1, "pagamento": 1, "importo": 1}
     ).to_list(None)
-    total = 0.0
+    total = Decimal(0)
     for document in documents:
         channel = str(document.get("canale") or "NEGOZIO").strip().upper()
         if channel == "VENDING" or not _is_cash_payment(document.get("pagamento")):
@@ -5853,10 +5865,10 @@ async def _supplemental_store_cash_sales(
         if not _is_sale_after_excel_import(document, cutoff, latest_import_created_at):
             continue
         try:
-            total += float(document.get("importo") or 0)
+            total += money_decimal(document.get("importo") or 0)
         except (TypeError, ValueError):
             continue
-    return round(total, 2)
+    return money(total)
 
 
 async def _shop_sold_accounting_corrections(latest_import_created_at: Any = None) -> float:
@@ -5871,16 +5883,16 @@ async def _shop_sold_accounting_corrections(latest_import_created_at: Any = None
         {"campo": "venduti_negozio"},
         {"_id": 0, "created_at": 1, "importo_contabile": 1},
     ).to_list(None)
-    total = 0.0
+    total = Decimal(0)
     for document in documents:
         created_at = _parse_utc_datetime(document.get("created_at"))
         if cutoff and (not created_at or created_at <= cutoff):
             continue
         try:
-            total += float(document.get("importo_contabile") or 0)
+            total += money_decimal(document.get("importo_contabile") or 0)
         except (TypeError, ValueError):
             continue
-    return round(total, 2)
+    return money(total)
 
 
 async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
@@ -5892,13 +5904,13 @@ async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
         db.db_storico_vend.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
     )
 
-    totals_by_date: Dict[Any, float] = {}
+    totals_by_date: Dict[Any, Decimal] = {}
     for sale in [*imported_sales, *app_sales]:
         parsed_day = _parse_sale_date(sale.get("data"))
         if parsed_day is None:
             continue
         try:
-            amount = float(sale.get("importo") or 0)
+            amount = money_decimal(sale.get("importo") or 0)
         except (TypeError, ValueError):
             continue
         totals_by_date[parsed_day] = totals_by_date.get(parsed_day, 0) + amount
@@ -5918,9 +5930,9 @@ async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
     series = []
     for offset in range(days):
         current_date = start_date + timedelta(days=offset)
-        series.append({"data": current_date.isoformat(), "importo": round(totals_by_date.get(current_date, 0), 2)})
+        series.append({"data": current_date.isoformat(), "importo": money(totals_by_date.get(current_date, 0))})
 
-    latest_total = round(totals_by_date.get(end_date, 0), 2)
+    latest_total = money(totals_by_date.get(end_date, 0))
     previous_values = [point["importo"] for point in series[:-1]]
     previous_average = sum(previous_values) / len(previous_values) if previous_values else 0
     variation = round(((latest_total - previous_average) / previous_average) * 100, 1) if previous_average else None
@@ -5928,7 +5940,7 @@ async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
         "ultimo_giorno": end_date.isoformat(),
         "totale_ultimo_giorno": latest_total,
         "variazione_pct": variation,
-        "totale_periodo": round(sum(point["importo"] for point in series), 2),
+        "totale_periodo": money_sum(point["importo"] for point in series),
         "serie": series,
     }
 
@@ -5942,22 +5954,21 @@ async def dashboard():
     )
     ultima_vendita_importata = _latest_sale_date(date_vendite_importate)
     import_totali = (ultimo_import_contabile or {}).get("totali", {})
-    venduto_negozio_excel = float(import_totali.get("valore_venduto_negozio_excel") or 0)
-    venduto_vending_excel = float(import_totali.get("valore_venduto_vending_excel") or 0)
-    venduto_totale_excel = float(import_totali.get("valore_venduto_totale_excel") or 0)
+    venduto_negozio_excel = money(import_totali.get("valore_venduto_negozio_excel") or 0)
+    venduto_vending_excel = money(import_totali.get("valore_venduto_vending_excel") or 0)
+    venduto_totale_excel = money(import_totali.get("valore_venduto_totale_excel") or 0)
     if venduto_totale_excel:
         pv["kpi"]["valore_venduto"] = round(venduto_totale_excel, 2)
         pv["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
         pv["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
         pv["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
-        pv["kpi"]["margine_lordo"] = round(venduto_totale_excel - (pv["kpi"].get("valore_acquistato") or 0), 2)
+        pv["kpi"]["margine_lordo"] = money_sum([venduto_totale_excel, -(pv["kpi"].get("valore_acquistato") or 0)])
     # vendite oggi
     oggi = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    vendite_oggi = await db.vendite.aggregate([
-        {"$match": {"data": {"$regex": f"^{oggi}"}}},
-        {"$group": {"_id": None, "tot": {"$sum": "$importo"}, "pezzi": {"$sum": "$quantita"}}}
-    ]).to_list(1)
-    v_oggi = vendite_oggi[0] if vendite_oggi else {"tot": 0, "pezzi": 0}
+    v_oggi = {"tot": Decimal(0), "pezzi": 0}
+    async for sale in db.vendite.find({"data": {"$regex": f"^{oggi}"}}, {"importo": 1, "quantita": 1}):
+        v_oggi["tot"] += money_decimal(sale.get("importo") or 0)
+        v_oggi["pezzi"] += sale.get("quantita") or 0
     versamenti, prelievi, scontrini, giacenza_iniziale_doc, venduto_negozio_app_contanti, rettifiche_venduto_negozio = await asyncio.gather(
         _versamenti_summary(),
         _prelievi_vending_summary(),
@@ -5974,12 +5985,11 @@ async def dashboard():
             (ultimo_import_contabile or {}).get("created_at"),
         ),
     )
-    giacenza_iniziale_vending = round(float((giacenza_iniziale_doc or {}).get("valore") or 0), 2)
-    venduto_negozio_contabilizzato = round(
-        venduto_negozio_excel + venduto_negozio_app_contanti + rettifiche_venduto_negozio,
-        2,
-    )
-    liquidita_residua = round(venduto_negozio_contabilizzato - versamenti["totale"], 2)
+    giacenza_iniziale_vending = money((giacenza_iniziale_doc or {}).get("valore") or 0)
+    venduto_negozio_contabilizzato = money_sum([
+        venduto_negozio_excel, venduto_negozio_app_contanti, rettifiche_venduto_negozio,
+    ])
+    liquidita_residua = money_sum([venduto_negozio_contabilizzato, -versamenti["totale"]])
     saldi, andamento_vendite = await asyncio.gather(
         _dashboard_balances(
             liquidita_residua,
@@ -5995,7 +6005,7 @@ async def dashboard():
     vend_da_caricare = sum(1 for v in vending if (v.get("proposta") or 0) > 0)
     return {
         "kpi": pv["kpi"],
-        "vendite_oggi": {"importo": round(v_oggi.get("tot") or 0, 2), "pezzi": v_oggi.get("pezzi") or 0},
+        "vendite_oggi": {"importo": money(v_oggi.get("tot") or 0), "pezzi": v_oggi.get("pezzi") or 0},
         "totale_versamenti": versamenti["totale"],
         "totale_prelievi": prelievi["totale"],
         "totale_scontrini_vending": scontrini["totale"],
@@ -6036,7 +6046,7 @@ async def import_excel(file: UploadFile = File(...)):
                 "descrizione": str(desc).strip(),
                 "acquistati": int(row[2] or 0),
                 "venduti_negozio": int(row[3] or 0),
-                "prezzo": float(row[7] or 0),
+                "prezzo": nonnegative_money(row[7] or 0),
                 "giacenza_vending": int(row[13] or 0),
                 "venduti_vending": int(row[17] or 0),
             }
@@ -6137,8 +6147,8 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
     alias_mappings: Dict[str, str] = {}
     products_by_code: Dict[str, Dict[str, Any]] = {}
     canonical_rows = set()
-    valore_venduto_negozio_excel = 0.0
-    valore_venduto_vending_excel = 0.0
+    valore_venduto_negozio_excel = Decimal(0)
+    valore_venduto_vending_excel = Decimal(0)
     err = 0
     for row in ws.iter_rows(min_row=3, values_only=True):
         try:
@@ -6151,11 +6161,11 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
             if codice_s != raw_code:
                 alias_codes.add(raw_code)
                 alias_mappings[raw_code] = codice_s
-            prezzo = float(row[7] or 0)
+            prezzo = nonnegative_money(row[7] or 0)
             venduti_negozio = int(row[3] or 0)
             venduti_vending = int(row[17] or 0)
-            valore_venduto_negozio_excel += venduti_negozio * prezzo
-            valore_venduto_vending_excel += venduti_vending * prezzo
+            valore_venduto_negozio_excel += venduti_negozio * money_decimal(prezzo)
+            valore_venduto_vending_excel += venduti_vending * money_decimal(prezzo)
             codici_importati.add(codice_s)
             row_data = {
                 "codice": codice_s,
@@ -6200,12 +6210,9 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
     result["elettroniche"] = await _apply_electronic_inhalation_categories()
     result["alias_unificati"] = len(alias_codes)
     result["ultimo_import_id"] = import_id
-    result["valore_venduto_negozio_excel"] = round(valore_venduto_negozio_excel, 2)
-    result["valore_venduto_vending_excel"] = round(valore_venduto_vending_excel, 2)
-    result["valore_venduto_totale_excel"] = round(
-        valore_venduto_negozio_excel + valore_venduto_vending_excel,
-        2,
-    )
+    result["valore_venduto_negozio_excel"] = money(valore_venduto_negozio_excel)
+    result["valore_venduto_vending_excel"] = money(valore_venduto_vending_excel)
+    result["valore_venduto_totale_excel"] = money(valore_venduto_negozio_excel + valore_venduto_vending_excel)
     return result
 
 
@@ -6299,7 +6306,7 @@ async def _import_listino(ws) -> Dict[str, int]:
             data_p = {
                 "codice": codice,
                 "descrizione": str(row[1] or "").strip(),
-                "prezzo": float(row[2] or 0),
+                "prezzo": nonnegative_money(row[2] or 0),
                 "confezione": str(row[3] or "").strip(),
             }
             operations.append(UpdateOne({"codice": codice}, {"$set": data_p}, upsert=True))
@@ -6416,13 +6423,13 @@ def _parse_smart_venue_bulk_text(text: str) -> Dict[str, Any]:
             if not numeric_code:
                 raise ValueError("codice ADM mancante")
             code = adm_local_code(numeric_code)
-            price = float(price_raw.replace(",", "."))
+            price = nonnegative_money(price_raw)
             quantity_float = float(quantity_raw.replace(",", "."))
             if not quantity_float.is_integer() or quantity_float < 0:
                 raise ValueError("quantità non valida")
             quantity = int(quantity_float)
-            total_value = float(value_raw.replace(",", "."))
-            expected_value = round(price * quantity, 2)
+            total_value = nonnegative_money(value_raw)
+            expected_value = money_product(price, quantity)
             warning = None
             if abs(expected_value - total_value) > 0.02:
                 warning = f"valore {total_value:.2f} diverso da prezzo × quantità {expected_value:.2f}"
@@ -6873,7 +6880,7 @@ async def _import_storico(ws) -> Dict[str, int]:
                 codice=str(row[2] or "").strip(),
                 descrizione=str(row[3] or "").strip(),
                 quantita=int(row[4] or 0),
-                prezzo=float(row[5] or 0),
+                prezzo=nonnegative_money(row[5] or 0),
             )
             batch.append(o.model_dump())
             if len(batch) >= 1000:
@@ -6991,7 +6998,7 @@ async def _import_db_storico_vend(ws) -> Dict[str, int]:
                 "codice": codice,
                 "descrizione": str(value_at(row, "descrizione", "") or "").strip(),
                 "quantita": int(value_at(row, "quantita", 0) or 0),
-                "importo": float(value_at(row, "importo", 0) or 0),
+                "importo": money(value_at(row, "importo", 0) or 0),
                 "categoria": str(value_at(row, "categoria", "") or "").strip(),
             })
         except Exception:
