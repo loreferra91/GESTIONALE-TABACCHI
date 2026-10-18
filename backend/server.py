@@ -550,6 +550,7 @@ async def on_start():
             db.cassa_vending_stato.create_index("id", unique=True),
             db.vending_accounting_state.create_index("id", unique=True),
             db.vending_accounting_events.create_index("csv_event_key", unique=True),
+            db.vending_accounting_events.create_index("csv_accounting_key", unique=True, sparse=True),
             db.vending_accounting_events.create_index("data"),
             db.vending_accounting_events.create_index("source_batch_id"),
             db.listino_adm.create_index("adm_codice"),
@@ -2268,14 +2269,22 @@ def _csv_vending_event_base(row: Dict[str, Any]) -> str:
 
 
 def _assign_csv_vending_event_keys(rows: List[Dict[str, Any]]) -> None:
-    """Assegna chiavi stabili anche quando nello stesso minuto sono venduti più pezzi uguali."""
-    occurrences: Dict[str, int] = {}
+    """Assegna identità esatta e contabile a ogni riga del distributore.
+
+    ``csv_event_key`` conserva i secondi ed è utile per l'audit puntuale.
+    ``csv_accounting_key`` usa invece la firma compatibile al minuto: resta
+    stabile quando due export della stessa vendita alternano timestamp con e
+    senza secondi. L'occorrenza mantiene distinti più pezzi realmente venduti
+    nello stesso minuto con gli stessi dati.
+    """
+    exact_occurrences: Dict[str, int] = {}
     for row in rows:
         base = _csv_vending_event_base(row)
-        occurrence = occurrences.get(base, 0) + 1
-        occurrences[base] = occurrence
+        occurrence = exact_occurrences.get(base, 0) + 1
+        exact_occurrences[base] = occurrence
         row["csv_event_occurrence"] = occurrence
         row["csv_event_key"] = f"{base}:{occurrence}"
+    _assign_csv_vending_accounting_keys(rows)
 
 
 def _csv_vending_compatibility_key(row: Dict[str, Any]) -> str:
@@ -2305,6 +2314,18 @@ def _csv_vending_compatibility_key(row: Dict[str, Any]) -> str:
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _assign_csv_vending_accounting_keys(rows: List[Dict[str, Any]]) -> None:
+    """Assegna la chiave contabile v2 senza modificare l'identità esatta."""
+    occurrences: Dict[str, int] = {}
+    for row in rows:
+        accounting_base = _csv_vending_compatibility_key(row)
+        occurrence = occurrences.get(accounting_base, 0) + 1
+        occurrences[accounting_base] = occurrence
+        row["csv_event_compatibility_key"] = accounting_base
+        row["csv_accounting_occurrence"] = occurrence
+        row["csv_accounting_key"] = f"{accounting_base}:{occurrence}"
 
 
 async def _exclude_imported_csv_vending_rows(
@@ -2506,6 +2527,8 @@ async def _ensure_vending_accounting_state() -> Dict[str, Any]:
             # La vecchia fotografia contiene al massimo le 1.000 chiavi dell'ultimo
             # export. Servono solo a non reinserire quel blocco durante la migrazione.
             "baseline_event_keys": list((previous or {}).get("csv_event_keys") or []),
+            "baseline_accounting_keys": list((previous or {}).get("csv_accounting_keys") or []),
+            "accounting_identity_version": 2,
             "migrated_from_snapshot_id": (previous or {}).get("id"),
             "last_file_name": (previous or {}).get("file_name"),
             "last_file_sha256": (previous or {}).get("sha256"),
@@ -2530,14 +2553,50 @@ async def _ensure_vending_accounting_state() -> Dict[str, Any]:
             {
                 "_id": 0, "csv_event_key": 1, "data": 1, "importo": 1,
                 "pagamento": 1, "batch_id": 1, "created_at": 1, "csv_file_sha256": 1,
+                "csv_accounting_key": 1, "csv_accounting_occurrence": 1,
+                "csv_event_compatibility_key": 1, "codice": 1, "descrizione": 1,
+                "colonna": 1,
             },
         ).to_list(None)
+        generated_accounting_rows = [
+            {
+                **sale,
+                "prezzo": sale.get("importo"),
+                "nome": sale.get("descrizione"),
+            }
+            for sale in legacy_sales
+        ]
+        if any(not sale.get("csv_accounting_key") for sale in legacy_sales):
+            generated_accounting_rows.sort(
+                key=lambda row: (str(row.get("data") or ""), str(row.get("csv_event_key") or "")),
+                reverse=True,
+            )
+            _assign_csv_vending_accounting_keys(generated_accounting_rows)
+            generated_by_exact_key = {
+                row.get("csv_event_key"): row for row in generated_accounting_rows
+            }
+            for sale in legacy_sales:
+                if sale.get("csv_accounting_key"):
+                    continue
+                generated = generated_by_exact_key.get(sale.get("csv_event_key"))
+                if not generated:
+                    continue
+                sale["csv_event_compatibility_key"] = generated["csv_event_compatibility_key"]
+                sale["csv_accounting_occurrence"] = generated["csv_accounting_occurrence"]
+                sale["csv_accounting_key"] = generated["csv_accounting_key"]
+        baseline_accounting_keys = set(state.get("baseline_accounting_keys") or [])
         operations = [
             UpdateOne(
-                {"csv_event_key": sale["csv_event_key"]},
+                {"$or": [
+                    {"csv_accounting_key": sale["csv_accounting_key"]},
+                    {"csv_event_key": sale["csv_event_key"]},
+                ]},
                 {"$setOnInsert": {
                     "id": str(uuid.uuid4()),
                     "csv_event_key": sale["csv_event_key"],
+                    "csv_event_compatibility_key": sale.get("csv_event_compatibility_key"),
+                    "csv_accounting_occurrence": sale.get("csv_accounting_occurrence"),
+                    "csv_accounting_key": sale["csv_accounting_key"],
                     "data": sale.get("data"),
                     "importo": round(float(sale.get("importo") or 0), 2),
                     "pagamento": _vending_payment_bucket(sale.get("pagamento")),
@@ -2550,6 +2609,7 @@ async def _ensure_vending_accounting_state() -> Dict[str, Any]:
             )
             for sale in legacy_sales
             if sale.get("csv_event_key") not in baseline_keys
+            and sale.get("csv_accounting_key") not in baseline_accounting_keys
         ]
         seed_result = await _bulk_upsert(db.vending_accounting_events, operations, batch_size=500)
         if seed_result["errori"]:
@@ -2616,6 +2676,8 @@ async def _vending_accounting_ledger_summary() -> Optional[Dict[str, Any]]:
         "data_a": max(dates, default=None),
         "last_file_rows": int(state.get("last_file_rows") or 0),
         "baseline_event_keys": list(state.get("baseline_event_keys") or []),
+        "baseline_accounting_keys": list(state.get("baseline_accounting_keys") or []),
+        "accounting_identity_version": int(state.get("accounting_identity_version") or 1),
         "migrated_from_snapshot_id": state.get("migrated_from_snapshot_id"),
         "ledger_started_at": state.get("ledger_started_at") or state.get("created_at"),
     }
@@ -2652,15 +2714,41 @@ async def _store_vending_accounting_snapshot(
     created_at = datetime.now(timezone.utc).isoformat()
     state = await _ensure_vending_accounting_state()
     baseline_keys = set(state.get("baseline_event_keys") or [])
+    baseline_accounting_keys = set(state.get("baseline_accounting_keys") or [])
+    exact_keys = [row["csv_event_key"] for row in parsed["righe"]]
+    accounting_keys = [row["csv_accounting_key"] for row in parsed["righe"]]
+    existing_events = await db.vending_accounting_events.find(
+        {"$or": [
+            {"csv_event_key": {"$in": exact_keys}},
+            {"csv_accounting_key": {"$in": accounting_keys}},
+        ]},
+        {"_id": 0, "csv_event_key": 1, "csv_accounting_key": 1},
+    ).to_list(None)
+    existing_exact_keys = {
+        str(event.get("csv_event_key") or "") for event in existing_events
+        if event.get("csv_event_key")
+    }
+    existing_accounting_keys = {
+        str(event.get("csv_accounting_key") or "") for event in existing_events
+        if event.get("csv_accounting_key")
+    }
     operations = []
     for row in parsed["righe"]:
-        if row["csv_event_key"] in baseline_keys:
+        if (
+            row["csv_event_key"] in baseline_keys
+            or row["csv_accounting_key"] in baseline_accounting_keys
+            or row["csv_event_key"] in existing_exact_keys
+            or row["csv_accounting_key"] in existing_accounting_keys
+        ):
             continue
         operations.append(UpdateOne(
-            {"csv_event_key": row["csv_event_key"]},
+            {"csv_accounting_key": row["csv_accounting_key"]},
             {"$setOnInsert": {
                 "id": str(uuid.uuid4()),
                 "csv_event_key": row["csv_event_key"],
+                "csv_event_compatibility_key": row["csv_event_compatibility_key"],
+                "csv_accounting_occurrence": row["csv_accounting_occurrence"],
+                "csv_accounting_key": row["csv_accounting_key"],
                 "data": row.get("data"),
                 "importo": round(float(row.get("prezzo") or 0), 2),
                 "pagamento": _vending_payment_bucket(row.get("pagamento")),
@@ -2683,6 +2771,7 @@ async def _store_vending_accounting_snapshot(
             "last_file_rows": int(summary.get("righe") or 0),
             "last_data_da": summary.get("data_da"),
             "last_data_a": summary.get("data_a"),
+            "accounting_identity_version": 2,
         }},
     )
     document = await _vending_accounting_ledger_summary()
@@ -2907,7 +2996,9 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             sale_doc.update({
                 "csv_event_key": csv_row["csv_event_key"],
                 "csv_event_occurrence": csv_row["csv_event_occurrence"],
-                "csv_event_compatibility_key": _csv_vending_compatibility_key(csv_row),
+                "csv_event_compatibility_key": csv_row["csv_event_compatibility_key"],
+                "csv_accounting_occurrence": csv_row["csv_accounting_occurrence"],
+                "csv_accounting_key": csv_row["csv_accounting_key"],
                 "csv_file_sha256": file_sha256,
                 "stock_effect_applied": bool(undo_meta.get("vending_stock_decremented")),
                 "stock_effect_reason": csv_row.get("giacenza_motivo"),
