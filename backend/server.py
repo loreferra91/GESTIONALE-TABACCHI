@@ -19,11 +19,21 @@ from decimal import Decimal
 
 if __package__:
     from .audit_router import create_audit_router
+    from .cash_movements_router import (
+        MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
+        ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
+        Versamento, VersamentoIn, create_cash_movements_router,
+    )
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
     from audit_router import create_audit_router
+    from cash_movements_router import (
+        MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
+        ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
+        Versamento, VersamentoIn, create_cash_movements_router,
+    )
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
@@ -286,76 +296,6 @@ class AutoOrderConfermaIn(BaseModel):
     idempotency_key: Optional[str] = None
     batch_key: Optional[str] = None
     righe: Optional[List[AutoOrderRigaIn]] = None
-
-
-class MovimentoCassa(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    data: str
-    tipo: str  # ENTRATA / USCITA / SALDO_INIZIALE
-    importo: Money
-    descrizione: str = ""
-    operatore: str = ""
-
-
-class MovimentoIn(BaseModel):
-    data: str
-    tipo: str
-    importo: Money
-    descrizione: Optional[str] = ""
-    operatore: Optional[str] = ""
-    idempotency_key: Optional[str] = None
-
-
-class Versamento(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    data: str
-    importo: NonNegativeMoney
-    descrizione: str = ""
-    operatore: str = ""
-
-
-class VersamentoIn(BaseModel):
-    data: str
-    importo: NonNegativeMoney
-    descrizione: Optional[str] = ""
-    operatore: Optional[str] = ""
-    idempotency_key: Optional[str] = None
-
-
-class PrelievoVending(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    data: str
-    importo: NonNegativeMoney
-    descrizione: str = ""
-    operatore: str = ""
-
-
-class PrelievoVendingIn(BaseModel):
-    data: str
-    importo: NonNegativeMoney
-    descrizione: Optional[str] = ""
-    operatore: Optional[str] = ""
-    idempotency_key: Optional[str] = None
-
-
-class ScontrinoVending(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    data: str
-    importo: NonNegativeMoney
-    descrizione: str = ""
-    operatore: str = ""
-
-
-class ScontrinoVendingIn(BaseModel):
-    data: str
-    importo: NonNegativeMoney
-    descrizione: Optional[str] = ""
-    operatore: Optional[str] = ""
-    idempotency_key: Optional[str] = None
 
 
 class Parametro(BaseModel):
@@ -3187,59 +3127,6 @@ async def vending_accounting_source():
     return _public_vending_accounting_snapshot(snapshot) if snapshot else None
 
 
-VENDING_CASH_STATE_ID = "saldo"
-
-
-async def _vending_cash_balance(session=None) -> float:
-    """Restituisce la giacenza cash, inizializzandola dai dati legacy una volta."""
-    kwargs = _session_kwargs(session)
-    state = await db.cassa_vending_stato.find_one(
-        {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
-    )
-    if state:
-        return money(state.get("giacenza") or 0)
-
-    legacy_docs = await db.prelievi_vending.find(
-        {}, {"_id": 0, "importo": 1}, **kwargs
-    ).to_list(None)
-    legacy_balance = money_sum(doc.get("importo") or 0 for doc in legacy_docs)
-    now = datetime.now(timezone.utc).isoformat()
-    await db.cassa_vending_stato.update_one(
-        {"id": VENDING_CASH_STATE_ID},
-        {"$setOnInsert": {
-            "id": VENDING_CASH_STATE_ID,
-            "giacenza": legacy_balance,
-            "initialized_at": now,
-            "updated_at": now,
-        }},
-        upsert=True,
-        **kwargs,
-    )
-    state = await db.cassa_vending_stato.find_one(
-        {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
-    )
-    return money((state or {}).get("giacenza") or 0)
-
-
-async def _adjust_vending_cash_balance(amount: float, session=None) -> float:
-    kwargs = _session_kwargs(session)
-    delta = money_decimal(amount)
-    await _vending_cash_balance(session)
-    # Compare-and-set preserves concurrent increments without binary $inc drift.
-    for _ in range(20):
-        state = await db.cassa_vending_stato.find_one({"id": VENDING_CASH_STATE_ID}, **kwargs)
-        previous = state.get("giacenza")
-        updated = money(money_decimal(previous or 0) + delta)
-        result = await db.cassa_vending_stato.update_one(
-            {"id": VENDING_CASH_STATE_ID, "giacenza": previous},
-            {"$set": {"giacenza": updated, "updated_at": datetime.now(timezone.utc).isoformat()}},
-            **kwargs,
-        )
-        if result.matched_count:
-            return updated
-    raise HTTPException(409, "Cassa vending modificata contemporaneamente: riprovare")
-
-
 @api.post("/vendite/preview-csv-vending")
 async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
     """Mostra vendite nuove e impatto stock senza ripetere eventi già importati."""
@@ -4847,197 +4734,6 @@ async def bulk_carico(body: BulkOrdineIn, request: Request = None):
         raise HTTPException(409, "Questo carico è già stato inviato")
 
 
-
-
-# ------------------------- Versamenti / Prelievi vending / Cassa -------------------------
-async def _collection_money_total(collection) -> float:
-    total = Decimal(0)
-    async for document in collection.find({}, {"_id": 0, "importo": 1}):
-        total += money_decimal(document.get("importo") or 0)
-    return money(total)
-
-
-async def _versamenti_summary(limit: int = 500) -> Dict[str, Any]:
-    capped_limit = _cap(limit)
-    docs = await db.versamenti.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    totale = await _collection_money_total(db.versamenti)
-    return {"movimenti": docs, "totale": totale}
-
-
-@api.get("/versamenti")
-async def list_versamenti(limit: int = 500):
-    return await _versamenti_summary(limit)
-
-
-@api.post("/versamenti")
-async def add_versamento(m: VersamentoIn):
-    if m.importo <= 0:
-        raise HTTPException(422, "L'importo del versamento deve essere positivo")
-    key = str(m.idempotency_key or "").strip() or None
-    if key and not 10 <= len(key) <= 160:
-        raise HTTPException(422, "idempotency_key non valido")
-    if key:
-        existing = await db.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
-        if existing:
-            return existing
-    versamento = Versamento(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
-    if key:
-        versamento_doc = {**versamento.model_dump(), "idempotency_key": key}
-    else:
-        versamento_doc = versamento.model_dump()
-    response_doc = dict(versamento_doc)
-    try:
-        await db.versamenti.insert_one(versamento_doc)
-    except DuplicateKeyError:
-        return await db.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
-    await _record_audit_event("CREATO", "VERSAMENTO", versamento_doc["id"], dopo=response_doc, idempotency_key=key)
-    return response_doc
-
-
-@api.delete("/versamenti/{m_id}")
-async def del_versamento(m_id: str):
-    existing = await db.versamenti.find_one({"id": m_id}, {"_id": 0})
-    await db.versamenti.delete_one({"id": m_id})
-    if existing:
-        await _record_audit_event("ELIMINATO", "VERSAMENTO", m_id, prima=existing)
-    return {"ok": True}
-
-
-async def _prelievi_vending_summary(limit: int = 500) -> Dict[str, Any]:
-    capped_limit = _cap(limit)
-    docs = await db.prelievi_vending.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    totale = await _collection_money_total(db.prelievi_vending)
-    return {"movimenti": docs, "totale": totale}
-
-
-@api.get("/prelievi-vending")
-async def list_prelievi_vending(limit: int = 500):
-    return await _prelievi_vending_summary(limit)
-
-
-@api.post("/prelievi-vending")
-async def add_prelievo_vending(m: PrelievoVendingIn):
-    if m.importo <= 0:
-        raise HTTPException(422, "L'importo del prelievo deve essere positivo")
-    key = str(m.idempotency_key or "").strip() or None
-    if key and not 10 <= len(key) <= 160:
-        raise HTTPException(422, "idempotency_key non valido")
-    if key:
-        existing = await db.prelievi_vending.find_one({"idempotency_key": key}, {"_id": 0})
-        if existing:
-            return existing
-    await _vending_cash_balance()
-    prelievo = PrelievoVending(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
-    doc = {**prelievo.model_dump(), **({"idempotency_key": key} if key else {})}
-    response_doc = dict(doc)
-    await db.prelievi_vending.insert_one(doc)
-    try:
-        await _adjust_vending_cash_balance(-m.importo)
-    except Exception:
-        await db.prelievi_vending.delete_one({"id": prelievo.id})
-        raise
-    await _record_audit_event("CREATO", "PRELIEVO_VENDING", prelievo.id, dopo=response_doc, idempotency_key=key)
-    return response_doc
-
-
-@api.delete("/prelievi-vending/{m_id}")
-async def del_prelievo_vending(m_id: str):
-    await _vending_cash_balance()
-    prelievo = await db.prelievi_vending.find_one({"id": m_id}, {"_id": 0})
-    await db.prelievi_vending.delete_one({"id": m_id})
-    if prelievo:
-        await _adjust_vending_cash_balance(float(prelievo.get("importo") or 0))
-        await _record_audit_event("ELIMINATO", "PRELIEVO_VENDING", m_id, prima=prelievo)
-    return {"ok": True}
-
-
-async def _scontrini_vending_summary(limit: int = 500) -> Dict[str, Any]:
-    capped_limit = _cap(limit)
-    docs = await db.scontrini_vending.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    totale = await _collection_money_total(db.scontrini_vending)
-    return {"movimenti": docs, "totale": totale}
-
-
-@api.get("/scontrini-vending")
-async def list_scontrini_vending(limit: int = 500):
-    return await _scontrini_vending_summary(limit)
-
-
-@api.post("/scontrini-vending")
-async def add_scontrino_vending(m: ScontrinoVendingIn):
-    if m.importo <= 0:
-        raise HTTPException(422, "L'importo dello scontrino deve essere positivo")
-    key = str(m.idempotency_key or "").strip() or None
-    if key and not 10 <= len(key) <= 160:
-        raise HTTPException(422, "idempotency_key non valido")
-    if key:
-        existing = await db.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
-        if existing:
-            return existing
-    scontrino = ScontrinoVending(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
-    doc = {**scontrino.model_dump(), **({"idempotency_key": key} if key else {})}
-    response_doc = dict(doc)
-    try:
-        await db.scontrini_vending.insert_one(doc)
-    except DuplicateKeyError:
-        return await db.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
-    await _record_audit_event("CREATO", "SCONTRINO_VENDING", scontrino.id, dopo=response_doc, idempotency_key=key)
-    return response_doc
-
-
-@api.delete("/scontrini-vending/{m_id}")
-async def del_scontrino_vending(m_id: str):
-    existing = await db.scontrini_vending.find_one({"id": m_id}, {"_id": 0})
-    await db.scontrini_vending.delete_one({"id": m_id})
-    if existing:
-        await _record_audit_event("ELIMINATO", "SCONTRINO_VENDING", m_id, prima=existing)
-    return {"ok": True}
-
-
-@api.get("/cassa")
-async def list_cassa(limit: int = 500):
-    capped_limit = _cap(limit)
-    docs = await db.cassa.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    saldo = Decimal(0)
-    async for d in db.cassa.find({}, {"_id": 0, "tipo": 1, "importo": 1}):
-        if d["tipo"] in ("ENTRATA", "SALDO_INIZIALE"):
-            saldo += money_decimal(d["importo"])
-        else:
-            saldo -= money_decimal(d["importo"])
-    return {"movimenti": docs, "saldo": money(saldo)}
-
-
-@api.post("/cassa")
-async def add_cassa(m: MovimentoIn):
-    if m.tipo not in {"ENTRATA", "USCITA", "SALDO_INIZIALE"}:
-        raise HTTPException(422, "Tipo movimento cassa non valido")
-    if m.tipo != "SALDO_INIZIALE" and m.importo <= 0:
-        raise HTTPException(422, "Entrate e uscite richiedono un importo positivo")
-    key = str(m.idempotency_key or "").strip() or None
-    if key and not 10 <= len(key) <= 160:
-        raise HTTPException(422, "idempotency_key non valido")
-    if key:
-        existing = await db.cassa.find_one({"idempotency_key": key}, {"_id": 0})
-        if existing:
-            return existing
-    mm = MovimentoCassa(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
-    doc = {**mm.model_dump(), **({"idempotency_key": key} if key else {})}
-    response_doc = dict(doc)
-    try:
-        await db.cassa.insert_one(doc)
-    except DuplicateKeyError:
-        return await db.cassa.find_one({"idempotency_key": key}, {"_id": 0})
-    await _record_audit_event("CREATO", "MOVIMENTO_CASSA", mm.id, dopo=response_doc, idempotency_key=key)
-    return response_doc
-
-
-@api.delete("/cassa/{m_id}")
-async def del_cassa(m_id: str):
-    existing = await db.cassa.find_one({"id": m_id}, {"_id": 0})
-    await db.cassa.delete_one({"id": m_id})
-    if existing:
-        await _record_audit_event("ELIMINATO", "MOVIMENTO_CASSA", m_id, prima=existing)
-    return {"ok": True}
 
 
 # ------------------------- Auto-Order -------------------------
@@ -7321,6 +7017,30 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+cash_movements = create_cash_movements_router(
+    get_database=lambda: db,
+    record_audit_event=_record_audit_event,
+    cap_limit=_cap,
+)
+cash_movements_router = cash_movements["router"]
+_vending_cash_balance = cash_movements["vending_cash_balance"]
+_adjust_vending_cash_balance = cash_movements["adjust_vending_cash_balance"]
+_collection_money_total = cash_movements["collection_money_total"]
+_versamenti_summary = cash_movements["versamenti_summary"]
+list_versamenti = cash_movements["list_versamenti"]
+add_versamento = cash_movements["add_versamento"]
+del_versamento = cash_movements["del_versamento"]
+_prelievi_vending_summary = cash_movements["prelievi_vending_summary"]
+list_prelievi_vending = cash_movements["list_prelievi_vending"]
+add_prelievo_vending = cash_movements["add_prelievo_vending"]
+del_prelievo_vending = cash_movements["del_prelievo_vending"]
+_scontrini_vending_summary = cash_movements["scontrini_vending_summary"]
+list_scontrini_vending = cash_movements["list_scontrini_vending"]
+add_scontrino_vending = cash_movements["add_scontrino_vending"]
+del_scontrino_vending = cash_movements["del_scontrino_vending"]
+list_cassa = cash_movements["list_cassa"]
+add_cassa = cash_movements["add_cassa"]
+del_cassa = cash_movements["del_cassa"]
 parameters_router, get_params, list_parametri, update_parametro = create_parameters_router(
     get_database=lambda: db,
     make_parameter=lambda nome, valore: Parametro(nome=nome, valore=valore).model_dump(),
@@ -7337,6 +7057,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 )
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
+api.include_router(cash_movements_router)
 api.include_router(parameters_router)
 app.include_router(api)
 
