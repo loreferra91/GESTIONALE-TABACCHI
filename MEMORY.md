@@ -29,3 +29,10 @@
   lettura e il totale è calcolato. Le correzioni sono protette da confronto col
   valore atteso, non cambiano le giacenze e vengono registrate in
   `rettifiche_venduti`.
+- Dal 2026-10-18 l'integrità vendite è fail-closed: le vendite manuali usano una
+  chiave idempotente e non possono portare la scorta sotto zero; bulk e CSV
+  rifiutano l'intero caricamento se una riga, un prodotto o una colonna non è
+  valido; gli annullamenti sono vincolati alla sorgente e transazionali su
+  MongoDB. I backup non hanno più il limite di 25.000 documenti, includono
+  checksum e lock di restore. In produzione autenticazione completa e CORS non
+  wildcard sono requisiti di avvio.

@@ -47,6 +47,8 @@ export default function Vendite() {
   const [bulkUndoing, setBulkUndoing] = useState(false);
   const [lastManualSale, setLastManualSale] = useState(undefined);
   const [manualUndoing, setManualUndoing] = useState(false);
+  const [manualSaving, setManualSaving] = useState(false);
+  const manualIdempotencyKey = useRef(null);
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
@@ -107,14 +109,25 @@ export default function Vendite() {
   useEffect(() => { loadLastCsvImport(); }, [loadLastCsvImport]);
 
   const save = async () => {
-    if (manualUndoing) return;
+    if (manualUndoing || manualSaving) return;
     if (!form.codice || !form.importo) { toast.error("Compila codice e importo"); return; }
     if (form.canale === "VENDING" && !form.colonna) { toast.error("Seleziona la colonna Vending"); return; }
-    const r = await api.post("/vendite", form);
-    setLastManualSale(r.data);
-    toast.success("Vendita registrata");
-    setForm({ ...form, codice: "", descrizione: "", quantita: 1, importo: 0, colonna: "" });
-    await load();
+    manualIdempotencyKey.current ||= crypto.randomUUID();
+    setManualSaving(true);
+    try {
+      const r = await api.post("/vendite", form, {
+        headers: { "X-Idempotency-Key": manualIdempotencyKey.current },
+      });
+      manualIdempotencyKey.current = null;
+      setLastManualSale(r.data);
+      toast.success("Vendita registrata");
+      setForm({ ...form, codice: "", descrizione: "", quantita: 1, importo: 0, colonna: "" });
+      await load();
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile registrare la vendita"));
+    } finally {
+      setManualSaving(false);
+    }
   };
 
   const undoLastManualSale = async () => {
@@ -367,9 +380,13 @@ export default function Vendite() {
           <input data-testid="vend-data" type="date" value={form.data} onChange={e => setForm({...form, data: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
           <input data-testid="vend-codice" placeholder="Codice" value={form.codice} onChange={e => setForm({...form, codice: e.target.value})} onBlur={lookupPrezzo} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <input data-testid="vend-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm col-span-2" />
-          <input data-testid="vend-qta" type="number" placeholder="Qta" value={form.quantita} onChange={e => setForm({...form, quantita: parseInt(e.target.value) || 1})} className="border rounded-md px-3 py-2 text-sm font-mono" />
+          <input data-testid="vend-qta" type="number" placeholder="Qta" value={form.quantita} onChange={e => {
+            const quantita = parseInt(e.target.value) || 1;
+            const product = prodMap.get(form.codice);
+            setForm({...form, quantita, importo: product ? product.prezzo * quantita : form.importo});
+          }} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <input data-testid="vend-importo" type="number" step="0.01" placeholder="Importo €" value={form.importo} onChange={e => setForm({...form, importo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
-          <button data-testid="vend-save-btn" onClick={save} disabled={manualUndoing} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-60 col-span-2 md:col-span-1">Registra</button>
+          <button data-testid="vend-save-btn" onClick={save} disabled={manualUndoing || manualSaving} aria-busy={manualSaving} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-60 col-span-2 md:col-span-1">{manualSaving ? "Registrazione…" : "Registra"}</button>
         </div>
         <div className="mt-3 grid grid-cols-2 gap-3 md:max-w-2xl">
           <select data-testid="vend-canale" value={form.canale} onChange={e => setForm({...form, canale: e.target.value, colonna: e.target.value === "VENDING" ? form.colonna : ""})} className="border rounded-md px-3 py-2 text-sm">
@@ -389,6 +406,9 @@ export default function Vendite() {
                   colonna: e.target.value,
                   codice: column?.codice || current.codice,
                   descrizione: column?.descrizione || current.descrizione,
+                  importo: column?.codice && prodMap.get(column.codice)
+                    ? prodMap.get(column.codice).prezzo * (current.quantita || 1)
+                    : current.importo,
                 }));
               }}
               className="col-span-2 rounded-md border px-3 py-2 text-sm"
@@ -731,7 +751,7 @@ export default function Vendite() {
                   <td className="font-mono text-right font-semibold">{formatEur(r.importo)}</td>
                   <td><Badge tone={r.canale === "VENDING" ? "warning" : "info"}>{r.canale}</Badge></td>
                   <td className="text-xs">{r.pagamento}</td>
-                  <td className="text-right"><button onClick={() => del(r.id)} className="text-red-600 hover:text-red-800 text-xs">✕</button></td>
+                  <td className="text-right">{(r.sorgente || "MANUALE") === "MANUALE" && <button onClick={() => del(r.id)} className="text-red-600 hover:text-red-800 text-xs" aria-label={`Elimina vendita ${r.codice}`}>✕</button>}</td>
                 </tr>
               ))}
               {rows.length === 0 && <tr><td colSpan={8} className="text-center py-8 text-slate-400">Nessuna vendita per {giorno}</td></tr>}

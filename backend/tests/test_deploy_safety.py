@@ -1,6 +1,7 @@
 import base64
 import os
 
+import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -59,3 +60,29 @@ def test_basic_auth_accepts_valid_credentials(monkeypatch):
     token = base64.b64encode(b"audit-user:audit-password").decode("ascii")
     response = client.get("/api/endpoint-inesistente", headers={"Authorization": f"Basic {token}"})
     assert response.status_code == 404
+
+
+def test_production_refuses_missing_credentials(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("APP_USERNAME", raising=False)
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    monkeypatch.setenv("CORS_ORIGINS", "https://example.test")
+
+    with pytest.raises(RuntimeError, match="APP_USERNAME"):
+        server._validate_runtime_security()
+
+
+def test_production_refuses_wildcard_cors(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("APP_USERNAME", "operator")
+    monkeypatch.setenv("APP_PASSWORD", "secret")
+    monkeypatch.setenv("CORS_ORIGINS", "*")
+
+    with pytest.raises(RuntimeError, match="CORS_ORIGINS"):
+        server._validate_runtime_security()
+
+
+def test_security_headers_are_present():
+    response = client.get("/api/")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"

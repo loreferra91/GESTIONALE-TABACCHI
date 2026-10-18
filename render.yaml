@@ -10,8 +10,10 @@ services:
         sync: false
       - key: DB_NAME
         value: gestionale
+      - key: ENVIRONMENT
+        value: production
       - key: CORS_ORIGINS
-        value: "*"
+        value: "https://gestionale-tabacchi.onrender.com"
       - key: APP_USERNAME
         sync: false
       - key: APP_PASSWORD

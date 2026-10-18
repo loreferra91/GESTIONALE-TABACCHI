@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from mongomock_motor import AsyncMongoMockClient
 
 from backend import server
@@ -131,6 +134,89 @@ def test_backup_file_validation_requires_every_operational_collection():
         assert "vendite" in exc.detail
     else:
         raise AssertionError("Un backup privo delle vendite deve essere rifiutato")
+
+
+def test_backup_snapshot_does_not_truncate_after_25000_documents(monkeypatch):
+    database = AsyncMongoMockClient()["backup_over_25000"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"id": f"p-{index}", "codice": f"P{index}"}
+            for index in range(25_001)
+        ])
+        snapshot = await server.create_backup_snapshot(
+            "Backup grande", collection_names=["prodotti"]
+        )
+        stored = await database.backup_snapshot_items.count_documents({
+            "snapshot_id": snapshot["id"], "collection": "prodotti",
+        })
+        return snapshot, stored
+
+    snapshot, stored = asyncio.run(scenario())
+    assert snapshot["counts"]["prodotti"] == 25_001
+    assert stored == 25_001
+    assert snapshot["checksums"]["prodotti"]
+
+
+def test_backup_validation_rejects_checksum_mismatch():
+    collections = {name: [] for name in server.BACKUP_COLLECTIONS}
+    collections["prodotti"] = [{"id": "p1", "codice": "P1"}]
+    payload = {
+        "format": server.BACKUP_FILE_FORMAT,
+        "version": server.BACKUP_FILE_VERSION,
+        "counts": {name: len(docs) for name, docs in collections.items()},
+        "checksums": {"prodotti": hashlib.sha256(b"alterato").hexdigest()},
+        "collections": collections,
+    }
+
+    with pytest.raises(HTTPException, match="Checksum") as caught:
+        server._validate_backup_file(payload)
+
+    assert caught.value.status_code == 422
+
+
+def test_backup_checksum_round_trip_uses_stable_document_order(monkeypatch):
+    database = AsyncMongoMockClient()["backup_checksum_roundtrip"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"id": "p2", "codice": "P2"},
+            {"id": "p1", "codice": "P1"},
+        ])
+        snapshot = await server.create_backup_snapshot(
+            "Checksum", collection_names=["prodotti"]
+        )
+        stored = await server._backup_documents(snapshot["id"], ["prodotti"])
+        collections = {name: [] for name in server.BACKUP_COLLECTIONS}
+        collections["prodotti"] = stored["prodotti"]
+        payload = {
+            "format": server.BACKUP_FILE_FORMAT,
+            "version": server.BACKUP_FILE_VERSION,
+            "counts": {name: len(docs) for name, docs in collections.items()},
+            "checksums": snapshot["checksums"],
+            "collections": collections,
+        }
+        return server._validate_backup_file(payload)
+
+    validated = asyncio.run(scenario())
+    assert [doc["id"] for doc in validated["prodotti"]] == ["p2", "p1"]
+
+
+def test_restore_lock_rejects_concurrent_restore(monkeypatch):
+    database = AsyncMongoMockClient()["restore_lock"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.operation_locks.insert_one({"_id": "backup-restore", "token": "other"})
+        with pytest.raises(HTTPException) as caught:
+            async with server._restore_lock():
+                pass
+        return caught.value
+
+    error = asyncio.run(scenario())
+    assert error.status_code == 409
 
 
 def test_csv_preview_preserves_payment_types_and_normalizes_dates():

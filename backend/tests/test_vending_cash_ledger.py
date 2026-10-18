@@ -27,16 +27,29 @@ def test_legacy_withdrawal_total_initializes_current_vending_cash(monkeypatch):
 
 def test_cash_csv_increments_vending_cash_but_cards_do_not(monkeypatch):
     database = fresh_db(monkeypatch)
-    asyncio.run(database.prelievi_vending.insert_one({"id": "legacy", "importo": 237.55}))
     raw = (
         "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
         "04/10/2026 10:00;PRODOTTO CASH;5,8;1-A01;1001;Sigarette;Contanti\n"
         "04/10/2026 10:01;PRODOTTO CARTA;6,0;1-A02;1002;Sigarette;Carte\n"
     )
-    upload = UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
+    async def scenario():
+        await database.prelievi_vending.insert_one({"id": "legacy", "importo": 237.55})
+        for index, code in enumerate(("AMMS1001", "AMMS1002"), start=1):
+            await database.prodotti.insert_one({
+                "id": f"product-{index}", "codice": code,
+                "descrizione": f"PRODOTTO {index}",
+                "giacenza_vending": 5, "venduti_vending": 0,
+            })
+            await database.vending.insert_one({
+                "id": f"column-{index}", "colonna": f"A0{index}", "codice": code,
+                "giacenza": 5, "giacenza_aggiornata_il": "2026-10-04T07:00:00+00:00",
+            })
+        result = await server.import_csv_vending(
+            UploadFile(filename="vendite.csv", file=io.BytesIO(raw.encode()))
+        )
+        return result, await server._vending_accounting_ledger_summary()
 
-    result = asyncio.run(server.import_csv_vending(upload))
-    ledger = asyncio.run(server._vending_accounting_ledger_summary())
+    result, ledger = asyncio.run(scenario())
 
     assert result["contanti_aggiunti_giacenza"] == 5.8
     assert asyncio.run(server._vending_cash_balance()) == 243.35

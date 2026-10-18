@@ -24,10 +24,24 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 
+def _validate_runtime_security() -> None:
+    """In produzione le credenziali devono essere complete e CORS non può essere aperto."""
+    environment = str(os.environ.get("ENVIRONMENT") or "development").strip().lower()
+    if environment not in {"production", "prod"}:
+        return
+    missing = [name for name in ("APP_USERNAME", "APP_PASSWORD") if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"Configurazione produzione incompleta: manca {', '.join(missing)}")
+    origins = [item.strip() for item in os.environ.get("CORS_ORIGINS", "").split(",") if item.strip()]
+    if "*" in origins:
+        raise RuntimeError("CORS_ORIGINS non può contenere '*' in produzione")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # on_start è risolto quando il lifespan viene eseguito, dopo il caricamento
     # completo del modulo.
+    _validate_runtime_security()
     await on_start()
     try:
         yield
@@ -77,6 +91,16 @@ async def optional_basic_auth(request: Request, call_next):
 
     request.state.authenticated_user = supplied_username
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return response
 
 
 # ------------------------- Models -------------------------
@@ -192,8 +216,8 @@ class VenditaIn(BaseModel):
     data: str
     codice: str
     descrizione: Optional[str] = ""
-    quantita: int = 1
-    importo: float = 0
+    quantita: int = Field(default=1, gt=0)
+    importo: float = Field(default=0, ge=0)
     canale: str = "NEGOZIO"
     pagamento: str = "CONTANTI"
     colonna: Optional[str] = None
@@ -530,6 +554,7 @@ async def on_start():
             db.vendite.create_index("codice"),
             db.vendite.create_index([("data", 1), ("codice", 1)]),
             db.vendite.create_index("csv_event_key", unique=True, sparse=True),
+            db.vendite.create_index("idempotency_key", unique=True, sparse=True),
             db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
             db.storico_ordini.create_index("batch_id"),
@@ -541,6 +566,7 @@ async def on_start():
             db.rettifiche_venduti.create_index([("codice", 1), ("created_at", -1)]),
             db.backup_snapshots.create_index("created_at"),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
+            db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1), ("position", 1)]),
             db.import_history.create_index("created_at"),
             db.import_history.create_index("id"),
             db.prodotti.create_index("ultimo_import_id"),
@@ -1333,56 +1359,130 @@ async def list_vendite(giorno: Optional[str] = None, limit: int = 500):
 
 
 @api.post("/vendite")
-async def add_vendita(v: VenditaIn):
-    payload = v.model_dump()
-    if str(v.canale or "").upper() == "VENDING":
+async def add_vendita(
+    v: VenditaIn,
+    idempotency_key: Optional[str] = Header(default=None, alias="X-Idempotency-Key"),
+):
+    """Registra una vendita una sola volta e scala una scorta realmente disponibile."""
+    channel = str(v.canale or "").strip().upper()
+    if channel not in {"NEGOZIO", "VENDING"}:
+        raise HTTPException(422, "Canale vendita non valido")
+    codice = _product_code_text(v.codice)
+    if not codice:
+        raise HTTPException(422, "Codice prodotto obbligatorio")
+    key = str(idempotency_key or "").strip() or None
+    if key and not 10 <= len(key) <= 160:
+        raise HTTPException(422, "X-Idempotency-Key deve contenere da 10 a 160 caratteri")
+    if key:
+        existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            return existing
+
+    product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
+    if not product:
+        raise HTTPException(404, f"Prodotto non trovato: {codice}")
+
+    column_code = None
+    if channel == "VENDING":
         column_code = _normalize_vending_column(v.colonna)
         if not column_code:
             raise HTTPException(422, "Per una vendita Vending devi indicare la colonna")
-        column = await db.vending.find_one({"colonna": column_code, "codice": v.codice})
-        if not column:
-            raise HTTPException(422, "La colonna Vending non contiene il prodotto indicato")
-        current_stock = int(column.get("giacenza", 0) or 0)
-        if v.quantita <= 0 or current_stock < v.quantita:
-            raise HTTPException(409, f"Giacenza insufficiente nella colonna {column_code}")
-        result = await db.vending.update_one(
-            {"id": column["id"], "giacenza": column.get("giacenza", 0)},
-            {"$inc": {"giacenza": -v.quantita}},
-        )
-        if result.matched_count == 0:
-            raise HTTPException(409, "La colonna è cambiata nel frattempo")
-        payload["colonna"] = column_code
-    vv = VenditaGiornaliera(**payload)
-    prod = await db.prodotti.find_one({"codice": v.codice})
-    if prod:
-        vv.descrizione = vv.descrizione or prod.get("descrizione", "")
-        vend_field = "venduti_vending" if v.canale == "VENDING" else "venduti_negozio"
-        increments = {vend_field: v.quantita}
-        if v.canale != "VENDING":
-            increments["giacenza_negozio"] = -v.quantita
-        await db.prodotti.update_one({"codice": v.codice}, {"$inc": increments})
-        if v.canale == "VENDING":
-            await _sync_product_vending_stock(v.codice)
-    await db.vendite.insert_one(vv.model_dump())
-    return vv.model_dump()
+
+    payload = v.model_dump()
+    payload.update({
+        "codice": codice,
+        "canale": channel,
+        "pagamento": str(v.pagamento or "CONTANTI").strip().upper(),
+        "descrizione": v.descrizione or product.get("descrizione", ""),
+        "colonna": column_code,
+    })
+    sale_doc = VenditaGiornaliera(**payload).model_dump()
+    if key:
+        sale_doc["idempotency_key"] = key
+
+    async def operation(session):
+        kwargs = _session_kwargs(session)
+        if key:
+            existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0}, **kwargs)
+            if existing:
+                return existing
+
+        column_changed = False
+        product_changed = False
+        try:
+            if channel == "VENDING":
+                column = await db.vending.find_one(
+                    {"colonna": column_code, "codice": codice},
+                    {"_id": 0},
+                    **kwargs,
+                )
+                if not column:
+                    raise HTTPException(422, "La colonna Vending non contiene il prodotto indicato")
+                result = await db.vending.update_one(
+                    {"id": column["id"], "codice": codice, "giacenza": {"$gte": v.quantita}},
+                    {"$inc": {"giacenza": -v.quantita}},
+                    **kwargs,
+                )
+                if result.modified_count != 1:
+                    raise HTTPException(409, f"Giacenza insufficiente nella colonna {column_code}")
+                column_changed = True
+                result = await db.prodotti.update_one(
+                    {"codice": codice},
+                    {"$inc": {"venduti_vending": v.quantita}},
+                    **kwargs,
+                )
+            else:
+                result = await db.prodotti.update_one(
+                    {"codice": codice, "giacenza_negozio": {"$gte": v.quantita}},
+                    {"$inc": {"giacenza_negozio": -v.quantita, "venduti_negozio": v.quantita}},
+                    **kwargs,
+                )
+            if result.modified_count != 1:
+                raise HTTPException(409, f"Giacenza insufficiente per il prodotto {codice}")
+            product_changed = True
+            await db.vendite.insert_one(sale_doc.copy(), **kwargs)
+            return sale_doc
+        except Exception:
+            # Mongo standalone e mongomock non hanno transazioni: compensiamo le
+            # modifiche già applicate. Su Atlas il rollback è gestito dal server.
+            if session is None:
+                if product_changed:
+                    increments = {"venduti_vending": -v.quantita} if channel == "VENDING" else {
+                        "giacenza_negozio": v.quantita,
+                        "venduti_negozio": -v.quantita,
+                    }
+                    await db.prodotti.update_one({"codice": codice}, {"$inc": increments})
+                if column_changed:
+                    await db.vending.update_one(
+                        {"colonna": column_code, "codice": codice},
+                        {"$inc": {"giacenza": v.quantita}},
+                    )
+            raise
+
+    try:
+        result = await _run_transactionally(operation)
+    except DuplicateKeyError:
+        if key:
+            existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
+            if existing:
+                result = existing
+            else:
+                raise
+        else:
+            raise
+    if channel == "VENDING":
+        await _sync_product_vending_stock(codice)
+    return result
 
 
 @api.delete("/vendite/{v_id}")
 async def del_vendita(v_id: str):
     v = await db.vendite.find_one({"id": v_id})
-    if v:
-        vend_field = "venduti_vending" if v.get("canale") == "VENDING" else "venduti_negozio"
-        increments = {vend_field: -v["quantita"]}
-        if v.get("canale") == "VENDING":
-            column_code = _normalize_vending_column(v.get("colonna"))
-            if column_code:
-                await db.vending.update_one({"colonna": column_code, "codice": v["codice"]}, {"$inc": {"giacenza": v["quantita"]}})
-                await _sync_product_vending_stock(v["codice"])
-        else:
-            increments["giacenza_negozio"] = v["quantita"]
-        await db.prodotti.update_one({"codice": v["codice"]}, {"$inc": increments})
-    await db.vendite.delete_one({"id": v_id})
-    return {"ok": True}
+    if not v:
+        raise HTTPException(404, "Vendita non trovata")
+    if v.get("sorgente", "MANUALE") != "MANUALE":
+        raise HTTPException(409, "Questa vendita va annullata dal relativo caricamento")
+    return await annulla_vendita_manuale(v_id)
 
 
 @api.get("/vendite/manuale/ultima")
@@ -1403,35 +1503,63 @@ async def annulla_vendita_manuale(sale_id: str):
     vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
     quantity = int(sale.get("quantita") or 0)
     increments = {vend_field: -quantity}
-    if sale.get("canale") == "VENDING":
-        column_code = _normalize_vending_column(sale.get("colonna"))
-        if not column_code:
-            raise HTTPException(409, "Vendita Vending senza colonna: annullamento manuale richiesto")
-        await db.vending.update_one(
-            {"colonna": column_code, "codice": sale.get("codice")},
-            {"$inc": {"giacenza": quantity}},
-        )
-        await _sync_product_vending_stock(str(sale.get("codice") or ""))
-    else:
+    is_vending = sale.get("canale") == "VENDING"
+    column_code = _normalize_vending_column(sale.get("colonna")) if is_vending else None
+    if is_vending and not column_code:
+        raise HTTPException(409, "Vendita Vending senza colonna: annullamento manuale richiesto")
+    if not is_vending:
         increments["giacenza_negozio"] = quantity
-    stock_update = await db.prodotti.update_one(
-        {"codice": sale.get("codice")},
-        {"$inc": increments},
-    )
-    deletion = await db.vendite.delete_one({"id": sale_id, "sorgente": "MANUALE"})
-    if deletion.deleted_count != 1:
-        if stock_update.modified_count == 1:
-            rollback = {vend_field: quantity}
-            if sale.get("canale") != "VENDING":
-                rollback["giacenza_negozio"] = -quantity
-            await db.prodotti.update_one({"codice": sale.get("codice")}, {"$inc": rollback})
-        if sale.get("canale") == "VENDING":
-            await db.vending.update_one(
-                {"colonna": column_code, "codice": sale.get("codice")},
-                {"$inc": {"giacenza": -quantity}},
+
+    async def operation(session):
+        kwargs = _session_kwargs(session)
+        column_changed = False
+        stock_changed = False
+        try:
+            if is_vending:
+                column_update = await db.vending.update_one(
+                    {"colonna": column_code, "codice": sale.get("codice")},
+                    {"$inc": {"giacenza": quantity}},
+                    **kwargs,
+                )
+                if column_update.modified_count != 1:
+                    raise RuntimeError("La colonna Vending della vendita non esiste più")
+                column_changed = True
+            stock_update = await db.prodotti.update_one(
+                {"codice": sale.get("codice")}, {"$inc": increments}, **kwargs
             )
-            await _sync_product_vending_stock(str(sale.get("codice") or ""))
-        raise HTTPException(409, "La vendita è cambiata durante l'annullamento")
+            if stock_update.modified_count != 1:
+                raise RuntimeError("Il prodotto della vendita non esiste più")
+            stock_changed = True
+            deletion = await db.vendite.delete_one(
+                {"id": sale_id, "sorgente": "MANUALE"}, **kwargs
+            )
+            if deletion.deleted_count != 1:
+                raise RuntimeError("La vendita è cambiata durante l'annullamento")
+            if is_vending:
+                await _sync_product_vending_stock(str(sale.get("codice") or ""), session)
+        except Exception:
+            if session is None:
+                if stock_changed:
+                    rollback = {vend_field: quantity}
+                    if not is_vending:
+                        rollback["giacenza_negozio"] = -quantity
+                    await db.prodotti.update_one(
+                        {"codice": sale.get("codice")}, {"$inc": rollback}
+                    )
+                if column_changed:
+                    await db.vending.update_one(
+                        {"colonna": column_code, "codice": sale.get("codice")},
+                        {"$inc": {"giacenza": -quantity}},
+                    )
+                    await _sync_product_vending_stock(str(sale.get("codice") or ""))
+            raise
+
+    try:
+        await _run_transactionally(operation)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "rimossi": 1, "id": sale_id}
 
 
@@ -1448,54 +1576,92 @@ async def bulk_vendite(body: BulkVenditaIn):
         raise HTTPException(422, "Per le vendite Vending usa il CSV distributore, che identifica la colonna reale")
     batch_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
-    inserted = 0
     skipped = 0
     errors = []
+    prepared = []
+    required_by_code: Dict[str, int] = {}
     for i, r in enumerate(body.righe):
         try:
-            codice = str(r.get("codice") or "").strip()
+            codice = _product_code_text(r.get("codice"))
             if not codice:
                 skipped += 1
                 continue
             qta = int(float(r.get("quantita") or 0))
             imp = float(r.get("importo") or 0)
             if qta <= 0:
-                skipped += 1
-                continue
+                raise ValueError("quantità non valida")
+            if imp < 0:
+                raise ValueError("importo non valido")
             data = str(r.get("data") or datetime.now(timezone.utc).isoformat())
             desc = str(r.get("descrizione") or "")
-            prod = await db.prodotti.find_one({"codice": codice})
-            if prod:
-                desc = desc or prod.get("descrizione", "")
-                field = "giacenza_vending" if body.canale == "VENDING" else "giacenza_negozio"
-                vend_field = "venduti_vending" if body.canale == "VENDING" else "venduti_negozio"
-                await db.prodotti.update_one({"codice": codice}, {"$inc": {field: -qta, vend_field: qta}})
-            v = VenditaGiornaliera(
+            prod = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
+            if not prod:
+                raise ValueError(f"prodotto non trovato: {codice}")
+            required_by_code[codice] = required_by_code.get(codice, 0) + qta
+            prepared.append(VenditaGiornaliera(
                 data=data,
                 codice=codice,
-                descrizione=desc,
+                descrizione=desc or prod.get("descrizione", ""),
                 quantita=qta,
                 importo=imp,
-                canale=body.canale,
-                pagamento=body.pagamento,
+                canale="NEGOZIO",
+                pagamento=str(body.pagamento or "CONTANTI").strip().upper(),
                 sorgente="BULK",
                 batch_id=batch_id,
-            )
-            await db.vendite.insert_one(v.model_dump())
-            inserted += 1
+            ).model_dump())
         except Exception as e:
             errors.append({"riga": i + 1, "errore": str(e)})
-    if inserted:
-        await db.vendite_bulk_imports.insert_one({
-            "id": batch_id,
-            "created_at": created_at,
-            "sorgente": "BULK",
-            "canale": body.canale,
-            "pagamento": body.pagamento,
-            "inseriti": inserted,
-            "saltati": skipped,
-            "status": "active",
-        })
+    for codice, required in required_by_code.items():
+        product = await db.prodotti.find_one({"codice": codice}, {"_id": 0, "giacenza_negozio": 1})
+        available = int((product or {}).get("giacenza_negozio") or 0)
+        if required > available:
+            errors.append({"codice": codice, "errore": f"giacenza {available}, richiesti {required}"})
+    if errors:
+        raise HTTPException(422, detail={"message": "Caricamento rifiutato: nessuna vendita registrata", "errori": errors})
+
+    async def operation(session):
+        kwargs = _session_kwargs(session)
+        changed: List[Dict[str, Any]] = []
+        inserted_ids: List[str] = []
+        try:
+            for sale in prepared:
+                quantity = int(sale["quantita"])
+                update = await db.prodotti.update_one(
+                    {"codice": sale["codice"], "giacenza_negozio": {"$gte": quantity}},
+                    {"$inc": {"giacenza_negozio": -quantity, "venduti_negozio": quantity}},
+                    **kwargs,
+                )
+                if update.modified_count != 1:
+                    raise RuntimeError(f"Giacenza cambiata per {sale['codice']}")
+                changed.append(sale)
+                await db.vendite.insert_one(sale.copy(), **kwargs)
+                inserted_ids.append(sale["id"])
+            if prepared:
+                await db.vendite_bulk_imports.insert_one({
+                    "id": batch_id,
+                    "created_at": created_at,
+                    "sorgente": "BULK",
+                    "canale": "NEGOZIO",
+                    "pagamento": str(body.pagamento or "CONTANTI").strip().upper(),
+                    "inseriti": len(prepared),
+                    "saltati": skipped,
+                    "status": "active",
+                }, **kwargs)
+        except Exception:
+            if session is None:
+                if inserted_ids:
+                    await db.vendite.delete_many({"id": {"$in": inserted_ids}, "batch_id": batch_id})
+                for sale in changed:
+                    quantity = int(sale["quantita"])
+                    await db.prodotti.update_one(
+                        {"codice": sale["codice"]},
+                        {"$inc": {"giacenza_negozio": quantity, "venduti_negozio": -quantity}},
+                    )
+                await db.vendite_bulk_imports.delete_one({"id": batch_id})
+            raise
+
+    await _run_transactionally(operation)
+    inserted = len(prepared)
     return {
         "inseriti": inserted,
         "saltati": skipped,
@@ -1530,38 +1696,64 @@ async def annulla_bulk_vendite(batch_id: str):
     if claim.modified_count != 1:
         raise HTTPException(404, "Caricamento non trovato o già annullato")
 
-    removed = 0
-    try:
+    async def operation(session):
+        kwargs = _session_kwargs(session)
         sales = await db.vendite.find(
             {"batch_id": batch_id, "sorgente": "BULK"},
             {"_id": 0},
+            **kwargs,
         ).to_list(None)
-        for sale in sales:
-            field = "giacenza_vending" if sale.get("canale") == "VENDING" else "giacenza_negozio"
-            vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
-            quantity = int(sale.get("quantita") or 0)
-            stock_update = await db.prodotti.update_one(
-                {"codice": sale.get("codice")},
-                {"$inc": {field: quantity, vend_field: -quantity}},
+        completed = []
+        current_stock_change = None
+        try:
+            for sale in sales:
+                field = "giacenza_vending" if sale.get("canale") == "VENDING" else "giacenza_negozio"
+                vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
+                quantity = int(sale.get("quantita") or 0)
+                stock_update = await db.prodotti.update_one(
+                    {"codice": sale.get("codice")},
+                    {"$inc": {field: quantity, vend_field: -quantity}},
+                    **kwargs,
+                )
+                if stock_update.modified_count != 1:
+                    raise RuntimeError(f"Prodotto non trovato: {sale.get('codice')}")
+                current_stock_change = (sale, field, vend_field, quantity)
+                deletion = await db.vendite.delete_one(
+                    {"id": sale.get("id"), "batch_id": batch_id}, **kwargs
+                )
+                if deletion.deleted_count != 1:
+                    raise RuntimeError("Una vendita del caricamento non è stata eliminata")
+                completed.append(current_stock_change)
+                current_stock_change = None
+
+            await db.vendite_bulk_imports.update_one(
+                {"id": batch_id, "status": "annulling"},
+                {"$set": {
+                    "status": "annulled",
+                    "annulled_at": datetime.now(timezone.utc).isoformat(),
+                    "rimossi": len(completed),
+                }},
+                **kwargs,
             )
-            deletion = await db.vendite.delete_one({"id": sale.get("id"), "batch_id": batch_id})
-            if deletion.deleted_count != 1:
-                if stock_update.modified_count == 1:
+            return len(completed)
+        except Exception:
+            if session is None:
+                if current_stock_change:
+                    sale, field, vend_field, quantity = current_stock_change
                     await db.prodotti.update_one(
                         {"codice": sale.get("codice")},
                         {"$inc": {field: -quantity, vend_field: quantity}},
                     )
-                raise RuntimeError("Una vendita del caricamento non è stata eliminata")
-            removed += 1
+                for sale, field, vend_field, quantity in reversed(completed):
+                    await db.vendite.insert_one(sale.copy())
+                    await db.prodotti.update_one(
+                        {"codice": sale.get("codice")},
+                        {"$inc": {field: -quantity, vend_field: quantity}},
+                    )
+            raise
 
-        await db.vendite_bulk_imports.update_one(
-            {"id": batch_id},
-            {"$set": {
-                "status": "annulled",
-                "annulled_at": datetime.now(timezone.utc).isoformat(),
-                "rimossi": removed,
-            }},
-        )
+    try:
+        removed = await _run_transactionally(operation)
     except Exception as exc:
         await db.vendite_bulk_imports.update_one(
             {"id": batch_id, "status": "annulling"},
@@ -1596,16 +1788,43 @@ async def create_backup_snapshot(
     names = BACKUP_COLLECTIONS if collection_names is None else [
         name for name in collection_names if name in BACKUP_COLLECTIONS
     ]
+    checksums: Dict[str, str] = {}
     await db.backup_snapshot_items.delete_many({"snapshot_id": snapshot_id})
     for collection_name in names:
         collection = db[collection_name]
-        docs = await collection.find({}, {"_id": 0}).to_list(25000)
-        counts[collection_name] = len(docs)
-        if docs:
-            await db.backup_snapshot_items.insert_many([
-                {"snapshot_id": snapshot_id, "collection": collection_name, "doc": doc}
-                for doc in docs
-            ])
+        cursor = collection.find({}, {"_id": 0})
+        digest = hashlib.sha256()
+        count = 0
+        pending = []
+
+        async def store_document(document):
+            nonlocal count, pending
+            digest.update(json.dumps(
+                document, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+            ).encode("utf-8"))
+            digest.update(b"\n")
+            pending.append({
+                "snapshot_id": snapshot_id,
+                "collection": collection_name,
+                "position": count,
+                "doc": document,
+            })
+            count += 1
+            if len(pending) >= 1000:
+                await db.backup_snapshot_items.insert_many(pending)
+                pending = []
+
+        try:
+            async for doc in cursor:
+                await store_document(doc)
+        except TypeError:
+            # Compatibilità con i semplici cursor finti usati dai test.
+            for doc in await cursor.to_list(None):
+                await store_document(doc)
+        if pending:
+            await db.backup_snapshot_items.insert_many(pending)
+        counts[collection_name] = count
+        checksums[collection_name] = digest.hexdigest()
     total_docs = sum(counts.values())
     meta = {
         "id": snapshot_id,
@@ -1613,6 +1832,7 @@ async def create_backup_snapshot(
         "reason": reason[:80],
         "created_at": created_at,
         "counts": counts,
+        "checksums": checksums,
         "total_docs": total_docs,
         "partial": collection_names is not None,
         "status": "READY",
@@ -1697,7 +1917,7 @@ async def _backup_documents(
         items = await db.backup_snapshot_items.find(
             {"snapshot_id": snapshot_id, "collection": collection_name},
             {"_id": 0, "doc": 1},
-        ).to_list(25000)
+        ).sort("position", 1).to_list(None)
         collections[collection_name] = [item["doc"] for item in items]
     return collections
 
@@ -1719,22 +1939,59 @@ def _validate_backup_file(payload: Any) -> Dict[str, List[Dict[str, Any]]]:
         raise HTTPException(422, f"Backup incompleto: mancano {', '.join(missing)}")
     if unknown:
         raise HTTPException(422, f"Backup non valido: collezioni sconosciute {', '.join(unknown)}")
+    declared_counts = payload.get("counts") or {}
+    declared_checksums = payload.get("checksums") or {}
     for collection_name, docs in collections.items():
-        if not isinstance(docs, list) or len(docs) > 25000:
-            raise HTTPException(422, f"Collezione {collection_name} non valida o troppo grande")
+        if not isinstance(docs, list):
+            raise HTTPException(422, f"Collezione {collection_name} non valida")
         if any(not isinstance(doc, dict) or "_id" in doc for doc in docs):
             raise HTTPException(422, f"Documento non valido nella collezione {collection_name}")
+        if collection_name in declared_counts and int(declared_counts[collection_name]) != len(docs):
+            raise HTTPException(422, f"Conteggio non valido per la collezione {collection_name}")
+        if collection_name in declared_checksums:
+            digest = hashlib.sha256()
+            for doc in docs:
+                digest.update(json.dumps(
+                    doc, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+                ).encode("utf-8"))
+                digest.update(b"\n")
+            if not secrets.compare_digest(str(declared_checksums[collection_name]), digest.hexdigest()):
+                raise HTTPException(422, f"Checksum non valido per la collezione {collection_name}")
     return collections
 
 
-async def _restore_collections(collections: Dict[str, List[Dict[str, Any]]]):
+async def _restore_collections(collections: Dict[str, List[Dict[str, Any]]], session=None):
+    kwargs = _session_kwargs(session)
     for collection_name in BACKUP_COLLECTIONS:
         if collection_name not in collections:
             continue
-        await db[collection_name].delete_many({})
+        await db[collection_name].delete_many({}, **kwargs)
         docs = collections[collection_name]
-        if docs:
-            await db[collection_name].insert_many(docs)
+        for start in range(0, len(docs), 1000):
+            await db[collection_name].insert_many(docs[start:start + 1000], **kwargs)
+
+
+@asynccontextmanager
+async def _restore_lock():
+    token = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    await db.operation_locks.delete_many({
+        "_id": "backup-restore",
+        "expires_at": {"$lte": now},
+    })
+    try:
+        await db.operation_locks.insert_one({
+            "_id": "backup-restore",
+            "token": token,
+            "created_at": now,
+            "expires_at": now + timedelta(hours=6),
+        })
+    except DuplicateKeyError as exc:
+        raise HTTPException(409, "Un altro ripristino è già in corso") from exc
+    try:
+        yield
+    finally:
+        await db.operation_locks.delete_one({"_id": "backup-restore", "token": token})
 
 
 @api.post("/backup/create")
@@ -1803,6 +2060,7 @@ async def backup_download(snapshot_id: str):
         "created_at": meta.get("created_at"),
         "label": meta.get("label"),
         "counts": {name: len(docs) for name, docs in collections.items()},
+        "checksums": meta.get("checksums") or {},
         "collections": collections,
     }
     content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
@@ -1817,29 +2075,31 @@ async def backup_download(snapshot_id: str):
 
 @api.post("/backup/{snapshot_id}/restore")
 async def backup_restore(snapshot_id: str):
-    meta = await db.backup_snapshots.find_one(
-        {"id": snapshot_id, "status": {"$ne": "PRUNED"}}, {"_id": 0}
-    )
-    if not meta:
-        raise HTTPException(404, "backup non trovato")
-    restore_backup = await create_backup_snapshot(
-        f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
-        "pre-restore",
-    )
-    # I vecchi snapshot non contenevano tutte le collezioni operative: in quel
-    # caso ripristiniamo soltanto ciò che era stato effettivamente salvato.
-    backed_up_names = [name for name in (meta.get("counts") or {}) if name in BACKUP_COLLECTIONS]
-    await _restore_collections(await _backup_documents(snapshot_id, backed_up_names))
-    if "vending" in backed_up_names:
-        await db.vending.update_many({}, {"$set": {
-            "giacenza_aggiornata_il": meta.get("created_at"),
-            "giacenza_sorgente": "BACKUP_RIPRISTINATO",
-        }})
-    await db.backup_snapshots.update_one(
-        {"id": snapshot_id},
-        {"$set": {"last_restored_at": datetime.now(timezone.utc).isoformat()}},
-    )
-    return {"ok": True, "restored": snapshot_id, "pre_restore_backup": restore_backup["id"]}
+    async with _restore_lock():
+        meta = await db.backup_snapshots.find_one(
+            {"id": snapshot_id, "status": {"$ne": "PRUNED"}}, {"_id": 0}
+        )
+        if not meta:
+            raise HTTPException(404, "backup non trovato")
+        restore_backup = await create_backup_snapshot(
+            f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
+            "pre-restore",
+        )
+        # I vecchi snapshot non contenevano tutte le collezioni operative: in quel
+        # caso ripristiniamo soltanto ciò che era stato effettivamente salvato.
+        backed_up_names = [name for name in (meta.get("counts") or {}) if name in BACKUP_COLLECTIONS]
+        collections = await _backup_documents(snapshot_id, backed_up_names)
+        await _run_transactionally(lambda session: _restore_collections(collections, session))
+        if "vending" in backed_up_names:
+            await db.vending.update_many({}, {"$set": {
+                "giacenza_aggiornata_il": meta.get("created_at"),
+                "giacenza_sorgente": "BACKUP_RIPRISTINATO",
+            }})
+        await db.backup_snapshots.update_one(
+            {"id": snapshot_id},
+            {"$set": {"last_restored_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        return {"ok": True, "restored": snapshot_id, "pre_restore_backup": restore_backup["id"]}
 
 
 @api.post("/backup/restore-file")
@@ -1850,23 +2110,24 @@ async def backup_restore_file(file: UploadFile = File(...)):
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(422, f"File di backup non leggibile: {exc}")
     collections = _validate_backup_file(payload)
-    restore_backup = await create_backup_snapshot(
-        f"Prima del ripristino file {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
-        "pre-restore-file",
-    )
-    await _restore_collections(collections)
-    if "vending" in collections:
-        snapshot_at = payload.get("created_at") or datetime.now(timezone.utc).isoformat()
-        await db.vending.update_many({}, {"$set": {
-            "giacenza_aggiornata_il": snapshot_at,
-            "giacenza_sorgente": "BACKUP_FILE_RIPRISTINATO",
-        }})
-    return {
-        "ok": True,
-        "file": file.filename,
-        "restored_docs": sum(len(docs) for docs in collections.values()),
-        "pre_restore_backup": restore_backup["id"],
-    }
+    async with _restore_lock():
+        restore_backup = await create_backup_snapshot(
+            f"Prima del ripristino file {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
+            "pre-restore-file",
+        )
+        await _run_transactionally(lambda session: _restore_collections(collections, session))
+        if "vending" in collections:
+            snapshot_at = payload.get("created_at") or datetime.now(timezone.utc).isoformat()
+            await db.vending.update_many({}, {"$set": {
+                "giacenza_aggiornata_il": snapshot_at,
+                "giacenza_sorgente": "BACKUP_FILE_RIPRISTINATO",
+            }})
+        return {
+            "ok": True,
+            "file": file.filename,
+            "restored_docs": sum(len(docs) for docs in collections.values()),
+            "pre_restore_backup": restore_backup["id"],
+        }
 
 
 def _import_includes_accounting(report: Dict[str, Any]) -> bool:
@@ -2426,6 +2687,7 @@ async def _annotate_csv_vending_stock_effects(rows: List[Dict[str, Any]]) -> Dic
     by_code = {str(column.get("colonna") or ""): column for column in columns}
     restored_snapshot = await _latest_restored_vending_snapshot_at()
     missing_baseline = set()
+    missing_columns = set()
     stock_rows = 0
     reflected_rows = 0
     required_by_column: Dict[str, int] = {}
@@ -2436,6 +2698,7 @@ async def _annotate_csv_vending_stock_effects(rows: List[Dict[str, Any]]) -> Dic
         row["scala_giacenza"] = False
         if not column:
             row["giacenza_motivo"] = "COLONNA_NON_TROVATA"
+            missing_columns.add(column_code or "(non indicata)")
             continue
         snapshot_value = column.get("giacenza_aggiornata_il") or restored_snapshot
         sale_at = _local_sale_datetime(row.get("data"))
@@ -2467,9 +2730,10 @@ async def _annotate_csv_vending_stock_effects(rows: List[Dict[str, Any]]) -> Dic
     return {
         "righe_da_scalare": stock_rows,
         "righe_gia_comprese_nella_giacenza": reflected_rows,
+        "colonne_non_trovate": sorted(missing_columns),
         "colonne_senza_riferimento_giacenza": sorted(missing_baseline),
         "errori_giacenza": stock_errors,
-        "importabile": not missing_baseline and not stock_errors,
+        "importabile": not missing_columns and not missing_baseline and not stock_errors,
     }
 
 
@@ -2813,13 +3077,18 @@ async def vending_accounting_source():
 VENDING_CASH_STATE_ID = "saldo"
 
 
-async def _vending_cash_balance() -> float:
+async def _vending_cash_balance(session=None) -> float:
     """Restituisce la giacenza cash, inizializzandola dai dati legacy una volta."""
-    state = await db.cassa_vending_stato.find_one({"id": VENDING_CASH_STATE_ID}, {"_id": 0})
+    kwargs = _session_kwargs(session)
+    state = await db.cassa_vending_stato.find_one(
+        {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
+    )
     if state:
         return round(float(state.get("giacenza") or 0), 2)
 
-    legacy_docs = await db.prelievi_vending.find({}, {"_id": 0, "importo": 1}).to_list(10000)
+    legacy_docs = await db.prelievi_vending.find(
+        {}, {"_id": 0, "importo": 1}, **kwargs
+    ).to_list(10000)
     legacy_balance = round(sum(float(doc.get("importo") or 0) for doc in legacy_docs), 2)
     now = datetime.now(timezone.utc).isoformat()
     await db.cassa_vending_stato.update_one(
@@ -2831,21 +3100,26 @@ async def _vending_cash_balance() -> float:
             "updated_at": now,
         }},
         upsert=True,
+        **kwargs,
     )
-    state = await db.cassa_vending_stato.find_one({"id": VENDING_CASH_STATE_ID}, {"_id": 0})
+    state = await db.cassa_vending_stato.find_one(
+        {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
+    )
     return round(float((state or {}).get("giacenza") or 0), 2)
 
 
-async def _adjust_vending_cash_balance(amount: float) -> float:
-    await _vending_cash_balance()
+async def _adjust_vending_cash_balance(amount: float, session=None) -> float:
+    kwargs = _session_kwargs(session)
+    await _vending_cash_balance(session)
     await db.cassa_vending_stato.update_one(
         {"id": VENDING_CASH_STATE_ID},
         {
             "$inc": {"giacenza": round(float(amount or 0), 2)},
             "$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
         },
+        **kwargs,
     )
-    return await _vending_cash_balance()
+    return await _vending_cash_balance(session)
 
 
 @api.post("/vendite/preview-csv-vending")
@@ -2887,6 +3161,69 @@ async def preview_csv_vending(file: UploadFile = File(...), pagamento: str = "CO
     }
 
 
+async def _rollback_csv_import_sales(batch_id: str, session=None) -> Dict[str, Any]:
+    """Compensa le sole vendite/scorte di un batch CSV non finalizzato."""
+    kwargs = _session_kwargs(session)
+    sales = await db.vendite.find(
+        {"batch_id": batch_id, "sorgente": "CSV_VENDING"},
+        {"_id": 0},
+        **kwargs,
+    ).to_list(None)
+    removed = 0
+    cash_total = 0.0
+    touched_codes = set()
+    for sale in sales:
+        undo_meta = sale.get("undo_meta") or {}
+        codice = str(sale.get("codice") or "")
+        if undo_meta.get("product_stock_adjusted"):
+            await db.prodotti.update_one(
+                {"codice": codice},
+                {"$inc": {"venduti_vending": -int(sale.get("quantita") or 0)}},
+                **kwargs,
+            )
+        elif undo_meta.get("product_created"):
+            product = await db.prodotti.find_one(
+                {"id": undo_meta.get("product_id")}, {"_id": 0}, **kwargs
+            )
+            can_delete = product and product.get("created_from_csv_batch") == batch_id and all(
+                int(product.get(field) or 0) == expected
+                for field, expected in {
+                    "acquistati": 0,
+                    "venduti_negozio": 0,
+                    "venduti_vending": 1,
+                    "giacenza_negozio": 0,
+                    "giacenza_vending": 0,
+                }.items()
+            )
+            if can_delete:
+                await db.prodotti.delete_one(
+                    {"id": product["id"], "created_from_csv_batch": batch_id}, **kwargs
+                )
+            else:
+                await db.prodotti.update_one(
+                    {"codice": codice}, {"$inc": {"venduti_vending": -1}}, **kwargs
+                )
+        if undo_meta.get("vending_stock_decremented"):
+            await db.vending.update_one(
+                {"id": undo_meta.get("vending_column_id")},
+                {"$inc": {"giacenza": int(sale.get("quantita") or 0)}},
+                **kwargs,
+            )
+        if codice:
+            touched_codes.add(codice)
+        if _is_cash_payment(sale.get("pagamento")):
+            cash_total += float(sale.get("importo") or 0)
+        deletion = await db.vendite.delete_one(
+            {"id": sale.get("id"), "batch_id": batch_id}, **kwargs
+        )
+        if deletion.deleted_count != 1:
+            raise RuntimeError("Rollback CSV incompleto: una vendita non è stata eliminata")
+        removed += 1
+    for codice in touched_codes:
+        await _sync_product_vending_stock(codice, session)
+    return {"rimossi": removed, "contanti": round(cash_total, 2)}
+
+
 @api.post("/vendite/import-csv-vending")
 async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CONTANTI"):
     """Importa il CSV gia' validato dall'anteprima della UI."""
@@ -2901,6 +3238,11 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
     stock_summary = parsed["stock"]
     if not stock_summary["importabile"]:
         details = []
+        if stock_summary.get("colonne_non_trovate"):
+            details.append(
+                "colonne non configurate: "
+                + ", ".join(stock_summary["colonne_non_trovate"])
+            )
         if stock_summary["colonne_senza_riferimento_giacenza"]:
             details.append(
                 "riferimento giacenza mancante per "
@@ -2944,9 +3286,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 if prod:
                     codice = prod["codice"]
             if not codice:
-                # crea un placeholder
-                slug = re.sub(r"\s+", "_", nome.strip().lower())[:20]
-                codice = f"CSV-{slug}"
+                raise ValueError(f"prodotto non riconosciuto: {nome or 'senza nome'}")
 
             # Scala soltanto vendite successive alla fotografia fisica della colonna.
             if colonna:
@@ -2975,16 +3315,7 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
                 if colonna:
                     await _sync_product_vending_stock(codice)
             else:
-                # crea prodotto minimale
-                product_doc = Prodotto(
-                    codice=codice, descrizione=nome or codice,
-                    categoria=(categoria.upper() or "SIGARETTE") if categoria else "SIGARETTE",
-                    prezzo=prezzo_f, venduti_vending=1,
-                ).model_dump()
-                product_doc["created_from_csv_batch"] = batch_id
-                await db.prodotti.insert_one(product_doc)
-                undo_meta["product_created"] = True
-                undo_meta["product_id"] = product_doc["id"]
+                raise ValueError(f"prodotto non trovato: {codice}")
 
             # ogni riga CSV = 1 pezzo venduto (formato tipico distributore)
             v = VenditaGiornaliera(
@@ -3025,32 +3356,69 @@ async def import_csv_vending(file: UploadFile = File(...), pagamento: str = "CON
             if codice:
                 await _sync_product_vending_stock(codice)
             errors.append({"riga": csv_row["riga"], "errore": str(exc)})
-    if imported_cash:
-        await _adjust_vending_cash_balance(imported_cash)
-    accounting_snapshot, _ = await _store_vending_accounting_snapshot(
-        content,
-        file.filename or "vendite-vending.csv",
-        source_batch_id=batch_id if inserted else None,
+    if errors:
+        # Nessun effetto parziale: le righe già applicate vengono compensate
+        # prima di restituire l'errore e la contabilità non viene aggiornata.
+        await _run_transactionally(
+            lambda session: _rollback_csv_import_sales(batch_id, session)
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "message": "Import CSV rifiutato: nessuna vendita registrata",
+                "errori": errors,
+            },
+        )
+    previous_accounting_state = await db.vending_accounting_state.find_one(
+        {"id": VENDING_ACCOUNTING_STATE_ID}, {"_id": 0}
     )
-    if inserted:
-        await db.vendite_bulk_imports.insert_one({
-            "id": batch_id,
-            "created_at": created_at,
-            "sorgente": "CSV_VENDING",
-            "canale": "VENDING",
-            "pagamento": pagamento,
-            "inseriti": inserted,
-            "saltati": parsed["saltati"],
-            "file_sha256": file_sha256,
-            "file_name": Path(file.filename or "vendite-vending.csv").name,
-            "accounting_snapshot_id": accounting_snapshot["id"],
-            "previous_accounting_snapshot_id": accounting_snapshot.get("previous_snapshot_id"),
-            "righe_file": file_rows,
-            "righe_storico_excel": parsed["righe_storico_excel"],
-            "righe_csv_gia_importate": parsed["righe_csv_gia_importate"],
-            **stock_summary,
-            "status": "active",
-        })
+    cash_adjusted = False
+    try:
+        if imported_cash:
+            await _adjust_vending_cash_balance(imported_cash)
+            cash_adjusted = True
+        accounting_snapshot, _ = await _store_vending_accounting_snapshot(
+            content,
+            file.filename or "vendite-vending.csv",
+            source_batch_id=batch_id if inserted else None,
+        )
+        if inserted:
+            await db.vendite_bulk_imports.insert_one({
+                "id": batch_id,
+                "created_at": created_at,
+                "sorgente": "CSV_VENDING",
+                "canale": "VENDING",
+                "pagamento": pagamento,
+                "inseriti": inserted,
+                "saltati": parsed["saltati"],
+                "file_sha256": file_sha256,
+                "file_name": Path(file.filename or "vendite-vending.csv").name,
+                "accounting_snapshot_id": accounting_snapshot["id"],
+                "previous_accounting_snapshot_id": accounting_snapshot.get("previous_snapshot_id"),
+                "righe_file": file_rows,
+                "righe_storico_excel": parsed["righe_storico_excel"],
+                "righe_csv_gia_importate": parsed["righe_csv_gia_importate"],
+                **stock_summary,
+                "status": "active",
+            })
+    except Exception as exc:
+        if inserted:
+            await db.vending_accounting_events.delete_many({"source_batch_id": batch_id})
+            await db.vendite_bulk_imports.delete_one({"id": batch_id})
+        if previous_accounting_state is None:
+            await db.vending_accounting_state.delete_one({"id": VENDING_ACCOUNTING_STATE_ID})
+        else:
+            await db.vending_accounting_state.replace_one(
+                {"id": VENDING_ACCOUNTING_STATE_ID}, previous_accounting_state, upsert=True
+            )
+        if cash_adjusted:
+            await _adjust_vending_cash_balance(-imported_cash)
+        await _run_transactionally(
+            lambda session: _rollback_csv_import_sales(batch_id, session)
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(500, f"Import CSV annullato: {exc}") from exc
     return {
         "inseriti": inserted,
         "saltati": parsed["saltati"],
@@ -3097,71 +3465,16 @@ async def annulla_csv_vending(batch_id: str):
         raise HTTPException(404, "Caricamento CSV non trovato o già annullato")
 
     batch = await db.vendite_bulk_imports.find_one({"id": batch_id}, {"_id": 0})
-
-    removed = 0
-    cash_to_restore = 0.0
-    try:
-        sales = await db.vendite.find(
-            {"batch_id": batch_id, "sorgente": "CSV_VENDING"},
-            {"_id": 0},
-        ).to_list(None)
-        for sale in sales:
-            undo_meta = sale.get("undo_meta") or {}
-            codice = sale.get("codice")
-            if undo_meta.get("product_stock_adjusted"):
-                await db.prodotti.update_one(
-                    {"codice": codice},
-                    {"$inc": {"venduti_vending": -1}},
-                )
-            elif undo_meta.get("product_created"):
-                product = await db.prodotti.find_one({"id": undo_meta.get("product_id")})
-                can_delete = product and product.get("created_from_csv_batch") == batch_id and all(
-                    int(product.get(field) or 0) == expected
-                    for field, expected in {
-                        "acquistati": 0,
-                        "venduti_negozio": 0,
-                        "venduti_vending": 1,
-                        "giacenza_negozio": 0,
-                        "giacenza_vending": 0,
-                    }.items()
-                )
-                if can_delete:
-                    await db.prodotti.delete_one({"id": product["id"], "created_from_csv_batch": batch_id})
-                else:
-                    await db.prodotti.update_one({"codice": codice}, {"$inc": {"venduti_vending": -1}})
-            if undo_meta.get("vending_stock_decremented"):
-                await db.vending.update_one(
-                    {"id": undo_meta.get("vending_column_id")},
-                    {"$inc": {"giacenza": 1}},
-                )
-            if codice:
-                await _sync_product_vending_stock(str(codice))
-            if _is_cash_payment(sale.get("pagamento")):
-                cash_to_restore += float(sale.get("importo") or 0)
-            deletion = await db.vendite.delete_one({"id": sale.get("id"), "batch_id": batch_id})
-            if deletion.deleted_count != 1:
-                raise RuntimeError("Una vendita CSV non è stata eliminata")
-            removed += 1
-
-        created_products = await db.prodotti.find(
-            {"created_from_csv_batch": batch_id},
-            {"_id": 0},
-        ).to_list(None)
-        for product in created_products:
-            if all(
-                int(product.get(field) or 0) == 0
-                for field in (
-                    "acquistati", "venduti_negozio", "venduti_vending",
-                    "giacenza_negozio", "giacenza_vending",
-                )
-            ):
-                await db.prodotti.delete_one({"id": product.get("id"), "created_from_csv_batch": batch_id})
-
+    async def operation(session):
+        kwargs = _session_kwargs(session)
+        rollback = await _rollback_csv_import_sales(batch_id, session)
+        cash_to_restore = float(rollback["contanti"])
         if cash_to_restore:
-            await _adjust_vending_cash_balance(-cash_to_restore)
+            await _adjust_vending_cash_balance(-cash_to_restore, session)
+
         accounting_restored = False
         ledger_deletion = await db.vending_accounting_events.delete_many(
-            {"source_batch_id": batch_id}
+            {"source_batch_id": batch_id}, **kwargs
         )
         if int(getattr(ledger_deletion, "deleted_count", 0) or 0):
             accounting_restored = True
@@ -3171,33 +3484,45 @@ async def annulla_csv_vending(batch_id: str):
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "last_undo_batch_id": batch_id,
                 }},
+                **kwargs,
             )
         snapshot_id = (batch or {}).get("accounting_snapshot_id")
         if snapshot_id and snapshot_id != VENDING_ACCOUNTING_STATE_ID:
             snapshot = await db.vending_accounting_snapshots.find_one(
-                {"id": snapshot_id, "status": "active"}, {"_id": 0}
+                {"id": snapshot_id, "status": "active"}, {"_id": 0}, **kwargs
             )
             if snapshot:
                 reverted_at = datetime.now(timezone.utc).isoformat()
                 await db.vending_accounting_snapshots.update_one(
                     {"id": snapshot_id, "status": "active"},
                     {"$set": {"status": "reverted", "reverted_at": reverted_at}},
+                    **kwargs,
                 )
                 previous_id = snapshot.get("previous_snapshot_id")
                 if previous_id:
                     await db.vending_accounting_snapshots.update_one(
                         {"id": previous_id, "status": "superseded"},
                         {"$set": {"status": "active", "reactivated_at": reverted_at}},
+                        **kwargs,
                     )
                 accounting_restored = True
         await db.vendite_bulk_imports.update_one(
-            {"id": batch_id},
+            {"id": batch_id, "status": "annulling"},
             {"$set": {
                 "status": "annulled",
                 "annulled_at": datetime.now(timezone.utc).isoformat(),
-                "rimossi": removed,
+                "rimossi": rollback["rimossi"],
             }},
+            **kwargs,
         )
+        return {
+            "removed": rollback["rimossi"],
+            "cash": cash_to_restore,
+            "accounting_restored": accounting_restored,
+        }
+
+    try:
+        result = await _run_transactionally(operation)
     except Exception as exc:
         await db.vendite_bulk_imports.update_one(
             {"id": batch_id, "status": "annulling"},
@@ -3208,9 +3533,9 @@ async def annulla_csv_vending(batch_id: str):
     return {
         "ok": True,
         "batch_id": batch_id,
-        "rimossi": removed,
-        "contanti_rimossi_giacenza": round(cash_to_restore, 2),
-        "contabilita_ripristinata": accounting_restored,
+        "rimossi": result["removed"],
+        "contanti_rimossi_giacenza": round(result["cash"], 2),
+        "contabilita_ripristinata": result["accounting_restored"],
     }
 
 
@@ -3370,16 +3695,20 @@ async def list_vending():
     return out
 
 
-async def _sync_product_vending_stock(codice: str) -> None:
+async def _sync_product_vending_stock(codice: str, session=None) -> None:
     """Allinea il totale prodotto alla somma delle colonne vending reali."""
     if not codice:
         return
+    kwargs = _session_kwargs(session)
     columns = await db.vending.find(
         {"codice": codice},
         {"_id": 0, "giacenza": 1},
+        **kwargs,
     ).to_list(500)
     totale = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in columns)
-    await db.prodotti.update_one({"codice": codice}, {"$set": {"giacenza_vending": totale}})
+    await db.prodotti.update_one(
+        {"codice": codice}, {"$set": {"giacenza_vending": totale}}, **kwargs
+    )
 
 
 @api.put("/vending/{v_id}/giacenza")

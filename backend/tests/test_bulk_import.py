@@ -71,12 +71,20 @@ def test_bulk_sales_can_be_undone_and_stock_is_restored(monkeypatch):
             "giacenza_vending": 0,
             "venduti_vending": 0,
         })
+        await database.prodotti.insert_one({
+            "codice": "P2",
+            "descrizione": "Prodotto due",
+            "giacenza_negozio": 4,
+            "venduti_negozio": 0,
+            "giacenza_vending": 0,
+            "venduti_vending": 0,
+        })
         imported = await server.bulk_vendite(server.BulkVenditaIn(
             canale="NEGOZIO",
             pagamento="CONTANTI",
             righe=[
                 {"data": "2026-10-06", "codice": "P1", "descrizione": "", "quantita": 2, "importo": 12},
-                {"data": "2026-10-06", "codice": "SCONOSCIUTO", "descrizione": "Altro", "quantita": 1, "importo": 3},
+                {"data": "2026-10-06", "codice": "P2", "descrizione": "Altro", "quantita": 1, "importo": 3},
             ],
         ))
         product_after_import = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
@@ -108,6 +116,10 @@ def test_bulk_sales_cannot_be_undone_twice(monkeypatch):
     monkeypatch.setattr(server, "db", database)
 
     async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto uno",
+            "giacenza_negozio": 2, "venduti_negozio": 0,
+        })
         imported = await server.bulk_vendite(server.BulkVenditaIn(
             righe=[{"data": "2026-10-06", "codice": "P1", "quantita": 1, "importo": 5}],
         ))
@@ -118,6 +130,31 @@ def test_bulk_sales_cannot_be_undone_twice(monkeypatch):
         asyncio.run(scenario())
 
     assert exc.value.status_code == 404
+
+
+def test_bulk_sales_reject_unknown_product_without_partial_writes(monkeypatch):
+    database = AsyncMongoMockClient()["bulk_sales_atomic_validation_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto uno",
+            "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        with pytest.raises(HTTPException) as caught:
+            await server.bulk_vendite(server.BulkVenditaIn(righe=[
+                {"codice": "P1", "quantita": 2, "importo": 10},
+                {"codice": "SCONOSCIUTO", "quantita": 1, "importo": 5},
+            ]))
+        product = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
+        sales = await database.vendite.count_documents({})
+        return caught.value, product, sales
+
+    error, product, sales = asyncio.run(scenario())
+    assert error.status_code == 422
+    assert product["giacenza_negozio"] == 10
+    assert product["venduti_negozio"] == 0
+    assert sales == 0
 
 
 def test_manual_sale_can_be_undone_and_stock_is_restored(monkeypatch):
