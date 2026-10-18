@@ -225,6 +225,17 @@ def test_reconciliation_date_range_is_validated_and_applied(database):
     assert result["documenti_esaminati"].get("versamenti") == 1
 
 
+def test_parameter_change_is_audited(database):
+    async def scenario():
+        await database.parametri.insert_one({"nome": "AGGIO_PCT", "valore": 0.1})
+        await server.update_parametro("AGGIO_PCT", server.ParametroIn(valore=0.2))
+        return await database.audit_events.find_one({"entita": "PARAMETRO"}, {"_id": 0})
+    audit = asyncio.run(scenario())
+    assert audit["entita_id"] == "AGGIO_PCT"
+    assert audit["prima"]["valore"] == 0.1
+    assert audit["dopo"]["valore"] == 0.2
+
+
 def test_http_money_validation_and_protected_reconciliation(database, monkeypatch):
     monkeypatch.delenv("APP_USERNAME", raising=False)
     monkeypatch.delenv("APP_PASSWORD", raising=False)

@@ -653,7 +653,12 @@ async def _record_audit_event(
     batch_id: Optional[str] = None,
 ) -> None:
     """Scrive un evento append-only senza includere identificativi Mongo interni."""
-    await db.audit_events.insert_one({
+    audit_collection = getattr(db, "audit_events", None)
+    # Fixture legacy/read-only che espongono solo le raccolte necessarie alla
+    # singola operazione non devono fallire per l'audit opzionale.
+    if audit_collection is None:
+        return
+    await audit_collection.insert_one({
         "id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "azione": azione,
@@ -4463,7 +4468,14 @@ async def update_giacenza_reale(codice: str, body: GiacenzaRealeIn, request: Req
                     )
             raise
 
-    return await _run_transactionally(persist_adjustment)
+    result = await _run_transactionally(persist_adjustment)
+    if result.get("rettifiche"):
+        await _record_audit_event(
+            "RETTIFICATO", "GIACENZA_REALE", code,
+            dopo={"rettifiche": result["rettifiche"], "giacenza_negozio": result["giacenza_negozio"], "giacenza_vending": result["giacenza_vending"]},
+            operatore=operator,
+        )
+    return result
 
 
 @api.get("/giacenze-reali/rettifiche/storico")
@@ -5143,6 +5155,11 @@ async def update_parametro(nome: str, body: ParametroIn):
         if delta:
             await _adjust_vending_cash_balance(delta)
     doc = await db.parametri.find_one({"nome": nome}, {"_id": 0})
+    if previous_value != float(value):
+        await _record_audit_event(
+            "MODIFICATO", "PARAMETRO", nome,
+            prima={"valore": previous_value}, dopo={"valore": float(value)},
+        )
     return doc
 
 
