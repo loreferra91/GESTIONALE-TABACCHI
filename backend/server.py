@@ -407,6 +407,29 @@ async def seed_if_empty():
     await db.parametri.insert_many(param_docs)
 
 
+async def ensure_product_ids() -> int:
+    """Assegna un identificativo ai prodotti legacy creati dagli import Excel."""
+    missing_id = {
+        "$or": [
+            {"id": {"$exists": False}},
+            {"id": None},
+            {"id": ""},
+        ]
+    }
+    products = await db.prodotti.find(missing_id, {"_id": 1}).to_list(MAX_LIMIT)
+    if not products:
+        return 0
+    operations = [
+        UpdateOne(
+            {"_id": product["_id"], **missing_id},
+            {"$set": {"id": str(uuid.uuid4())}},
+        )
+        for product in products
+    ]
+    result = await _bulk_update(db.prodotti, operations)
+    return result["modificati"]
+
+
 async def on_start():
     try:
         await seed_if_empty()
@@ -473,6 +496,9 @@ async def on_start():
             db.app_migrations.create_index("id", unique=True),
             db.anomalie_ignorate.create_index("key", unique=True),
         )
+        product_ids_created = await ensure_product_ids()
+        if product_ids_created:
+            logging.info("Assigned IDs to %s legacy products", product_ids_created)
         aliases_merged = await reconcile_adm_product_aliases()
         if aliases_merged:
             logging.info("Unified %s verified ADM product aliases", aliases_merged)
@@ -4659,7 +4685,15 @@ async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, st
                     canonical_rows.add(codice_s)
         except Exception:
             err += 1
-    operations = [UpdateOne({"codice": code}, {"$set": data}, upsert=True) for code, data in products_by_code.items()]
+    operations = []
+    for code, data in products_by_code.items():
+        insert_defaults = Prodotto(codice=code, descrizione=data["descrizione"]).model_dump()
+        insert_defaults = {key: value for key, value in insert_defaults.items() if key not in data}
+        operations.append(UpdateOne(
+            {"codice": code},
+            {"$set": data, "$setOnInsert": insert_defaults},
+            upsert=True,
+        ))
     result = await _bulk_upsert(db.prodotti, operations)
     if alias_codes:
         for old_code, new_code in alias_mappings.items():

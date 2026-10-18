@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+from mongomock_motor import AsyncMongoMockClient
+
 import backend.server as server
 
 
@@ -117,10 +119,39 @@ def test_import_prefers_canonical_snapshot_over_stale_alias(monkeypatch):
     assert result["alias_unificati"] == 1
     assert len(products.operations) == 1
     merged = products.operations[0]._doc["$set"]
+    insert_defaults = products.operations[0]._doc["$setOnInsert"]
     assert merged["codice"] == "AMMS96"
     assert merged["acquistati"] == 5
     assert merged["venduti_negozio"] == 7
     assert merged["venduti_vending"] == 2
     assert merged["giacenza_vending"] == 2
     assert merged["giacenza_negozio"] == 8
+    assert insert_defaults["id"]
+    assert insert_defaults["created_at"]
     assert products.deleted == [{"codice": {"$in": ["96"]}}]
+
+
+def test_ensure_product_ids_repairs_only_legacy_products(monkeypatch):
+    database = AsyncMongoMockClient()["product_identity_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"codice": "LEGACY-MISSING", "descrizione": "Senza ID"},
+            {"codice": "LEGACY-EMPTY", "descrizione": "ID vuoto", "id": ""},
+            {"codice": "CURRENT", "descrizione": "Con ID", "id": "keep-me"},
+        ])
+
+        changed = await server.ensure_product_ids()
+        products = await database.prodotti.find({}, {"_id": 0}).to_list(10)
+        changed_again = await server.ensure_product_ids()
+        return changed, changed_again, {product["codice"]: product for product in products}
+
+    changed, changed_again, products = asyncio.run(scenario())
+
+    assert changed == 2
+    assert changed_again == 0
+    assert products["LEGACY-MISSING"]["id"]
+    assert products["LEGACY-EMPTY"]["id"]
+    assert products["LEGACY-MISSING"]["id"] != products["LEGACY-EMPTY"]["id"]
+    assert products["CURRENT"]["id"] == "keep-me"
