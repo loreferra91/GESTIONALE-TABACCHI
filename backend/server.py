@@ -3212,8 +3212,13 @@ async def vending_accounting_source():
 
 
 @api.get("/contabilita/riconciliazione")
-async def accounting_reconciliation():
-    return await reconcile(db, _vending_payment_bucket)
+async def accounting_reconciliation(date_from: Optional[str] = None, date_to: Optional[str] = None):
+    for value, label in ((date_from, "date_from"), (date_to, "date_to")):
+        if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise HTTPException(422, f"{label} deve avere formato YYYY-MM-DD")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from non può essere successiva a date_to")
+    return await reconcile(db, _vending_payment_bucket, date_from=date_from, date_to=date_to)
 
 
 VENDING_CASH_STATE_ID = "saldo"

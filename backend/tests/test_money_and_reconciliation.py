@@ -210,6 +210,21 @@ def test_reconciliation_skips_ambiguous_csv_events(database):
     assert result["vendite_csv_non_confrontabili"] == 1
 
 
+def test_reconciliation_date_range_is_validated_and_applied(database):
+    async def scenario():
+        await database.versamenti.insert_many([
+            {"id": "old", "data": "2026-10-01", "importo": 1},
+            {"id": "new", "data": "2026-10-18", "importo": 2},
+        ])
+        result = await server.accounting_reconciliation(date_from="2026-10-18", date_to="2026-10-18")
+        with pytest.raises(Exception):
+            await server.accounting_reconciliation(date_from="18/10/2026")
+        return result
+    result = asyncio.run(scenario())
+    assert result["intervallo"] == {"da": "2026-10-18", "a": "2026-10-18"}
+    assert result["documenti_esaminati"].get("versamenti") == 1
+
+
 def test_http_money_validation_and_protected_reconciliation(database, monkeypatch):
     monkeypatch.delenv("APP_USERNAME", raising=False)
     monkeypatch.delenv("APP_PASSWORD", raising=False)

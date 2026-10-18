@@ -37,7 +37,7 @@ test("controllo esplicito, stato occupato e risultato senza certificare le righe
   expect(api.get).not.toHaveBeenCalled();
   await act(async () => container.querySelector("button").click());
   expect(container.querySelector("button").disabled).toBe(true);
-  expect(api.get).toHaveBeenCalledWith("/contabilita/riconciliazione");
+  expect(api.get).toHaveBeenCalledWith("/contabilita/riconciliazione", { params: {} });
   await act(async () => complete({ data: report }));
   expect(container.textContent).toContain("Nessuna discrepanza rilevata nei controlli eseguiti");
   expect(container.textContent).toContain("5 non confrontabili (non necessariamente errate)");

@@ -6,6 +6,8 @@ export default function ReconciliationPanel() {
   const [report, setReport] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
 
   const run = async () => {
     if (busy) return;
@@ -13,7 +15,10 @@ export default function ReconciliationPanel() {
     setError("");
     setReport(null);
     try {
-      const response = await api.get("/contabilita/riconciliazione");
+      const params = {};
+      if (dateFrom) params.date_from = dateFrom;
+      if (dateTo) params.date_to = dateTo;
+      const response = await api.get("/contabilita/riconciliazione", { params });
       setReport(response.data);
     } catch (failure) {
       setError(apiErrorMessage(failure, "Controllo non riuscito. Riprovare."));
@@ -33,6 +38,18 @@ export default function ReconciliationPanel() {
         className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold disabled:opacity-50">
         {busy ? "Controllo in corso…" : "Esegui controllo"}
       </button>
+      <div className="mt-3 flex flex-wrap items-end gap-3">
+        <label className="text-xs font-semibold text-slate-600">Da<input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="mt-1 block rounded border px-2 py-1 text-sm font-normal" /></label>
+        <label className="text-xs font-semibold text-slate-600">A<input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="mt-1 block rounded border px-2 py-1 text-sm font-normal" /></label>
+        {report && <button type="button" onClick={() => {
+          const rows = report.dettagli || [];
+          const header = ["tipo", "raccolta", "riferimento", "messaggio"];
+          const csv = [header, ...rows.map(row => header.map(field => String(row[field] || "").replaceAll('"', '""')))]
+            .map(row => row.map(value => `"${value}"`).join(",")).join("\n");
+          const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+          const link = document.createElement("a"); link.href = url; link.download = "riconciliazione.csv"; link.click(); URL.revokeObjectURL(url);
+        }} className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold">Esporta dettagli CSV</button>}
+      </div>
       {error && <p role="alert" className="mt-3 text-red-700">{error}</p>}
       {report && <div className="mt-4" aria-live="polite">
         <p className="font-semibold">

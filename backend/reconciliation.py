@@ -9,10 +9,17 @@ else:
     from money import money_decimal
 
 
-async def reconcile(database, payment_bucket, detail_limit=100):
+async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, date_to=None):
     findings = []
     counts = Counter()
     scanned = Counter()
+
+    def in_date_range(doc):
+        if not date_from and not date_to:
+            return True
+        raw = doc.get("data") or doc.get("created_at") or doc.get("first_seen_at")
+        value = str(raw or "")[:10]
+        return (not date_from or value >= str(date_from)) and (not date_to or value <= str(date_to))
 
     def issue(kind, collection, document, message, **values):
         counts[kind] += 1
@@ -85,6 +92,8 @@ async def reconcile(database, payment_bucket, detail_limit=100):
 
     events = defaultdict(list)
     async for doc in database.vending_accounting_events.find({}):
+        if not in_date_range(doc):
+            continue
         scanned["vending_accounting_events"] += 1
         value = amount("vending_accounting_events", doc, "importo")
         for field in ("csv_event_key", "csv_accounting_key"):
@@ -96,6 +105,8 @@ async def reconcile(database, payment_bucket, detail_limit=100):
                 events[key].append((doc, value))
     compared_sales = unmatched_sales = 0
     async for doc in database.vendite.find({}):
+        if not in_date_range(doc):
+            continue
         scanned["vendite"] += 1
         value = amount("vendite", doc, "importo")
         if doc.get("sorgente") != "CSV_VENDING":
@@ -126,6 +137,8 @@ async def reconcile(database, payment_bucket, detail_limit=100):
         ("db_storico_vend", "importo", True),
     ):
         async for doc in database[name].find({}):
+            if not in_date_range(doc):
+                continue
             scanned[name] += 1
             if name == "rettifiche_venduti" and field not in doc:
                 continue  # Legacy corrections deliberately have no monetary effect.
@@ -141,6 +154,7 @@ async def reconcile(database, payment_bucket, detail_limit=100):
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "intervallo": {"da": date_from, "a": date_to},
         "esito": "da_verificare" if counts else "nessuna_discrepanza_rilevata",
         "totale_segnalazioni": sum(counts.values()), "conteggi": dict(counts),
         "dettagli": findings, "dettagli_omessi": sum(counts.values()) - len(findings),
