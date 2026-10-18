@@ -225,6 +225,43 @@ def test_reconciliation_date_range_is_validated_and_applied(database):
     assert result["documenti_esaminati"].get("versamenti") == 1
 
 
+def test_reconciliation_case_workflow_is_separate_stable_and_audited(database):
+    async def scenario():
+        await database.versamenti.insert_one({"id": "bad-amount", "data": "2026-10-18", "importo": "NaN"})
+        first = await server.accounting_reconciliation()
+        finding = first["dettagli"][0]
+        saved = await server.update_reconciliation_case(
+            finding["fingerprint"],
+            server.ReconciliationCaseIn(
+                stato="in_verifica",
+                nota="Controllare il documento originale",
+                tipo=finding["tipo"],
+                raccolta=finding["raccolta"],
+                riferimento=finding["riferimento"],
+            ),
+            SimpleNamespace(state=SimpleNamespace(authenticated_user="lorenzo")),
+        )
+        second = await server.accounting_reconciliation()
+        source = await database.versamenti.find_one({"id": "bad-amount"}, {"_id": 0})
+        audit = await database.audit_events.find_one(
+            {"entita": "SEGNALAZIONE_RICONCILIAZIONE"}, {"_id": 0}
+        )
+        return first, finding, saved, second, source, audit
+
+    first, finding, saved, second, source, audit = asyncio.run(scenario())
+    assert first["conteggi_stato"] == {"aperta": 1}
+    assert len(finding["fingerprint"]) == 64
+    assert saved["stato"] == "in_verifica"
+    assert saved["operatore"] == "lorenzo"
+    assert second["dettagli"][0]["fingerprint"] == finding["fingerprint"]
+    assert second["dettagli"][0]["nota"] == "Controllare il documento originale"
+    assert second["conteggi_stato"] == {"in_verifica": 1}
+    assert second["totale_da_gestire"] == 1
+    assert source["importo"] == "NaN"
+    assert audit["entita_id"] == finding["fingerprint"]
+    assert audit["dopo"]["stato"] == "in_verifica"
+
+
 def test_parameter_change_is_audited(database):
     async def scenario():
         await database.parametri.insert_one({"nome": "AGGIO_PCT", "valore": 0.1})

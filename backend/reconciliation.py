@@ -2,6 +2,8 @@
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 
 if __package__:
     from .money import money_decimal
@@ -9,10 +11,28 @@ else:
     from money import money_decimal
 
 
-async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, date_to=None):
+RECONCILIATION_STATES = {"aperta", "in_verifica", "risolta", "ignorata"}
+
+
+def _finding_fingerprint(kind, collection, document, values):
+    """Identify the same operational finding across repeated read-only scans."""
+    reference = str(document.get("id") or document.get("codice") or document.get("_id") or "")
+    identity = {
+        "tipo": kind,
+        "raccolta": collection,
+        "riferimento": reference,
+        "campo": values.get("campo"),
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, date_to=None, case_states=None):
     findings = []
     counts = Counter()
+    state_counts = Counter()
     scanned = Counter()
+    case_states = case_states or {}
 
     def in_date_range(doc):
         if not date_from and not date_to:
@@ -23,11 +43,21 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
 
     def issue(kind, collection, document, message, **values):
         counts[kind] += 1
+        fingerprint = _finding_fingerprint(kind, collection, document, values)
+        workflow = case_states.get(fingerprint) or {}
+        state = workflow.get("stato")
+        if state not in RECONCILIATION_STATES:
+            state = "aperta"
+        state_counts[state] += 1
         if len(findings) < detail_limit:
             findings.append({
                 "tipo": kind, "raccolta": collection,
                 "riferimento": str(document.get("id") or document.get("codice") or document.get("_id") or ""),
-                "messaggio": message, **values,
+                "messaggio": message, "fingerprint": fingerprint, "stato": state,
+                "nota": str(workflow.get("nota") or ""),
+                "aggiornato_il": workflow.get("updated_at"),
+                "operatore": workflow.get("operatore"),
+                **values,
             })
 
     def amount(collection, doc, field, signed=False):
@@ -157,6 +187,8 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
         "intervallo": {"da": date_from, "a": date_to},
         "esito": "da_verificare" if counts else "nessuna_discrepanza_rilevata",
         "totale_segnalazioni": sum(counts.values()), "conteggi": dict(counts),
+        "conteggi_stato": dict(state_counts),
+        "totale_da_gestire": state_counts["aperta"] + state_counts["in_verifica"],
         "dettagli": findings, "dettagli_omessi": sum(counts.values()) - len(findings),
         "documenti_esaminati": dict(scanned), "prodotti_confrontati": compared_products,
         "vendite_csv_confrontate": compared_sales, "vendite_csv_non_confrontabili": unmatched_sales,

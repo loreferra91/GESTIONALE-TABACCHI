@@ -182,14 +182,15 @@ La Cassa Rapida è stata resa atomica, ma resta una funzione poco utilizzata. La
 separazione contabile tra contanti e pagamenti elettronici è quindi rimandata a
 una fase successiva, prima di estendere l’uso del POS.
 
+La riconciliazione supporta anche la presa in carico operativa: stato, nota,
+operatore e data sono conservati separatamente dai documenti contabili originali
+e ogni variazione entra nell'audit log.
+
 Prossimi passi tecnici:
 
-1. Audit log più ampio per import, restore, rettifiche inventario e parametri.
-2. Riconciliazione con stati operativi e presa in carico delle anomalie, senza
-   alterare i dati originali.
-3. Suddivisione progressiva di `backend/server.py` in router/moduli, mantenendo
+1. Suddivisione progressiva di `backend/server.py` in router/moduli, mantenendo
    le route e i payload compatibili.
-4. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
+2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 
 ## Limiti del piano gratuito

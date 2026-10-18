@@ -363,6 +363,14 @@ class ParametroIn(BaseModel):
     valore: float
 
 
+class ReconciliationCaseIn(BaseModel):
+    stato: str = Field(pattern=r"^(aperta|in_verifica|risolta|ignorata)$")
+    nota: str = Field(default="", max_length=500)
+    tipo: str = Field(default="", max_length=100)
+    raccolta: str = Field(default="", max_length=100)
+    riferimento: str = Field(default="", max_length=300)
+
+
 BACKUP_COLLECTIONS = [
     "prodotti",
     "listino_adm",
@@ -392,6 +400,7 @@ BACKUP_COLLECTIONS = [
     "ricezioni_merce",
     "rettifiche_inventario",
     "rettifiche_venduti",
+    "reconciliation_cases",
     "audit_events",
 ]
 
@@ -411,6 +420,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "ricezioni_merce",
     "rettifiche_inventario",
     "rettifiche_venduti",
+    "reconciliation_cases",
     "audit_events",
 }
 
@@ -580,6 +590,8 @@ async def on_start():
             db.ricezioni_merce.create_index("created_at"),
             db.rettifiche_inventario.create_index([("codice", 1), ("created_at", -1)]),
             db.rettifiche_venduti.create_index([("codice", 1), ("created_at", -1)]),
+            db.reconciliation_cases.create_index("fingerprint", unique=True),
+            db.reconciliation_cases.create_index([("stato", 1), ("updated_at", -1)]),
             db.audit_events.create_index([("created_at", -1)]),
             db.audit_events.create_index([("entita", 1), ("entita_id", 1), ("created_at", -1)]),
             db.backup_snapshots.create_index("created_at"),
@@ -3223,7 +3235,50 @@ async def accounting_reconciliation(date_from: Optional[str] = None, date_to: Op
             raise HTTPException(422, f"{label} deve avere formato YYYY-MM-DD")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from non può essere successiva a date_to")
-    return await reconcile(db, _vending_payment_bucket, date_from=date_from, date_to=date_to)
+    cases = await db.reconciliation_cases.find({}, {"_id": 0}).to_list(None)
+    case_states = {item["fingerprint"]: item for item in cases if item.get("fingerprint")}
+    return await reconcile(
+        db,
+        _vending_payment_bucket,
+        date_from=date_from,
+        date_to=date_to,
+        case_states=case_states,
+    )
+
+
+@api.put("/contabilita/riconciliazione/segnalazioni/{fingerprint}")
+async def update_reconciliation_case(fingerprint: str, body: ReconciliationCaseIn, request: Request):
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise HTTPException(422, "Identificativo segnalazione non valido")
+    note = body.nota.strip()
+    now = datetime.now(timezone.utc).isoformat()
+    operator = _request_operator(request)
+    before = await db.reconciliation_cases.find_one({"fingerprint": fingerprint}, {"_id": 0})
+    document = {
+        "fingerprint": fingerprint,
+        "stato": body.stato,
+        "nota": note,
+        "tipo": body.tipo.strip(),
+        "raccolta": body.raccolta.strip(),
+        "riferimento": body.riferimento.strip(),
+        "operatore": operator,
+        "updated_at": now,
+    }
+    await db.reconciliation_cases.update_one(
+        {"fingerprint": fingerprint},
+        {"$set": document, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    saved = await db.reconciliation_cases.find_one({"fingerprint": fingerprint}, {"_id": 0})
+    await _record_audit_event(
+        "AGGIORNATO",
+        "SEGNALAZIONE_RICONCILIAZIONE",
+        fingerprint,
+        operatore=operator,
+        prima=before,
+        dopo=saved,
+    )
+    return saved
 
 
 VENDING_CASH_STATE_ID = "saldo"
