@@ -297,6 +297,7 @@ class MovimentoIn(BaseModel):
     importo: Money
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class Versamento(BaseModel):
@@ -313,6 +314,7 @@ class VersamentoIn(BaseModel):
     importo: NonNegativeMoney
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class PrelievoVending(BaseModel):
@@ -329,6 +331,7 @@ class PrelievoVendingIn(BaseModel):
     importo: NonNegativeMoney
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class ScontrinoVending(BaseModel):
@@ -345,6 +348,7 @@ class ScontrinoVendingIn(BaseModel):
     importo: NonNegativeMoney
     descrizione: Optional[str] = ""
     operatore: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class Parametro(BaseModel):
@@ -584,6 +588,10 @@ async def on_start():
             db.prelievi_vending.create_index("data"),
             db.scontrini_vending.create_index("data"),
             db.cassa_vending_stato.create_index("id", unique=True),
+            db.versamenti.create_index("idempotency_key", unique=True, sparse=True),
+            db.prelievi_vending.create_index("idempotency_key", unique=True, sparse=True),
+            db.scontrini_vending.create_index("idempotency_key", unique=True, sparse=True),
+            db.cassa.create_index("idempotency_key", unique=True, sparse=True),
             db.vending_accounting_state.create_index("id", unique=True),
             db.vending_accounting_events.create_index("csv_event_key", unique=True),
             db.vending_accounting_events.create_index("csv_accounting_key", unique=True, sparse=True),
@@ -4857,9 +4865,24 @@ async def list_versamenti(limit: int = 500):
 async def add_versamento(m: VersamentoIn):
     if m.importo <= 0:
         raise HTTPException(422, "L'importo del versamento deve essere positivo")
-    versamento = Versamento(**m.model_dump())
-    await db.versamenti.insert_one(versamento.model_dump())
-    return versamento.model_dump()
+    key = str(m.idempotency_key or "").strip() or None
+    if key and not 10 <= len(key) <= 160:
+        raise HTTPException(422, "idempotency_key non valido")
+    if key:
+        existing = await db.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            return existing
+    versamento = Versamento(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
+    if key:
+        versamento_doc = {**versamento.model_dump(), "idempotency_key": key}
+    else:
+        versamento_doc = versamento.model_dump()
+    response_doc = dict(versamento_doc)
+    try:
+        await db.versamenti.insert_one(versamento_doc)
+    except DuplicateKeyError:
+        return await db.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
+    return response_doc
 
 
 @api.delete("/versamenti/{m_id}")
@@ -4884,11 +4907,24 @@ async def list_prelievi_vending(limit: int = 500):
 async def add_prelievo_vending(m: PrelievoVendingIn):
     if m.importo <= 0:
         raise HTTPException(422, "L'importo del prelievo deve essere positivo")
+    key = str(m.idempotency_key or "").strip() or None
+    if key and not 10 <= len(key) <= 160:
+        raise HTTPException(422, "idempotency_key non valido")
+    if key:
+        existing = await db.prelievi_vending.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            return existing
     await _vending_cash_balance()
-    prelievo = PrelievoVending(**m.model_dump())
-    await db.prelievi_vending.insert_one(prelievo.model_dump())
-    await _adjust_vending_cash_balance(-m.importo)
-    return prelievo.model_dump()
+    prelievo = PrelievoVending(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
+    doc = {**prelievo.model_dump(), **({"idempotency_key": key} if key else {})}
+    response_doc = dict(doc)
+    await db.prelievi_vending.insert_one(doc)
+    try:
+        await _adjust_vending_cash_balance(-m.importo)
+    except Exception:
+        await db.prelievi_vending.delete_one({"id": prelievo.id})
+        raise
+    return response_doc
 
 
 @api.delete("/prelievi-vending/{m_id}")
@@ -4917,9 +4953,21 @@ async def list_scontrini_vending(limit: int = 500):
 async def add_scontrino_vending(m: ScontrinoVendingIn):
     if m.importo <= 0:
         raise HTTPException(422, "L'importo dello scontrino deve essere positivo")
-    scontrino = ScontrinoVending(**m.model_dump())
-    await db.scontrini_vending.insert_one(scontrino.model_dump())
-    return scontrino.model_dump()
+    key = str(m.idempotency_key or "").strip() or None
+    if key and not 10 <= len(key) <= 160:
+        raise HTTPException(422, "idempotency_key non valido")
+    if key:
+        existing = await db.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            return existing
+    scontrino = ScontrinoVending(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
+    doc = {**scontrino.model_dump(), **({"idempotency_key": key} if key else {})}
+    response_doc = dict(doc)
+    try:
+        await db.scontrini_vending.insert_one(doc)
+    except DuplicateKeyError:
+        return await db.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
+    return response_doc
 
 
 @api.delete("/scontrini-vending/{m_id}")
@@ -4947,9 +4995,21 @@ async def add_cassa(m: MovimentoIn):
         raise HTTPException(422, "Tipo movimento cassa non valido")
     if m.tipo != "SALDO_INIZIALE" and m.importo <= 0:
         raise HTTPException(422, "Entrate e uscite richiedono un importo positivo")
-    mm = MovimentoCassa(**m.model_dump())
-    await db.cassa.insert_one(mm.model_dump())
-    return mm.model_dump()
+    key = str(m.idempotency_key or "").strip() or None
+    if key and not 10 <= len(key) <= 160:
+        raise HTTPException(422, "idempotency_key non valido")
+    if key:
+        existing = await db.cassa.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            return existing
+    mm = MovimentoCassa(**{k: v for k, v in m.model_dump().items() if k != "idempotency_key"})
+    doc = {**mm.model_dump(), **({"idempotency_key": key} if key else {})}
+    response_doc = dict(doc)
+    try:
+        await db.cassa.insert_one(doc)
+    except DuplicateKeyError:
+        return await db.cassa.find_one({"idempotency_key": key}, {"_id": 0})
+    return response_doc
 
 
 @api.delete("/cassa/{m_id}")

@@ -223,3 +223,25 @@ def test_http_money_validation_and_protected_reconciliation(database, monkeypatc
     monkeypatch.setenv("APP_USERNAME", "operator")
     monkeypatch.setenv("APP_PASSWORD", "test-only")
     assert client.get("/api/contabilita/riconciliazione").status_code == 401
+
+
+def test_accounting_writes_are_idempotent(database):
+    async def scenario():
+        versamento = server.VersamentoIn(data="2026-10-18", importo="10.00", idempotency_key="versamento-001")
+        first_v = await server.add_versamento(versamento)
+        second_v = await server.add_versamento(versamento)
+        scontrino = server.ScontrinoVendingIn(data="2026-10-18", importo="3.00", idempotency_key="scontrino-001")
+        first_s = await server.add_scontrino_vending(scontrino)
+        second_s = await server.add_scontrino_vending(scontrino)
+        cassa = server.MovimentoIn(data="2026-10-18", tipo="ENTRATA", importo="5.00", idempotency_key="cassa-key-001")
+        first_c = await server.add_cassa(cassa)
+        second_c = await server.add_cassa(cassa)
+        return first_v, second_v, first_s, second_s, first_c, second_c
+
+    first_v, second_v, first_s, second_s, first_c, second_c = asyncio.run(scenario())
+    assert first_v["id"] == second_v["id"]
+    assert first_s["id"] == second_s["id"]
+    assert first_c["id"] == second_c["id"]
+    assert asyncio.run(database.versamenti.count_documents({})) == 1
+    assert asyncio.run(database.scontrini_vending.count_documents({})) == 1
+    assert asyncio.run(database.cassa.count_documents({})) == 1
