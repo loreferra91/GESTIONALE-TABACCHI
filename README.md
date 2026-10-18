@@ -190,8 +190,8 @@ Prossimi passi tecnici:
 
 1. Proseguire la suddivisione di `backend/server.py`: i router di
    riconciliazione, audit, parametri, movimenti contabili, storico import,
-   operatività e listino ADM sono già isolati, mantenendo route e payload
-   compatibili.
+   operatività, anagrafica prodotti e listino ADM sono già isolati, mantenendo
+   route e payload compatibili.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 

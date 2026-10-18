@@ -37,6 +37,10 @@ if __package__:
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
+    from .products_router import (
+        PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
+        create_products_router,
+    )
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
     from adm_router import (
@@ -58,6 +62,10 @@ else:
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
+    from products_router import (
+        PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
+        create_products_router,
+    )
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 
 ROOT_DIR = Path(__file__).parent
@@ -151,53 +159,6 @@ async def security_headers(request: Request, call_next):
 
 
 # ------------------------- Models -------------------------
-class Prodotto(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    codice: str
-    descrizione: str
-    categoria: str = "ACCESSORI"
-    prezzo: NonNegativeMoney = 0
-    acquistati: int = 0
-    venduti_negozio: int = 0
-    venduti_vending: int = 0
-    giacenza_negozio: int = 0
-    giacenza_vending: int = 0
-    colonna_vending: Optional[str] = None
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-
-
-class ProdottoIn(BaseModel):
-    codice: str
-    descrizione: str
-    categoria: str = "ACCESSORI"
-    prezzo: NonNegativeMoney = 0
-    acquistati: int = 0
-    venduti_negozio: int = 0
-    venduti_vending: int = 0
-    giacenza_negozio: int = 0
-    giacenza_vending: int = 0
-    colonna_vending: Optional[str] = None
-
-
-class VendutiNegozioIn(BaseModel):
-    venduti_negozio: int = Field(ge=0)
-    valore_atteso: int = Field(ge=0)
-
-
-PRODUCT_CATEGORIES = {
-    "SIGARETTE",
-    "SIGARI",
-    "SIGARETTI",
-    "FIUTO E MASTICO",
-    "TRINCIATI PER SIGARETTA",
-    "ALTRI TABACCHI DA FUMO",
-    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE",
-    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA",
-    "ACCESSORI",
-}
-
-
 class SmartVenueProductIn(BaseModel):
     codice: str
     descrizione: str
@@ -948,147 +909,6 @@ async def reconcile_all_vending_stock() -> int:
         "prodotti_riconciliati": changed,
     })
     return changed
-
-
-@api.get("/prodotti")
-async def list_prodotti(q: Optional[str] = None, categoria: Optional[str] = None, limit: int = 500):
-    filt: Dict[str, Any] = {}
-    if categoria:
-        filt["categoria"] = categoria
-    if q:
-        rx = _q_regex(q)
-        filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
-    capped_limit = _cap(limit)
-    docs, vending_totals = await asyncio.gather(
-        db.prodotti.find(filt, {"_id": 0}).sort("codice", 1).limit(capped_limit).to_list(capped_limit),
-        _vending_stock_by_code(),
-    )
-    return _apply_vending_stock(docs, vending_totals)
-
-
-async def _canonical_manual_product_payload(p: ProdottoIn) -> Dict[str, Any]:
-    payload = p.model_dump()
-    raw_code = _product_code_text(payload["codice"])
-    numeric = adm_numeric_code(raw_code)
-    listino = await db.listino_adm.find({"$or": [
-        {"codice": adm_local_code(numeric)},
-        {"adm_codice": numeric},
-    ]}, {"_id": 0}).to_list(20) if numeric else []
-    payload["codice"] = _canonical_product_code(raw_code, payload["descrizione"], _adm_alias_index(listino))
-    return payload
-
-
-@api.post("/prodotti")
-async def create_prodotto(p: ProdottoIn):
-    payload = await _canonical_manual_product_payload(p)
-    # La quantità vending si modifica esclusivamente nelle colonne Vending.
-    payload["giacenza_vending"] = 0
-    if await db.prodotti.find_one({"codice": payload["codice"]}):
-        raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
-    prod = Prodotto(**payload)
-    await db.prodotti.insert_one(prod.model_dump())
-    return prod.model_dump()
-
-
-@api.put("/prodotti/{prod_id}")
-async def update_prodotto(prod_id: str, p: ProdottoIn):
-    payload = await _canonical_manual_product_payload(p)
-    # Le giacenze vending e i contatori venduti hanno flussi dedicati: il form
-    # anagrafico non deve poterli azzerare tramite i default di ProdottoIn.
-    payload.pop("giacenza_vending", None)
-    payload.pop("venduti_negozio", None)
-    payload.pop("venduti_vending", None)
-    collision = await db.prodotti.find_one({"codice": payload["codice"], "id": {"$ne": prod_id}})
-    if collision:
-        raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
-    r = await db.prodotti.update_one({"id": prod_id}, {"$set": payload})
-    if r.matched_count == 0:
-        raise HTTPException(404, "not found")
-    doc = await db.prodotti.find_one({"id": prod_id}, {"_id": 0})
-    vending_totals = await _vending_stock_by_code() or {}
-    doc["giacenza_vending"] = vending_totals.get(str(doc.get("codice") or ""), 0)
-    return doc
-
-
-@api.patch("/prodotti/{prod_id}/venduti-negozio")
-async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: Request):
-    operator = _request_operator(request)
-
-    async def persist_correction(session):
-        kwargs = _session_kwargs(session)
-        product = await db.prodotti.find_one({"id": prod_id}, {"_id": 0}, **kwargs)
-        if not product:
-            raise HTTPException(404, "Prodotto non trovato")
-
-        current_value = int(product.get("venduti_negozio", 0) or 0)
-        if current_value != body.valore_atteso:
-            raise HTTPException(
-                409,
-                "Il valore dei venduti negozio è cambiato nel frattempo. Ricarica e riprova.",
-            )
-
-        if current_value != body.venduti_negozio:
-            delta_quantita = body.venduti_negozio - current_value
-            prezzo_unitario = money(product.get("prezzo", 0) or 0)
-            importo_contabile = money_product(prezzo_unitario, delta_quantita)
-            # Increasing shop sales consumes physical shop stock; decreasing them restores it.
-            giacenza_precedente = int(product.get("giacenza_negozio", 0) or 0)
-            nuova_giacenza = giacenza_precedente - delta_quantita
-            result = await db.prodotti.update_one(
-                {"id": prod_id, "venduti_negozio": current_value},
-                {"$set": {
-                    "venduti_negozio": body.venduti_negozio,
-                    "giacenza_negozio": nuova_giacenza,
-                }},
-                **kwargs,
-            )
-            if result.matched_count != 1:
-                raise HTTPException(
-                    409,
-                    "Il valore dei venduti negozio è cambiato nel frattempo. Ricarica e riprova.",
-                )
-            try:
-                await db.rettifiche_venduti.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "prodotto_id": prod_id,
-                    "codice": product.get("codice", ""),
-                    "campo": "venduti_negozio",
-                    "valore_precedente": current_value,
-                    "valore_nuovo": body.venduti_negozio,
-                    "delta_quantita": delta_quantita,
-                    "prezzo_unitario": prezzo_unitario,
-                    "importo_contabile": importo_contabile,
-                    "delta_giacenza_negozio": -delta_quantita,
-                    "giacenza_precedente": giacenza_precedente,
-                    "giacenza_nuova": nuova_giacenza,
-                    "operatore": operator,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }, **kwargs)
-            except Exception:
-                if session is None:
-                    await db.prodotti.update_one(
-                        {"id": prod_id, "venduti_negozio": body.venduti_negozio},
-                        {"$set": {
-                            "venduti_negozio": current_value,
-                            "giacenza_negozio": giacenza_precedente,
-                        }},
-                    )
-                raise
-
-        product["venduti_negozio"] = body.venduti_negozio
-        product["giacenza_negozio"] = int(product.get("giacenza_negozio", 0) or 0) - (
-            body.venduti_negozio - current_value
-        )
-        product["venduti_totale"] = body.venduti_negozio + int(product.get("venduti_vending", 0) or 0)
-        return product
-
-    return await _run_transactionally(persist_correction)
-
-
-@api.delete("/prodotti/{prod_id}")
-async def delete_prodotto(prod_id: str):
-    await db.prodotti.delete_one({"id": prod_id})
-    return {"ok": True}
 
 
 # ------------------------- Vendite giornaliere -------------------------
@@ -6583,6 +6403,30 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+products = create_products_router(
+    get_database=lambda: db,
+    query_regex=_q_regex,
+    cap_limit=_cap,
+    vending_stock_by_code=_vending_stock_by_code,
+    apply_vending_stock=_apply_vending_stock,
+    product_code_text=_product_code_text,
+    adm_numeric_code=adm_numeric_code,
+    adm_local_code=adm_local_code,
+    adm_alias_index=_adm_alias_index,
+    canonical_product_code=_canonical_product_code,
+    request_operator=_request_operator,
+    session_kwargs=_session_kwargs,
+    run_transactionally=_run_transactionally,
+    normalize_money=money,
+    multiply_money=money_product,
+)
+products_router = products["router"]
+list_prodotti = products["list_prodotti"]
+_canonical_manual_product_payload = products["canonical_manual_product_payload"]
+create_prodotto = products["create_prodotto"]
+update_prodotto = products["update_prodotto"]
+update_venduti_negozio = products["update_venduti_negozio"]
+delete_prodotto = products["delete_prodotto"]
 adm_router, list_listino, adm_categories, adm_sync = create_adm_router(
     get_database=lambda: db,
     cap_limit=_cap,
@@ -6660,6 +6504,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 )
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
+api.include_router(products_router)
 api.include_router(adm_router)
 api.include_router(operations_router)
 api.include_router(import_history_router)
