@@ -34,6 +34,7 @@ if __package__:
         create_import_history_router,
         import_includes_accounting as _import_includes_accounting,
     )
+    from .inventory_analytics_router import create_inventory_analytics_router
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
@@ -63,6 +64,7 @@ else:
         create_import_history_router,
         import_includes_accounting as _import_includes_accounting,
     )
+    from inventory_analytics_router import create_inventory_analytics_router
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
@@ -4452,97 +4454,6 @@ async def auto_order_excel(
     )
 
 
-# ------------------------- Prodotti più venduti (per POS) -------------------------
-@api.get("/prodotti/top")
-async def prodotti_top(limit: int = 40):
-    prods = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
-    for p in prods:
-        p["venduti_totale"] = (p.get("venduti_negozio") or 0) + (p.get("venduti_vending") or 0)
-    prods.sort(key=lambda x: -x["venduti_totale"])
-    return prods[:_cap(limit)]
-
-
-
-# ------------------------- Pivot magazzino -------------------------
-@api.get("/pivot")
-async def pivot():
-    prods, params, vending_totals = await asyncio.gather(
-        db.prodotti.find({"presente_ultimo_import": {"$ne": False}}, {"_id": 0}).to_list(5000),
-        get_params(),
-        _vending_stock_by_code(),
-    )
-    _apply_vending_stock(prods, vending_totals)
-    divisor = params.get("VENDITE_GIORNALIERE_MESE", 6.5)
-    aggio = params.get("AGGIO_PCT", 0.10)
-    cost_factor = max(Decimal(0), Decimal(1) - Decimal(str(aggio)))
-    rows = []
-    tot_acq = tot_vend = tot_giac = pezzi_mag = 0
-    fermi = negativi = da_riord = lenti = 0
-    for p in prods:
-        v_neg = p.get("venduti_negozio", 0) or 0
-        v_ven = p.get("venduti_vending", 0) or 0
-        v_tot = v_neg + v_ven
-        g_neg = p.get("giacenza_negozio", 0) or 0
-        g_ven = p.get("giacenza_vending", 0) or 0
-        g_tot = g_neg + g_ven
-        prz = money_decimal(p.get("prezzo", 0) or 0)
-        prz_costo = prz * cost_factor
-        acq = p.get("acquistati", 0) or 0
-        # Round each line, not the discounted unit cost; totals equal displayed lines.
-        ta = money_decimal(acq * prz_costo)
-        tv = money_decimal(v_tot * prz)
-        tg = money_decimal(g_tot * prz_costo)
-        vend_mese = v_tot / max(1, divisor) if divisor else 0
-        mesi_smalt = round(g_tot / vend_mese, 2) if vend_mese > 0 else 0
-        stato = "OK"
-        azione = "OK"
-        if g_tot <= 0:
-            stato = "ESAURITO"
-            azione = "RIORDINO"
-        elif v_tot == 0 and acq > 0:
-            stato = "FERMO"
-            azione = "REVISIONE"
-            fermi += 1
-        elif mesi_smalt > 6:
-            stato = "LENTO"
-            azione = "REVISIONE"
-            lenti += 1
-        if g_tot < 0:
-            negativi += 1
-        if stato == "ESAURITO":
-            da_riord += 1
-        tot_acq += ta
-        tot_vend += tv
-        tot_giac += tg
-        pezzi_mag += g_tot
-        rows.append({
-            "codice": p["codice"], "descrizione": p.get("descrizione", ""),
-            "categoria": p.get("categoria", ""),
-            "acq": acq, "vend_negozio": v_neg, "vend_vending": v_ven, "vend_totale": v_tot,
-            "giac_negozio": g_neg, "giac_vending": g_ven, "giac_totale": g_tot,
-            "prezzo": money(prz), "tot_acquistato": money(ta), "tot_venduto": money(tv), "tot_giacenza": money(tg),
-            "vendite_mese": round(vend_mese, 2), "mesi_smaltimento": mesi_smalt,
-            "stato": stato, "azione": azione,
-        })
-    rows.sort(key=lambda x: -x["tot_giacenza"])
-    return {
-        "kpi": {
-            "valore_acquistato": money(tot_acq),
-            "valore_venduto": money(tot_vend),
-            "valore_giacenza": money(tot_giac),
-            "margine_lordo": money(tot_vend - tot_acq),
-            "aggio_pct": round(aggio, 4),
-            "pezzi_magazzino": pezzi_mag,
-            "prodotti_totali": len(rows),
-            "prodotti_fermi": fermi,
-            "giacenza_negativa": negativi,
-            "da_riordinare": da_riord,
-            "lenti_oltre_6_mesi": lenti,
-        },
-        "righe": rows,
-    }
-
-
 # ------------------------- Dashboard KPIs -------------------------
 def _parse_sale_date(value: Any):
     """Normalizza le date vendite ISO e italiane usate dalle due sorgenti."""
@@ -6168,6 +6079,15 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+inventory_analytics_router, prodotti_top, pivot = create_inventory_analytics_router(
+    get_database=lambda: db,
+    cap_limit=_cap,
+    get_params=lambda: get_params(),
+    vending_stock_by_code=_vending_stock_by_code,
+    apply_vending_stock=_apply_vending_stock,
+    money=money,
+    money_decimal=money_decimal,
+)
 real_stock = create_real_stock_router(
     get_database=lambda: db,
     product_code_text=_product_code_text,
@@ -6284,6 +6204,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
 api.include_router(real_stock_router)
+api.include_router(inventory_analytics_router)
 api.include_router(products_router)
 api.include_router(adm_router)
 api.include_router(operations_router)
