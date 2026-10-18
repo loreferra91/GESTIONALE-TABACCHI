@@ -1,6 +1,7 @@
 import asyncio
 import io
 import os
+from datetime import datetime, timedelta
 
 from mongomock_motor import AsyncMongoMockClient
 from starlette.datastructures import UploadFile
@@ -190,6 +191,101 @@ def test_accounting_ledger_keeps_rows_that_leave_the_vending_window(monkeypatch)
         "PAGOBANCOMAT": 3.0,
     }
     assert event_count == 4
+
+
+def test_accounting_ledger_is_idempotent_when_export_switches_to_seconds(monkeypatch):
+    database = fresh_db(monkeypatch)
+    header = "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+    minute_export = (
+        header
+        + "07/10/2026 23:58;A;5,8;1-B02;1001;Sigarette;Carte\n"
+        + "08/10/2026 09:12;B;6,0;1-C03;1002;Sigarette;Contanti\n"
+    )
+    second_export = (
+        header
+        + "08-10-2026 09:12:37;B;6,0;1-C03;1002;Sigarette;Contanti\n"
+        + "07-10-2026 23:58:16;A;5,8;1-B02;1001;Sigarette;Carte\n"
+    )
+
+    async def scenario():
+        first, _ = await server._store_vending_accounting_snapshot(
+            minute_export.encode(), "minute.csv"
+        )
+        second, _ = await server._store_vending_accounting_snapshot(
+            second_export.encode(), "seconds.csv"
+        )
+        events = await database.vending_accounting_events.find({}).to_list(None)
+        return first, second, events
+
+    first, second, events = asyncio.run(scenario())
+
+    assert first["eventi_nuovi"] == 2
+    assert second["eventi_nuovi"] == 0
+    assert second["righe"] == 2
+    assert second["totale"] == 11.8
+    assert len(events) == 2
+    assert len({event["csv_accounting_key"] for event in events}) == 2
+
+
+def test_accounting_ledger_preserves_additional_identical_occurrence_across_formats(monkeypatch):
+    database = fresh_db(monkeypatch)
+    header = "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+    first_export = header + "07/10/2026 23:58;A;5,8;1-B02;1001;Sigarette;Carte\n"
+    second_export = (
+        header
+        + "07-10-2026 23:58:50;A;5,8;1-B02;1001;Sigarette;Carte\n"
+        + "07-10-2026 23:58:16;A;5,8;1-B02;1001;Sigarette;Carte\n"
+    )
+    third_export = (
+        header
+        + "07/10/2026 23:58;A;5,8;1-B02;1001;Sigarette;Carte\n"
+        + "07/10/2026 23:58;A;5,8;1-B02;1001;Sigarette;Carte\n"
+    )
+
+    async def scenario():
+        first, _ = await server._store_vending_accounting_snapshot(first_export.encode(), "one.csv")
+        second, _ = await server._store_vending_accounting_snapshot(second_export.encode(), "two.csv")
+        third, _ = await server._store_vending_accounting_snapshot(third_export.encode(), "three.csv")
+        events = await database.vending_accounting_events.find({}).to_list(None)
+        return first, second, third, events
+
+    first, second, third, events = asyncio.run(scenario())
+
+    assert first["eventi_nuovi"] == 1
+    assert second["eventi_nuovi"] == 1
+    assert third["eventi_nuovi"] == 0
+    assert third["righe"] == 2
+    assert third["totale"] == 11.6
+    assert {event["csv_accounting_occurrence"] for event in events} == {1, 2}
+
+
+def test_accounting_ledger_keeps_history_across_a_thousand_row_rolling_window(monkeypatch):
+    database = fresh_db(monkeypatch)
+    header = "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"
+    start = datetime(2026, 1, 1, 0, 0)
+
+    def row(index):
+        sale_at = start + timedelta(minutes=index)
+        return (
+            f"{sale_at:%d/%m/%Y %H:%M};P{index};1,0;1-A01;{100000 + index};"
+            "Sigarette;Contanti\n"
+        )
+
+    first_export = header + "".join(row(index) for index in range(999, -1, -1))
+    second_export = header + "".join(row(index) for index in range(1000, 0, -1))
+
+    async def scenario():
+        first, _ = await server._store_vending_accounting_snapshot(first_export.encode(), "first.csv")
+        second, _ = await server._store_vending_accounting_snapshot(second_export.encode(), "second.csv")
+        return first, second, await database.vending_accounting_events.count_documents({})
+
+    first, second, event_count = asyncio.run(scenario())
+
+    assert first["eventi_nuovi"] == 1000
+    assert second["eventi_nuovi"] == 1
+    assert second["righe"] == 1001
+    assert second["totale"] == 1001.0
+    assert event_count == 1001
 
 
 def test_ledger_migration_recovers_imported_sales_outside_latest_snapshot(monkeypatch):
