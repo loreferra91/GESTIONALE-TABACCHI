@@ -29,6 +29,7 @@ if __package__:
         import_includes_accounting as _import_includes_accounting,
     )
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
+    from .operations_router import create_operations_router
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
@@ -43,6 +44,7 @@ else:
         import_includes_accounting as _import_includes_accounting,
     )
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
+    from operations_router import create_operations_router
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 
@@ -2200,174 +2202,6 @@ async def backup_restore_file(file: UploadFile = File(...)):
             "restored_docs": sum(len(docs) for docs in collections.values()),
             "pre_restore_backup": restore_backup["id"],
         }
-
-
-async def data_status_payload() -> Dict[str, Any]:
-    app_dates, imported_dates, counts, latest_import, latest_backup = await asyncio.gather(
-        db.vendite.find({}, {"_id": 0, "data": 1}).to_list(None),
-        db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
-        asyncio.gather(*[db[name].count_documents({}) for name in BACKUP_COLLECTIONS]),
-        db.import_history.find_one({}, {"_id": 0}, sort=[("created_at", -1)]),
-        db.backup_snapshots.find_one(
-            {"status": {"$ne": "PRUNED"}}, {"_id": 0}, sort=[("created_at", -1)]
-        ),
-    )
-
-    count_map = dict(zip(BACKUP_COLLECTIONS, counts))
-
-    def date_only(raw: Any) -> Optional[str]:
-        value = (raw or {}).get("data") if isinstance(raw, dict) else raw
-        if not value:
-            return None
-        parsed = _parse_sale_date(value)
-        return parsed.isoformat() if parsed else str(value)[:10]
-
-    latest_app = _latest_sale_date(app_dates)
-    latest_imported = _latest_sale_date(imported_dates)
-    latest_days = [parsed for parsed in [latest_app, latest_imported] if parsed]
-    latest_sales_day = max(latest_days).isoformat() if latest_days else None
-    delay = None
-    if latest_sales_day:
-        try:
-            delay = max(0, (datetime.now(timezone.utc).date() - datetime.fromisoformat(latest_sales_day).date()).days)
-        except ValueError:
-            delay = None
-    return {
-        "counts": count_map,
-        "latest_app_sale": date_only(latest_app),
-        "latest_imported_sale": date_only(latest_imported),
-        "latest_sales_day": latest_sales_day,
-        "sales_data_delay_days": delay,
-        "latest_import": latest_import,
-        "latest_backup": latest_backup,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-@api.get("/data-status")
-async def data_status():
-    return await data_status_payload()
-
-
-@api.get("/global-search")
-async def global_search(q: str, limit: int = 8):
-    text = (q or "").strip()
-    if len(text) < 2:
-        return {"items": []}
-    capped = max(1, min(int(limit or 8), 20))
-    rx = _q_regex(text)
-    products, vending_totals = await asyncio.gather(
-        db.prodotti.find(
-            {"$or": [{"codice": rx}, {"descrizione": rx}]},
-            {"_id": 0},
-        ).sort("codice", 1).limit(capped).to_list(capped),
-        _vending_stock_by_code(),
-    )
-    _apply_vending_stock(products, vending_totals)
-    items = [
-        {
-            "type": "prodotto",
-            "codice": p.get("codice"),
-            "descrizione": p.get("descrizione", ""),
-            "categoria": p.get("categoria", ""),
-            "prezzo": p.get("prezzo", 0),
-            "giacenza_negozio": p.get("giacenza_negozio", 0),
-            "giacenza_vending": p.get("giacenza_vending", 0),
-        }
-        for p in products
-    ]
-    return {"items": items}
-
-
-@api.get("/anomalie")
-async def anomalie():
-    prodotti = await db.prodotti.find({}, {"_id": 0}).to_list(5000)
-    product_codes = {p.get("codice") for p in prodotti if p.get("codice")}
-    items = []
-    for p in prodotti:
-        codice = p.get("codice", "")
-        if int(p.get("giacenza_negozio", 0) or 0) < 0:
-            items.append({"tipo": "stock_negativo", "severita": "alta", "codice": codice, "descrizione": p.get("descrizione", ""), "messaggio": f"Giacenza negozio negativa ({p.get('giacenza_negozio')})", "azione": "Verifica import o movimenti recenti"})
-        if not float(p.get("prezzo", 0) or 0):
-            items.append({"tipo": "prezzo_mancante", "severita": "media", "codice": codice, "descrizione": p.get("descrizione", ""), "messaggio": "Prezzo a zero", "azione": "Aggiorna prodotto o listino ADM"})
-        if not p.get("descrizione"):
-            items.append({"tipo": "descrizione_mancante", "severita": "bassa", "codice": codice, "descrizione": "", "messaggio": "Descrizione mancante", "azione": "Completa anagrafica prodotto"})
-    vendite_codes = await db.vendite.distinct("codice")
-    storico_codes = await db.db_storico_vend.distinct("codice")
-    unknown_codes = sorted({c for c in [*vendite_codes, *storico_codes] if c and c not in product_codes})[:200]
-    for codice in unknown_codes:
-        items.append({"tipo": "vendita_senza_prodotto", "severita": "media", "codice": codice, "descrizione": "", "messaggio": "Vendite presenti ma prodotto non trovato", "azione": "Importa listino/prodotti aggiornati o crea prodotto"})
-    status = await data_status_payload()
-    if status.get("sales_data_delay_days") is not None and status["sales_data_delay_days"] > 2:
-        items.insert(0, {
-            "tipo": "storico_vecchio",
-            "severita": "alta",
-            "codice": "",
-            "descrizione": "",
-            "messaggio": f"Ultima vendita disponibile: {status.get('latest_sales_day')} ({status['sales_data_delay_days']} giorni fa)",
-            "azione": "Importa Excel aggiornato prima di confermare ordini",
-        })
-    for item in items:
-        item["id"] = hashlib.sha256(
-            f"{item.get('tipo', '')}\0{item.get('codice', '')}".encode("utf-8")
-        ).hexdigest()[:24]
-    ignored = set(await db.anomalie_ignorate.distinct("key"))
-    items = [item for item in items if item["id"] not in ignored]
-    summary = {
-        "alta": sum(1 for i in items if i["severita"] == "alta"),
-        "media": sum(1 for i in items if i["severita"] == "media"),
-        "bassa": sum(1 for i in items if i["severita"] == "bassa"),
-        "totale": len(items),
-    }
-    return {"summary": summary, "items": items}
-
-
-@api.delete("/anomalie")
-async def dismiss_all_anomalies():
-    current = await anomalie()
-    now = datetime.now(timezone.utc).isoformat()
-    keys = [item["id"] for item in current["items"]]
-    if keys:
-        existing = set(await db.anomalie_ignorate.distinct("key", {"key": {"$in": keys}}))
-        missing = [{"key": key, "dismissed_at": now} for key in keys if key not in existing]
-        if missing:
-            await db.anomalie_ignorate.insert_many(missing)
-    return {"ok": True, "eliminate": len(keys)}
-
-
-@api.delete("/anomalie/{item_key}")
-async def dismiss_anomaly(item_key: str):
-    current = await anomalie()
-    if item_key not in {item["id"] for item in current["items"]}:
-        raise HTTPException(404, "Anomalia non trovata")
-    await db.anomalie_ignorate.update_one(
-        {"key": item_key},
-        {"$set": {"key": item_key, "dismissed_at": datetime.now(timezone.utc).isoformat()}},
-        upsert=True,
-    )
-    return {"ok": True}
-
-
-@api.get("/report/giornaliero")
-async def report_giornaliero():
-    status, dashboard_data, anomaly_data, ao = await asyncio.gather(
-        data_status_payload(),
-        dashboard(),
-        anomalie(),
-        auto_order(),
-    )
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-        "dashboard": dashboard_data,
-        "anomalie": anomaly_data["summary"],
-        "auto_order": {
-            "righe": ao.get("n_righe", 0),
-            "totale": ao.get("totale", 0),
-            "data_riferimento_domanda": ao.get("data_riferimento_domanda"),
-            "da_controllare": (ao.get("riepilogo_stati", {}).get("CONTROLLO MANUALE", 0) or 0) + (ao.get("n_anomalie_stock", 0) or 0),
-        },
-    }
 
 
 def _csv_vending_datetime(value: Any) -> str:
@@ -6977,6 +6811,26 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+operations = create_operations_router(
+    get_database=lambda: db,
+    backup_collections=BACKUP_COLLECTIONS,
+    parse_sale_date=_parse_sale_date,
+    latest_sale_date=_latest_sale_date,
+    query_regex=_q_regex,
+    vending_stock_by_code=_vending_stock_by_code,
+    apply_vending_stock=_apply_vending_stock,
+    get_current_anomalies=lambda: anomalie(),
+    get_dashboard=lambda: dashboard(),
+    get_auto_order=lambda: auto_order(),
+)
+operations_router = operations["router"]
+data_status_payload = operations["data_status_payload"]
+data_status = operations["data_status"]
+global_search = operations["global_search"]
+anomalie = operations["anomalie"]
+dismiss_all_anomalies = operations["dismiss_all_anomalies"]
+dismiss_anomaly = operations["dismiss_anomaly"]
+report_giornaliero = operations["report_giornaliero"]
 (
     import_history_router,
     record_import_history,
@@ -7025,6 +6879,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 )
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
+api.include_router(operations_router)
 api.include_router(import_history_router)
 api.include_router(cash_movements_router)
 api.include_router(parameters_router)
