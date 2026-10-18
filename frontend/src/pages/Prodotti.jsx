@@ -162,8 +162,8 @@ export default function Prodotti() {
             </thead>
             <tbody>
               {loading && <tr><td colSpan={9} className="text-center py-8 text-slate-400">Caricamento…</td></tr>}
-              {rows.map(r => (
-                <tr key={r.id || r.codice} data-testid={`prod-row-${r.codice}`}>
+              {rows.map((r, index) => (
+                <tr key={`${r.id || r.codice}-${index}`} data-testid={`prod-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
                   <td className="max-w-sm truncate">{r.descrizione}</td>
                   <td><Badge tone="info">{r.categoria}</Badge></td>

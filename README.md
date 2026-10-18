@@ -144,7 +144,7 @@ Durante la creazione del Blueprint, impostare i valori richiesti:
 | `APP_USERNAME` | nome utente per proteggere il gestionale |
 | `APP_PASSWORD` | password lunga e casuale |
 
-`DB_NAME=gestionale` e `CORS_ORIGINS=*` sono già configurate. I segreti non
+`DB_NAME=gestionale` e `CORS_ORIGINS` è configurata con l’origine Render; in produzione non usare `*`. I segreti non
 devono essere inseriti nel repository.
 
 Render eseguirà automaticamente queste operazioni:
@@ -167,8 +167,30 @@ Ogni push sul branch collegato genera un nuovo deploy automatico.
 | `APP_PASSWORD` | consigliata | password Basic Auth; non salvarla in Git |
 | `PORT` | su Render | assegnata automaticamente dalla piattaforma |
 
-Se `APP_USERNAME` o `APP_PASSWORD` mancano, l'applicazione resta pubblicamente
-accessibile. L'endpoint di health check `/api/` resta intenzionalmente libero.
+In produzione `APP_USERNAME` e `APP_PASSWORD` sono obbligatorie: se mancano,
+l'avvio viene rifiutato. L'endpoint di health check `/api/` resta intenzionalmente libero.
+
+## Stato attuale e prossimi passi
+
+Le funzionalità di integrità e contabilità sono attive in produzione: vendite e
+carichi hanno protezioni atomiche/idempotenti, i movimenti contabili sono
+idempotenti, gli eventi contabili hanno un audit log append-only e la
+riconciliazione è disponibile in modalità read-only con filtri per data ed export
+CSV dei dettagli.
+
+La Cassa Rapida è stata resa atomica, ma resta una funzione poco utilizzata. La
+separazione contabile tra contanti e pagamenti elettronici è quindi rimandata a
+una fase successiva, prima di estendere l’uso del POS.
+
+Prossimi passi tecnici:
+
+1. Audit log più ampio per import, restore, rettifiche inventario e parametri.
+2. Riconciliazione con stati operativi e presa in carico delle anomalie, senza
+   alterare i dati originali.
+3. Suddivisione progressiva di `backend/server.py` in router/moduli, mantenendo
+   le route e i payload compatibili.
+4. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
+   flusso POS verrà utilizzato realmente.
 
 ## Limiti del piano gratuito
 
