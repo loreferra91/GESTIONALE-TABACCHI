@@ -19,10 +19,10 @@ from decimal import Decimal
 
 if __package__:
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
-    from .reconciliation import reconcile
+    from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
-    from reconciliation import reconcile
+    from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -361,14 +361,6 @@ class Parametro(BaseModel):
 
 class ParametroIn(BaseModel):
     valore: float
-
-
-class ReconciliationCaseIn(BaseModel):
-    stato: str = Field(pattern=r"^(aperta|in_verifica|risolta|ignorata)$")
-    nota: str = Field(default="", max_length=500)
-    tipo: str = Field(default="", max_length=100)
-    raccolta: str = Field(default="", max_length=100)
-    riferimento: str = Field(default="", max_length=300)
 
 
 BACKUP_COLLECTIONS = [
@@ -3226,59 +3218,6 @@ async def vending_accounting_source():
         return _public_vending_accounting_snapshot(ledger)
     snapshot = await _latest_vending_accounting_snapshot()
     return _public_vending_accounting_snapshot(snapshot) if snapshot else None
-
-
-@api.get("/contabilita/riconciliazione")
-async def accounting_reconciliation(date_from: Optional[str] = None, date_to: Optional[str] = None):
-    for value, label in ((date_from, "date_from"), (date_to, "date_to")):
-        if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-            raise HTTPException(422, f"{label} deve avere formato YYYY-MM-DD")
-    if date_from and date_to and date_from > date_to:
-        raise HTTPException(422, "date_from non può essere successiva a date_to")
-    cases = await db.reconciliation_cases.find({}, {"_id": 0}).to_list(None)
-    case_states = {item["fingerprint"]: item for item in cases if item.get("fingerprint")}
-    return await reconcile(
-        db,
-        _vending_payment_bucket,
-        date_from=date_from,
-        date_to=date_to,
-        case_states=case_states,
-    )
-
-
-@api.put("/contabilita/riconciliazione/segnalazioni/{fingerprint}")
-async def update_reconciliation_case(fingerprint: str, body: ReconciliationCaseIn, request: Request):
-    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
-        raise HTTPException(422, "Identificativo segnalazione non valido")
-    note = body.nota.strip()
-    now = datetime.now(timezone.utc).isoformat()
-    operator = _request_operator(request)
-    before = await db.reconciliation_cases.find_one({"fingerprint": fingerprint}, {"_id": 0})
-    document = {
-        "fingerprint": fingerprint,
-        "stato": body.stato,
-        "nota": note,
-        "tipo": body.tipo.strip(),
-        "raccolta": body.raccolta.strip(),
-        "riferimento": body.riferimento.strip(),
-        "operatore": operator,
-        "updated_at": now,
-    }
-    await db.reconciliation_cases.update_one(
-        {"fingerprint": fingerprint},
-        {"$set": document, "$setOnInsert": {"created_at": now}},
-        upsert=True,
-    )
-    saved = await db.reconciliation_cases.find_one({"fingerprint": fingerprint}, {"_id": 0})
-    await _record_audit_event(
-        "AGGIORNATO",
-        "SEGNALAZIONE_RICONCILIAZIONE",
-        fingerprint,
-        operatore=operator,
-        prima=before,
-        dopo=saved,
-    )
-    return saved
 
 
 VENDING_CASH_STATE_ID = "saldo"
@@ -7499,6 +7438,13 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+reconciliation_router, accounting_reconciliation, update_reconciliation_case = create_reconciliation_router(
+    get_database=lambda: db,
+    payment_bucket=_vending_payment_bucket,
+    request_operator=_request_operator,
+    record_audit_event=_record_audit_event,
+)
+api.include_router(reconciliation_router)
 app.include_router(api)
 
 

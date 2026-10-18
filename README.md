@@ -188,8 +188,8 @@ e ogni variazione entra nell'audit log.
 
 Prossimi passi tecnici:
 
-1. Suddivisione progressiva di `backend/server.py` in router/moduli, mantenendo
-   le route e i payload compatibili.
+1. Proseguire la suddivisione di `backend/server.py`: il router di
+   riconciliazione è già isolato, mantenendo route e payload compatibili.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 

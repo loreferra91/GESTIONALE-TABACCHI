@@ -283,6 +283,17 @@ def test_http_money_validation_and_protected_reconciliation(database, monkeypatc
         assert response.status_code == 422
     assert client.post("/api/versamenti", json={"data": "2026-10-18", "importo": "1.005"}).json()["importo"] == 1.01
     assert client.get("/api/contabilita/riconciliazione").status_code == 200
+    fingerprint = "c" * 64
+    workflow_response = client.put(
+        f"/api/contabilita/riconciliazione/segnalazioni/{fingerprint}",
+        json={"stato": "in_verifica", "nota": "Verifica route estratta"},
+    )
+    assert workflow_response.status_code == 200
+    assert workflow_response.json()["fingerprint"] == fingerprint
+    assert client.put(
+        "/api/contabilita/riconciliazione/segnalazioni/non-valido",
+        json={"stato": "aperta"},
+    ).status_code == 422
     monkeypatch.setenv("APP_USERNAME", "operator")
     monkeypatch.setenv("APP_PASSWORD", "test-only")
     assert client.get("/api/contabilita/riconciliazione").status_code == 401
