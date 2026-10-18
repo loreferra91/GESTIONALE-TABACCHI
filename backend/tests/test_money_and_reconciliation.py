@@ -282,6 +282,9 @@ def test_http_money_validation_and_protected_reconciliation(database, monkeypatc
         response = client.post("/api/versamenti", json={"data": "2026-10-18", "importo": bad})
         assert response.status_code == 422
     assert client.post("/api/versamenti", json={"data": "2026-10-18", "importo": "1.005"}).json()["importo"] == 1.01
+    assert client.put("/api/parametri/AGGIO_PCT", json={"valore": 0.1}).status_code == 200
+    assert client.put("/api/parametri/AGGIO_PCT", json={"valore": 1.5}).status_code == 422
+    assert {item["nome"] for item in client.get("/api/parametri").json()} == {"AGGIO_PCT"}
     assert client.get("/api/contabilita/riconciliazione").status_code == 200
     fingerprint = "c" * 64
     workflow_response = client.put(

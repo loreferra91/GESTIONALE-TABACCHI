@@ -20,10 +20,12 @@ from decimal import Decimal
 if __package__:
     from .audit_router import create_audit_router
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
+    from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
     from audit_router import create_audit_router
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
+    from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 
 ROOT_DIR = Path(__file__).parent
@@ -364,10 +366,6 @@ class Parametro(BaseModel):
     descrizione: str = ""
 
 
-class ParametroIn(BaseModel):
-    valore: float
-
-
 BACKUP_COLLECTIONS = [
     "prodotti",
     "listino_adm",
@@ -675,11 +673,6 @@ async def _run_transactionally(operation):
         if exc.code in {20, 303} or "transaction numbers are only allowed" in message:
             return await operation(None)
         raise
-
-
-async def get_params() -> Dict[str, float]:
-    docs = await db.parametri.find({}, {"_id": 0}).to_list(1000)
-    return {d["nome"]: float(d["valore"]) for d in docs}
 
 
 def lotto_for(categoria: str, params: Dict[str, float]) -> int:
@@ -5047,79 +5040,6 @@ async def del_cassa(m_id: str):
     return {"ok": True}
 
 
-# ------------------------- Parametri -------------------------
-@api.get("/parametri")
-async def list_parametri():
-    docs = await db.parametri.find({}, {"_id": 0}).sort("nome", 1).to_list(200)
-    return docs
-
-
-PARAM_BOUNDS = {
-    # nome: (min_incl, max_excl, descrizione)
-    "AGGIO_PCT": (0.0, 1.0, "0 ≤ AGGIO_PCT < 1"),
-    "SOGLIA_ALLERT_PCT": (0.0, 1.0, "0 ≤ SOGLIA_ALLERT_PCT < 1"),
-    "GIORNI_COPERTURA_MIN": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
-    "GIORNI_COPERTURA_TARGET": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
-    "AUTO_ORDER_FINESTRA_GG": (3.0, 31.0, "3 ≤ giorni ≤ 30"),
-    "AUTO_ORDER_FINESTRA_BREVE_GG": (3.0, 31.0, "3 ≤ giorni ≤ 30"),
-    "AUTO_ORDER_FINESTRA_LUNGA_GG": (7.0, 91.0, "7 ≤ giorni ≤ 90"),
-    "AUTO_ORDER_PESO_BREVE": (0.0, 1.01, "0 ≤ peso ≤ 1"),
-    "AUTO_ORDER_MIN_VENDUTO_BREVE": (0.0, 10000.0, "0 ≤ soglia"),
-    "AUTO_ORDER_MIN_VENDUTO_LUNGO": (0.0, 10000.0, "0 ≤ soglia"),
-    "AUTO_ORDER_FATTORE_SICUREZZA": (1.0, 5.0, "1 ≤ fattore < 5"),
-    "PERIODO_VENDUTI_GG": (1.0, 3650.0, "1 ≤ giorni ≤ 3650"),
-    "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
-    "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
-    "GIORNI_STORICO_VEND": (1.0, 365.0, "1 ≤ giorni ≤ 365"),
-    "GIORNI_SETTIMANA": (1.0, 31.0, "1 ≤ giorni ≤ 31"),
-    "VENDITE_GIORNALIERE_MESE": (1.0, 100.0, "1 ≤ divisore ≤ 100"),
-    "FAST_VENDUTO30_MIN": (0.0, 10000.0, "0 ≤ soglia"),
-    "SLOW_VENDUTO30_MAX": (0.0, 10000.0, "0 ≤ soglia"),
-    "SCORTA_MINIMA_NEGOZIO_VENDING": (0.0, 10000.0, "0 ≤ scorta minima"),
-    "GIACENZA_INIZIALE_CONTANTI_VENDING": (0.0, 1000000.0, "0 ≤ giacenza iniziale < 1.000.000"),
-    "LOTTO_SIGARETTE": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_SIGARI": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_SIGARETTI": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_FIUTO_E_MASTICO": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_TRINCIATI_PER_SIGARETTA": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_ALTRI_TABACCHI_DA_FUMO": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_INALAZIONE_SENZA_COMBUSTIONE": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_ELETTRONICHE": (1.0, 10000.0, "1 ≤ lotto"),
-    "LOTTO_ACCESSORI": (1.0, 10000.0, "1 ≤ lotto"),
-}
-
-
-@api.put("/parametri/{nome}")
-async def update_parametro(nome: str, body: ParametroIn):
-    try:
-        value = nonnegative_money(body.valore) if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING" else body.valore
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    bounds = PARAM_BOUNDS.get(nome)
-    if bounds is not None:
-        lo, hi, msg = bounds
-        if not (lo <= value < hi):
-            raise HTTPException(422, f"{nome} fuori range consentito ({msg}). Ricevuto: {value}")
-    if nome == "SCORTA_MINIMA_NEGOZIO_VENDING" and not float(body.valore).is_integer():
-        raise HTTPException(422, "SCORTA_MINIMA_NEGOZIO_VENDING deve essere un numero intero")
-    previous = await db.parametri.find_one({"nome": nome}, {"_id": 0, "valore": 1})
-    previous_value = float((previous or {}).get("valore") or 0)
-    r = await db.parametri.update_one({"nome": nome}, {"$set": {"valore": value}})
-    if r.matched_count == 0:
-        await db.parametri.insert_one(Parametro(nome=nome, valore=value).model_dump())
-    if nome == "GIACENZA_INIZIALE_CONTANTI_VENDING":
-        delta = money_sum([value, -previous_value])
-        if delta:
-            await _adjust_vending_cash_balance(delta)
-    doc = await db.parametri.find_one({"nome": nome}, {"_id": 0})
-    if previous_value != float(value):
-        await _record_audit_event(
-            "MODIFICATO", "PARAMETRO", nome,
-            prima={"valore": previous_value}, dopo={"valore": float(value)},
-        )
-    return doc
-
-
 # ------------------------- Auto-Order -------------------------
 @api.get("/auto-order")
 async def auto_order():
@@ -7401,6 +7321,14 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+parameters_router, get_params, list_parametri, update_parametro = create_parameters_router(
+    get_database=lambda: db,
+    make_parameter=lambda nome, valore: Parametro(nome=nome, valore=valore).model_dump(),
+    normalize_nonnegative_money=nonnegative_money,
+    sum_money=money_sum,
+    adjust_cash_balance=_adjust_vending_cash_balance,
+    record_audit_event=_record_audit_event,
+)
 reconciliation_router, accounting_reconciliation, update_reconciliation_case = create_reconciliation_router(
     get_database=lambda: db,
     payment_bucket=_vending_payment_bucket,
@@ -7409,6 +7337,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 )
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
+api.include_router(parameters_router)
 app.include_router(api)
 
 
