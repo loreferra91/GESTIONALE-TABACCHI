@@ -4,9 +4,9 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import UpdateMany, UpdateOne
+from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
-import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib, gc, tempfile
+import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 import base64
@@ -18,6 +18,12 @@ from zoneinfo import ZoneInfo
 from decimal import Decimal
 
 if __package__:
+    from .adm_router import (
+        ADM_CATEGORY_ALIASES, ADM_PREZZI_URL, ListinoItem,
+        _adm_product_update_operations, adm_local_code, adm_numeric_code,
+        create_adm_router, fetch_adm_categories_sync, parse_adm_pdf_sync,
+        parse_italian_money,
+    )
     from .audit_router import create_audit_router
     from .cash_movements_router import (
         MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
@@ -33,6 +39,12 @@ if __package__:
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
 else:
+    from adm_router import (
+        ADM_CATEGORY_ALIASES, ADM_PREZZI_URL, ListinoItem,
+        _adm_product_update_operations, adm_local_code, adm_numeric_code,
+        create_adm_router, fetch_adm_categories_sync, parse_adm_pdf_sync,
+        parse_italian_money,
+    )
     from audit_router import create_audit_router
     from cash_movements_router import (
         MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
@@ -200,15 +212,6 @@ class SmartVenueProductIn(BaseModel):
 
 class SmartVenueBarcodeIn(BaseModel):
     barcode: str = ""
-
-
-class ListinoItem(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    codice: str
-    descrizione: str
-    prezzo: NonNegativeMoney = 0
-    confezione: str = ""
 
 
 class VendingColonna(BaseModel):
@@ -691,16 +694,6 @@ async def root():
 # ------------------------- Prodotti -------------------------
 MAX_LIMIT = 5000
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-ADM_PREZZI_URL = "https://www.adm.gov.it/portale/monopoli/tabacchi/prezzi/prezzi_pubblico"
-ADM_CATEGORY_ALIASES = {
-    "SIGARETTE": ["sigarette"],
-    "SIGARI": ["sigari"],
-    "SIGARETTI": ["sigaretti"],
-    "FIUTO E MASTICO": ["fiuto", "mastico"],
-    "TRINCIATI PER SIGARETTA": ["trinciati", "ryo"],
-    "ALTRI TABACCHI DA FUMO": ["altri tabacchi"],
-    "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE": ["inalazione senza combustione", "prodotti da inalazione"],
-}
 
 
 def _q_regex(q: str) -> Dict[str, Any]:
@@ -710,19 +703,6 @@ def _q_regex(q: str) -> Dict[str, Any]:
 
 def _cap(limit: int) -> int:
     return max(1, min(int(limit or 0), MAX_LIMIT))
-
-
-def adm_numeric_code(codice: Any) -> str:
-    text = str(codice or "").strip().upper()
-    if text.startswith("AMMS"):
-        text = text[4:]
-    digits = re.sub(r"\D", "", text)
-    return digits.lstrip("0") or digits
-
-
-def adm_local_code(codice_adm: Any) -> str:
-    code = adm_numeric_code(codice_adm)
-    return f"AMMS{code}" if code else ""
 
 
 def _product_code_text(value: Any) -> str:
@@ -970,15 +950,6 @@ async def reconcile_all_vending_stock() -> int:
     return changed
 
 
-def parse_italian_money(value: Any) -> float:
-    text = str(value or "").strip().replace(".", "").replace(",", ".")
-    text = re.sub(r"[^0-9.\-]", "", text)
-    try:
-        return float(text) if text else 0.0
-    except ValueError:
-        return 0.0
-
-
 @api.get("/prodotti")
 async def list_prodotti(q: Optional[str] = None, categoria: Optional[str] = None, limit: int = 500):
     filt: Dict[str, Any] = {}
@@ -1118,205 +1089,6 @@ async def update_venduti_negozio(prod_id: str, body: VendutiNegozioIn, request: 
 async def delete_prodotto(prod_id: str):
     await db.prodotti.delete_one({"id": prod_id})
     return {"ok": True}
-
-
-# ------------------------- Listino ADM -------------------------
-@api.get("/listino")
-async def list_listino(q: Optional[str] = None, limit: int = 300):
-    filt: Dict[str, Any] = {}
-    if q:
-        rx = _q_regex(q)
-        filt["$or"] = [{"codice": rx}, {"descrizione": rx}]
-    capped_limit = _cap(limit)
-    docs = await db.listino_adm.find(filt, {"_id": 0}).sort("descrizione", 1).limit(capped_limit).to_list(capped_limit)
-    total = await db.listino_adm.count_documents(filt)
-    return {"items": docs, "total": total}
-
-
-def fetch_adm_categories_sync() -> List[Dict[str, Any]]:
-    import requests
-    from bs4 import BeautifulSoup
-    from urllib.parse import urljoin
-
-    response = requests.get(ADM_PREZZI_URL, timeout=45)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-    categories: Dict[str, Dict[str, Any]] = {}
-    page_text = " ".join(soup.get_text(" ", strip=True).split())
-    for category, aliases in ADM_CATEGORY_ALIASES.items():
-        for a in soup.find_all("a"):
-            text = " ".join(a.get_text(" ", strip=True).split())
-            href = a.get("href") or ""
-            haystack = f"{text} {href}".lower()
-            if not href or ".pdf" not in href.lower():
-                continue
-            if any(alias.lower() in haystack for alias in aliases):
-                updated_match = re.search(rf"{re.escape(text)}.*?aggiornato il\s+(\d{{2}}/\d{{2}}/\d{{4}})", page_text, re.I)
-                categories[category] = {
-                    "categoria": category,
-                    "titolo": text or category.title(),
-                    "url": urljoin(ADM_PREZZI_URL, href),
-                    "aggiornato_il": updated_match.group(1) if updated_match else None,
-                }
-                break
-    return [categories[k] for k in ADM_CATEGORY_ALIASES if k in categories]
-
-
-def parse_adm_pdf_sync(category: Dict[str, Any]) -> List[Dict[str, Any]]:
-    import requests
-    import pdfplumber
-
-    rows: List[Dict[str, Any]] = []
-    # I listini ADM possono essere grandi. Scaricarli su un file temporaneo evita
-    # di tenere contemporaneamente in RAM sia i byte del PDF sia le strutture di
-    # pdfplumber; il filesystem effimero di Render e sufficiente per questo uso.
-    with requests.get(category["url"], timeout=90, stream=True) as response:
-        response.raise_for_status()
-        with tempfile.TemporaryFile(suffix=".pdf") as pdf_file:
-            for chunk in response.iter_content(chunk_size=256 * 1024):
-                if chunk:
-                    pdf_file.write(chunk)
-            pdf_file.seek(0)
-
-            with pdfplumber.open(pdf_file) as pdf:
-                for page in pdf.pages:
-                    try:
-                        tables = page.extract_tables() or []
-                        for table in tables:
-                            if not table:
-                                continue
-                            for row in table[1:]:
-                                if not row or len(row) < 4:
-                                    continue
-                                code = adm_numeric_code(row[0])
-                                if not code or not code.isdigit():
-                                    continue
-                                descrizione = " ".join(str(row[1] or "").replace("\n", " ").split())
-                                confezione = " ".join(str(row[2] or "").replace("\n", " ").split()) if len(row) > 2 else ""
-                                prezzo = parse_italian_money(row[-1])
-                                if not descrizione:
-                                    continue
-                                rows.append({
-                                    "adm_codice": code,
-                                    "codice": adm_local_code(code),
-                                    "descrizione": descrizione,
-                                    "confezione": confezione,
-                                    "prezzo": prezzo,
-                                    "categoria_adm": category["categoria"],
-                                    "fonte": "ADM",
-                                    "adm_pdf_url": category["url"],
-                                    "adm_aggiornato_il": category.get("aggiornato_il"),
-                                })
-                    finally:
-                        # pdfplumber conserva cache grafiche pesanti per pagina.
-                        page.close()
-    return rows
-
-
-def _adm_product_update_operations(rows: List[Dict[str, Any]], product_codes: set[str]):
-    """Prepara update ADM solo per codici realmente presenti nei prodotti."""
-    operations = []
-    for item in rows:
-        candidate_codes = {item["codice"].upper(), item["adm_codice"].upper()}
-        if candidate_codes.isdisjoint(product_codes):
-            continue
-        operations.append(UpdateMany(
-            {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
-            {"$set": {
-                "categoria": item["categoria_adm"],
-                "categoria_adm": item["categoria_adm"],
-                "adm_codice": item["adm_codice"],
-                "adm_descrizione": item["descrizione"],
-                "adm_prezzo": item["prezzo"],
-                "adm_aggiornato_il": item.get("adm_aggiornato_il"),
-            }},
-        ))
-    return operations
-
-
-@api.get("/adm/categories")
-async def adm_categories():
-    categories = await asyncio.to_thread(fetch_adm_categories_sync)
-    last_sync = await db.adm_sync.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
-    return {"source": ADM_PREZZI_URL, "categories": categories, "last_sync": last_sync}
-
-
-@api.post("/adm/sync")
-async def adm_sync():
-    started = datetime.now(timezone.utc).isoformat()
-    categories = await asyncio.to_thread(fetch_adm_categories_sync)
-    if not categories:
-        raise HTTPException(502, "Nessun PDF ADM trovato nella pagina ufficiale")
-
-    total_rows = inserted = updated = product_updates = 0
-    detail = []
-    product_codes = {
-        str(product.get("codice") or "").strip().upper()
-        async for product in db.prodotti.find({}, {"_id": 0, "codice": 1})
-        if product.get("codice")
-    }
-
-    # Una categoria alla volta: sul piano Render Free l'estrazione parallela di
-    # sette PDF supera i 512 MB e provoca il riavvio del processo.
-    for category in categories:
-        rows = await asyncio.to_thread(parse_adm_pdf_sync, category)
-        total_rows += len(rows)
-        operations = []
-        for item in rows:
-            insert_defaults = ListinoItem(
-                codice=item["codice"],
-                descrizione=item["descrizione"],
-                prezzo=item["prezzo"],
-                confezione=item["confezione"],
-            ).model_dump()
-            set_data = {**item, "updated_at": started}
-            operations.append(UpdateOne(
-                {"$or": [
-                    {"adm_codice": item["adm_codice"]},
-                    {"codice": item["codice"]},
-                    {"codice": item["adm_codice"]},
-                ]},
-                {"$set": set_data, "$setOnInsert": insert_defaults},
-                upsert=True,
-            ))
-        result = await _bulk_upsert(db.listino_adm, operations)
-        inserted += result.get("inseriti", 0)
-        updated += result.get("aggiornati", 0)
-        product_operations = _adm_product_update_operations(rows, product_codes)
-        product_result = await _bulk_update(db.prodotti, product_operations)
-        product_updates += product_result["modificati"]
-        detail.append({
-            **category,
-            "righe": len(rows),
-            **result,
-            "prodotti_trovati": product_result["trovati"],
-            "prodotti_aggiornati": product_result["modificati"],
-        })
-
-        # Rilascia subito righe, operazioni e cache cicliche prima del PDF seguente.
-        del rows, operations, product_operations
-        gc.collect()
-
-    await db.prodotti.update_many(
-        {"$or": [{"categoria_adm": {"$exists": False}}, {"categoria_adm": ""}, {"categoria_adm": None}]},
-        {"$set": {"categoria": "ACCESSORI"}},
-    )
-    await _apply_electronic_inhalation_categories()
-    linked_products = await db.prodotti.count_documents({"categoria_adm": {"$exists": True, "$ne": ""}})
-    sync_doc = {
-        "id": str(uuid.uuid4()),
-        "created_at": started,
-        "source": ADM_PREZZI_URL,
-        "categorie": len(categories),
-        "righe": total_rows,
-        "inseriti": inserted,
-        "aggiornati": updated,
-        "prodotti_aggiornati": product_updates,
-        "prodotti_collegati": linked_products,
-        "dettaglio": detail,
-    }
-    await db.adm_sync.insert_one(sync_doc.copy())
-    return sync_doc
 
 
 # ------------------------- Vendite giornaliere -------------------------
@@ -6811,6 +6583,15 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+adm_router, list_listino, adm_categories, adm_sync = create_adm_router(
+    get_database=lambda: db,
+    cap_limit=_cap,
+    fetch_categories=lambda: fetch_adm_categories_sync(),
+    parse_pdf=lambda category: parse_adm_pdf_sync(category),
+    bulk_upsert=lambda collection, operations: _bulk_upsert(collection, operations),
+    bulk_update=lambda collection, operations: _bulk_update(collection, operations),
+    apply_electronic_inhalation_categories=lambda: _apply_electronic_inhalation_categories(),
+)
 operations = create_operations_router(
     get_database=lambda: db,
     backup_collections=BACKUP_COLLECTIONS,
@@ -6879,6 +6660,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 )
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
+api.include_router(adm_router)
 api.include_router(operations_router)
 api.include_router(import_history_router)
 api.include_router(cash_movements_router)
