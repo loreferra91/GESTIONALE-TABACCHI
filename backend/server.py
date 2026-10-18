@@ -563,6 +563,8 @@ async def on_start():
             db.vendite.create_index([("data", 1), ("codice", 1)]),
             db.vendite.create_index("csv_event_key", unique=True, sparse=True),
             db.vendite.create_index("idempotency_key", unique=True, sparse=True),
+            db.cassa_rapida_batches.create_index("idempotency_key", unique=True, sparse=True),
+            db.cassa_rapida_batches.create_index("created_at"),
             db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
             db.storico_ordini.create_index("batch_id"),
@@ -1577,6 +1579,14 @@ class BulkVenditaIn(BaseModel):
     righe: List[Dict[str, Any]]  # {data, codice, descrizione, quantita, importo}
 
 
+class CassaRapidaIn(BaseModel):
+    """Vendita POS atomica: vendite, scorte e movimento cassa nello stesso batch."""
+    data: str
+    pagamento: str = "CONTANTI"
+    righe: List[Dict[str, Any]]
+    idempotency_key: Optional[str] = None
+
+
 @api.post("/vendite/bulk")
 async def bulk_vendite(body: BulkVenditaIn):
     """Bulk paste da Excel: rows with data, codice, descrizione, quantita, importo."""
@@ -1679,6 +1689,98 @@ async def bulk_vendite(body: BulkVenditaIn):
         "canale": body.canale,
         "pagamento": body.pagamento,
     }
+
+
+@api.post("/vendite/cassa-rapida")
+async def vendita_cassa_rapida(body: CassaRapidaIn, request: Request = None):
+    """Registra un carrello POS senza lasciare vendite o cassa a metà."""
+    key = str(body.idempotency_key or "").strip() or None
+    if key and not 10 <= len(key) <= 160:
+        raise HTTPException(422, "idempotency_key deve contenere da 10 a 160 caratteri")
+    pagamento = str(body.pagamento or "CONTANTI").strip().upper()
+    if not body.righe:
+        raise HTTPException(422, "Il carrello è vuoto")
+    if key:
+        existing = await db.cassa_rapida_batches.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            return existing
+
+    batch_id = str(uuid.uuid4())
+    prepared = []
+    total = Decimal(0)
+    for index, row in enumerate(body.righe):
+        try:
+            codice = _product_code_text(row.get("codice"))
+            quantity = int(row.get("quantita") or 0)
+            if not codice or quantity <= 0:
+                raise ValueError("prodotto o quantità non validi")
+            product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
+            if not product:
+                raise ValueError(f"prodotto non trovato: {codice}")
+            unit_price = money_decimal(row.get("prezzo", product.get("prezzo", 0)), nonnegative=True)
+            line_total = unit_price * quantity
+            prepared.append({
+                "id": str(uuid.uuid4()), "data": body.data, "codice": codice,
+                "descrizione": str(row.get("descrizione") or product.get("descrizione") or ""),
+                "quantita": quantity, "importo": money(line_total), "canale": "NEGOZIO",
+                "pagamento": pagamento, "sorgente": "POS", "batch_id": batch_id,
+                "operatore": _request_operator(request),
+            })
+            total += line_total
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise HTTPException(422, f"Riga {index + 1}: {exc}") from exc
+
+    total_float = money(total)
+    created_at = datetime.now(timezone.utc).isoformat()
+    batch = {"id": batch_id, "created_at": created_at, "sorgente": "POS", "pagamento": pagamento,
+             "totale": total_float, "pezzi": sum(int(row["quantita"]) for row in prepared),
+             "idempotency_key": key, "status": "active"}
+    cash_entry = MovimentoCassa(
+        data=body.data, tipo="ENTRATA", importo=total_float,
+        descrizione=f"Vendita banco ({batch['pezzi']} pz · {pagamento})",
+        operatore=_request_operator(request),
+    ).model_dump()
+
+    async def operation(session):
+        kwargs = _session_kwargs(session)
+        if key:
+            existing = await db.cassa_rapida_batches.find_one({"idempotency_key": key}, {"_id": 0}, **kwargs)
+            if existing:
+                return existing
+        changed = []
+        try:
+            for sale in prepared:
+                quantity = int(sale["quantita"])
+                result = await db.prodotti.update_one(
+                    {"codice": sale["codice"], "giacenza_negozio": {"$gte": quantity}},
+                    {"$inc": {"giacenza_negozio": -quantity, "venduti_negozio": quantity}}, **kwargs,
+                )
+                if result.modified_count != 1:
+                    raise RuntimeError(f"Giacenza insufficiente per il prodotto {sale['codice']}")
+                changed.append(sale)
+                await db.vendite.insert_one(sale.copy(), **kwargs)
+            await db.cassa.insert_one(cash_entry.copy(), **kwargs)
+            await db.cassa_rapida_batches.insert_one(batch.copy(), **kwargs)
+            return batch
+        except Exception:
+            if session is None:
+                await db.cassa.delete_one({"id": cash_entry["id"]})
+                await db.vendite.delete_many({"batch_id": batch_id, "sorgente": "POS"})
+                for sale in changed:
+                    await db.prodotti.update_one({"codice": sale["codice"]}, {"$inc": {
+                        "giacenza_negozio": int(sale["quantita"]), "venduti_negozio": -int(sale["quantita"])
+                    }})
+                await db.cassa_rapida_batches.delete_one({"id": batch_id})
+            raise
+
+    try:
+        return await _run_transactionally(operation)
+    except DuplicateKeyError:
+        if key:
+            existing = await db.cassa_rapida_batches.find_one({"idempotency_key": key}, {"_id": 0})
+            if existing:
+                return existing
+        raise
 
 
 @api.get("/vendite/bulk/ultimo")

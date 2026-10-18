@@ -25,7 +25,6 @@ export default function CassaRapida() {
   const [cat, setCat] = useState("ALL");
   const [cart, setCart] = useState([]); // {codice, descrizione, prezzo, qta}
   const [pagamento, setPagamento] = useState("CONTANTI");
-  const [canale, setCanale] = useState("NEGOZIO");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -60,27 +59,17 @@ export default function CassaRapida() {
     setSaving(true);
     const nowIso = new Date().toISOString();
     try {
-      for (const x of cart) {
-        await api.post("/vendite", {
-          data: nowIso,
+      await api.post("/vendite/cassa-rapida", {
+        data: nowIso,
+        pagamento,
+        righe: cart.map(x => ({
           codice: x.codice,
           descrizione: x.descrizione,
           quantita: x.qta,
-          importo: x.qta * x.prezzo,
-          canale,
-          pagamento,
-        });
-      }
-      // registra anche entrata cassa se contanti/pos
-      if (totale > 0) {
-        await api.post("/cassa", {
-          data: nowIso,
-          tipo: "ENTRATA",
-          importo: totale,
-          descrizione: `Vendita banco (${pezzi} pz · ${pagamento})`,
-          operatore: "POS",
-        });
-      }
+          prezzo: x.prezzo,
+        })),
+        idempotency_key: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`,
+      });
       toast.success(`Vendita registrata: ${formatEur(totale)}`);
       setCart([]);
     } catch (e) {
@@ -103,11 +92,7 @@ export default function CassaRapida() {
             <div className="font-heading font-black text-lg">Cassa Rapida</div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          {["NEGOZIO", "VENDING"].map(c => (
-            <button key={c} data-testid={`pos-canale-${c}`} onClick={() => setCanale(c)} className={`px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider ${canale === c ? "bg-brand text-white" : "bg-slate-800 text-slate-300"}`}>{c}</button>
-          ))}
-        </div>
+        <div className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-slate-300">NEGOZIO</div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">

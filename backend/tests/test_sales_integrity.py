@@ -57,6 +57,46 @@ def test_manual_sale_rejects_insufficient_stock_without_writes(monkeypatch):
     assert count == 0
 
 
+def test_pos_batch_is_atomic_and_idempotent(monkeypatch):
+    database = AsyncMongoMockClient()["pos_batch_atomicity"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"id": "p1", "codice": "P1", "descrizione": "Uno", "prezzo": 2.50, "giacenza_negozio": 3, "venduti_negozio": 0},
+            {"id": "p2", "codice": "P2", "descrizione": "Due", "prezzo": 4.00, "giacenza_negozio": 0, "venduti_negozio": 0},
+        ])
+        body = server.CassaRapidaIn(
+            data="2026-10-18T16:00:00Z", pagamento="CONTANTI",
+            idempotency_key="pos-request-001",
+            righe=[
+                {"codice": "P1", "quantita": 1, "prezzo": 2.50},
+                {"codice": "P2", "quantita": 1, "prezzo": 4.00},
+            ],
+        )
+        with pytest.raises(RuntimeError, match="Giacenza insufficiente"):
+            await server.vendita_cassa_rapida(body)
+        failed = {
+            "product": await database.prodotti.find_one({"codice": "P1"}, {"_id": 0}),
+            "sales": await database.vendite.count_documents({}),
+            "cash": await database.cassa.count_documents({}),
+        }
+        await database.prodotti.update_one({"codice": "P2"}, {"$set": {"giacenza_negozio": 1}})
+        first = await server.vendita_cassa_rapida(body)
+        second = await server.vendita_cassa_rapida(body)
+        return failed, first, second, await database.prodotti.find_one({"codice": "P1"}, {"_id": 0}), await database.vendite.count_documents({}), await database.cassa.count_documents({})
+
+    failed, first, second, product, sales, cash = asyncio.run(scenario())
+    assert failed["product"]["giacenza_negozio"] == 3
+    assert failed["sales"] == failed["cash"] == 0
+    assert first["id"] == second["id"]
+    assert first["totale"] == 6.5
+    assert product["giacenza_negozio"] == 2
+    assert product["venduti_negozio"] == 1
+    assert sales == 2
+    assert cash == 1
+
+
 def test_manual_sale_rejects_ambiguous_idempotency_key(monkeypatch):
     database = AsyncMongoMockClient()["manual_sale_bad_idempotency"]
     monkeypatch.setattr(server, "db", database)
