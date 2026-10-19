@@ -197,7 +197,9 @@ Prossimi passi tecnici:
    compatibili. Le vendite giornaliere, incluse operazioni bulk e Cassa Rapida,
    sono separate. Anche parsing e deduplicazione del CSV vending sono isolati;
    preparazione, registro contabile e ciclo fisico preview/import/annullo sono
-   ora completamente separati. Anche Import Excel è isolato; resta Smart Venue.
+   ora completamente separati. Anche Import Excel e Smart Venue sono isolati in
+   router dedicati, con alias pubblici e callback dinamiche per preservare la
+   compatibilità dei test e degli import esistenti.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 

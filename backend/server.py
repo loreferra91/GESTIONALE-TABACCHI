@@ -94,6 +94,10 @@ if __package__:
         BulkVenditaIn, CassaRapidaIn, VenditaGiornaliera, VenditaIn,
         create_sales_router,
     )
+    from .smart_venue_router import (
+        SmartVenueBarcodeIn, SmartVenueBulkIn, SmartVenueProductIn,
+        create_smart_venue_router,
+    )
     from .vending_router import VendingColonna, VendingCreateIn, create_vending_router
 else:
     from adm_router import (
@@ -173,6 +177,10 @@ else:
     from sales_router import (
         BulkVenditaIn, CassaRapidaIn, VenditaGiornaliera, VenditaIn,
         create_sales_router,
+    )
+    from smart_venue_router import (
+        SmartVenueBarcodeIn, SmartVenueBulkIn, SmartVenueProductIn,
+        create_smart_venue_router,
     )
     from vending_router import VendingColonna, VendingCreateIn, create_vending_router
 
@@ -264,27 +272,6 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     return response
-
-
-# ------------------------- Models -------------------------
-class SmartVenueProductIn(BaseModel):
-    codice: str
-    descrizione: str
-    barcode: str = ""
-    categoria: str = "ACCESSORI"
-    prezzo: NonNegativeMoney = 0
-    acquistati: int = 0
-    giacenza_negozio: int = 0
-    giacenza_vending: int = 0
-    smart_venue: int = 0
-
-
-class SmartVenueBarcodeIn(BaseModel):
-    barcode: str = ""
-
-
-class SmartVenueBulkIn(BaseModel):
-    testo: str
 
 
 class Parametro(BaseModel):
@@ -841,7 +828,10 @@ async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> b
     return bytes(buf)
 
 
-# ------------------------- Smart Venue -------------------------
+# ------------------------- Legacy Smart Venue helpers -------------------------
+# The public implementations and all routes live in smart_venue_router. These
+# compatibility helpers remain only for imports performed during startup and
+# are rebound to the router implementations below.
 async def _import_smart_venue(ws) -> Dict[str, int]:
     """Importa la fotografia SMART VENUE dal relativo foglio Excel.
 
@@ -1043,7 +1033,6 @@ async def _smart_venue_bulk_comparison(rows: List[Dict[str, Any]]) -> List[Dict[
     return compared
 
 
-@api.post("/smart-venue/bulk/preview")
 async def preview_smart_venue_bulk(body: SmartVenueBulkIn):
     parsed = _parse_smart_venue_bulk_text(body.testo)
     rows = await _smart_venue_bulk_comparison(parsed["righe"])
@@ -1056,7 +1045,6 @@ async def preview_smart_venue_bulk(body: SmartVenueBulkIn):
     }
 
 
-@api.post("/smart-venue/bulk/import")
 async def import_smart_venue_bulk(body: SmartVenueBulkIn):
     parsed = _parse_smart_venue_bulk_text(body.testo)
     if parsed["errori"]:
@@ -1115,7 +1103,6 @@ async def import_smart_venue_bulk(body: SmartVenueBulkIn):
     return response
 
 
-@api.post("/smart-venue/import-excel")
 async def import_smart_venue_excel(file: UploadFile = File(...)):
     """Aggiorna barcode e SMART VENUE dalle colonne E/F del relativo foglio."""
     try:
@@ -1150,7 +1137,6 @@ async def import_smart_venue_excel(file: UploadFile = File(...)):
     return response
 
 
-@api.get("/smart-venue")
 async def list_smart_venue():
     hidden_rows, smart_rows, products, vending_totals = await asyncio.gather(
         db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000),
@@ -1206,7 +1192,6 @@ async def list_smart_venue():
     return rows
 
 
-@api.post("/smart-venue")
 async def create_smart_venue_product(body: SmartVenueProductIn):
     code = _product_code_text(body.codice)
     description = str(body.descrizione or "").strip()
@@ -1259,7 +1244,6 @@ async def create_smart_venue_product(body: SmartVenueProductIn):
     }
 
 
-@api.put("/smart-venue/{row_id}/barcode")
 async def update_smart_venue_barcode(row_id: str, body: SmartVenueBarcodeIn):
     barcode = str(body.barcode or "").strip()
     if len(barcode) > 100:
@@ -1300,7 +1284,6 @@ async def _smart_venue_row_and_stock(row_id: str) -> tuple[Dict[str, Any], int]:
     return smart_row, rimanenze
 
 
-@api.post("/smart-venue/{row_id}/conferma")
 async def confirm_smart_venue_difference(row_id: str, body: Optional[Dict[str, Any]] = None):
     smart_row, rimanenze = await _smart_venue_row_and_stock(row_id)
     current_smart_venue = int(smart_row.get("smart_venue", smart_row.get("rimanenze_smart", 0)) or 0)
@@ -1331,7 +1314,6 @@ async def confirm_smart_venue_difference(row_id: str, body: Optional[Dict[str, A
     }
 
 
-@api.delete("/smart-venue/{row_id}")
 async def delete_smart_venue_row(row_id: str):
     smart_row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0, "id": 1, "codice": 1})
     if not smart_row:
@@ -1702,6 +1684,35 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
     request_operator=_request_operator,
     record_audit_event=_record_audit_event,
 )
+smart_venue = create_smart_venue_router(
+    get_database=lambda: db,
+    read_capped=_read_capped,
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    record_import_history=lambda *args, **kwargs: record_import_history(*args, **kwargs),
+    bulk_upsert=lambda *args, **kwargs: _bulk_upsert(*args, **kwargs),
+    product_model=Prodotto,
+    product_categories=PRODUCT_CATEGORIES,
+    product_code_text=_product_code_text,
+    product_identity_tokens=_product_identity_tokens,
+    adm_numeric_code=adm_numeric_code,
+    adm_local_code=adm_local_code,
+    nonnegative_money=nonnegative_money,
+    money_product=money_product,
+    vending_stock_by_code=_vending_stock_by_code,
+)
+smart_venue_router = smart_venue["router"]
+_import_smart_venue = smart_venue["import_smart_venue"]
+_parse_smart_venue_bulk_text = smart_venue["parse_smart_venue_bulk_text"]
+_resolve_smart_venue_product_rows = smart_venue["resolve_smart_venue_product_rows"]
+_smart_venue_bulk_comparison = smart_venue["smart_venue_bulk_comparison"]
+preview_smart_venue_bulk = smart_venue["preview_smart_venue_bulk"]
+import_smart_venue_bulk = smart_venue["import_smart_venue_bulk"]
+import_smart_venue_excel = smart_venue["import_smart_venue_excel"]
+list_smart_venue = smart_venue["list_smart_venue"]
+create_smart_venue_product = smart_venue["create_smart_venue_product"]
+update_smart_venue_barcode = smart_venue["update_smart_venue_barcode"]
+confirm_smart_venue_difference = smart_venue["confirm_smart_venue_difference"]
+delete_smart_venue_row = smart_venue["delete_smart_venue_row"]
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
 api.include_router(backup_router)
@@ -1721,6 +1732,7 @@ api.include_router(excel_import_router)
 api.include_router(parameters_router)
 api.include_router(auto_order_router)
 api.include_router(dashboard_router)
+api.include_router(smart_venue_router)
 app.include_router(api)
 
 
