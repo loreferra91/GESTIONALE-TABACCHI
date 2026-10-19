@@ -126,6 +126,13 @@ def test_vending_ricarica_pdf(s):
     print(f"PDF size: {len(body)} bytes")
 
 
+def test_vending_giacenza_pdf(s):
+    r = s.get(f"{BASE}/api/vending/giacenza-pdf", timeout=60)
+    assert r.status_code == 200, r.text[:300]
+    assert "application/pdf" in r.headers.get("content-type", "")
+    assert r.content.startswith(b"%PDF-")
+
+
 # ---------- Regression ----------
 @pytest.mark.parametrize("path", [
     "/api/dashboard", "/api/pivot", "/api/prodotti?limit=5",

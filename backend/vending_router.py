@@ -742,6 +742,85 @@ def create_vending_router(
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
+    @router.get("/vending/giacenza-pdf")
+    async def vending_giacenza_pdf():
+        """Print the current physical stock in each vending column only."""
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+
+        rows = sorted(await list_vending(), key=lambda row: row["colonna"])
+        total_pieces = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in rows)
+        buffer = io.BytesIO()
+        document = SimpleDocTemplate(
+            buffer, pagesize=A4,
+            leftMargin=15 * mm, rightMargin=15 * mm,
+            topMargin=15 * mm, bottomMargin=15 * mm,
+        )
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "vending-stock-title", parent=styles["Heading1"],
+            fontName="Helvetica-Bold", fontSize=18,
+            textColor=colors.HexColor("#0F172A"), spaceAfter=2,
+        )
+        subtitle_style = ParagraphStyle(
+            "vending-stock-subtitle", parent=styles["Normal"],
+            fontName="Helvetica", fontSize=9,
+            textColor=colors.HexColor("#64748B"), spaceAfter=12,
+        )
+        now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")
+        story = [
+            Paragraph("GIACENZA ATTUALE VENDING", title_style),
+            Paragraph(
+                f"Fotografia al: <b>{now}</b> &nbsp;·&nbsp; Colonne: "
+                f"<b>{len(rows)}</b> &nbsp;·&nbsp; Pezzi totali: <b>{total_pieces}</b>",
+                subtitle_style,
+            ),
+        ]
+        if not rows:
+            story.append(Paragraph("Nessuna colonna vending configurata.", styles["Normal"]))
+        else:
+            data = [["COLONNA", "CODICE", "ARTICOLO", "GIACENZA", "CAPACITÀ"]]
+            for row in rows:
+                data.append([
+                    row.get("colonna", ""), row.get("codice", ""),
+                    (row.get("descrizione") or "")[:55],
+                    str(max(0, int(row.get("giacenza", 0) or 0))),
+                    str(max(0, int(row.get("capacita_max", 0) or 0))),
+                ])
+            data.append(["", "", "", "TOTALE", str(total_pieces)])
+            table = Table(
+                data, colWidths=[25 * mm, 28 * mm, 87 * mm, 25 * mm, 25 * mm],
+                repeatRows=1,
+            )
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
+                ("FONTNAME", (0, 1), (-1, -2), "Helvetica"),
+                ("FONTSIZE", (0, 1), (-1, -1), 9),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            story.append(table)
+        document.build(story)
+        buffer.seek(0)
+        filename = f"giacenza_vending_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
     return {
         "router": router,
         "create_vending_column": create_vending_column,
@@ -752,4 +831,5 @@ def create_vending_router(
         "ricarica_vending": ricarica_vending,
         "ricarica_vending_completa": ricarica_vending_completa,
         "vending_ricarica_pdf": vending_ricarica_pdf,
+        "vending_giacenza_pdf": vending_giacenza_pdf,
     }

@@ -932,6 +932,7 @@ update_vending = vending["update_vending"]
 ricarica_vending = vending["ricarica_vending"]
 ricarica_vending_completa = vending["ricarica_vending_completa"]
 vending_ricarica_pdf = vending["vending_ricarica_pdf"]
+vending_giacenza_pdf = vending["vending_giacenza_pdf"]
 sales = create_sales_router(
     get_database=lambda: db,
     cap_limit=_cap,

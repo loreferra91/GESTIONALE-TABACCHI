@@ -222,6 +222,10 @@ export default function Vending() {
     window.open(`${API}/vending/ricarica-pdf`, "_blank");
   };
 
+  const stampaGiacenza = () => {
+    window.open(`${API}/vending/giacenza-pdf`, "_blank");
+  };
+
   const cellTone = (r) => {
     if (r.esito === "DA CARICARE" || r.esito === "CARICO PARZIALE") return "bg-red-50 border-red-200";
     if (r.esito === "SCORTA NEGOZIO") return "bg-amber-50 border-amber-300";
@@ -233,6 +237,9 @@ export default function Vending() {
   return (
     <Layout title="Distributore Vending" subtitle={`${allRows.length} colonne mappate`} actions={
       <>
+        <button data-testid="vending-stock-pdf" aria-label={`Stampa la giacenza attuale di ${allRows.length} colonne`} title="Stampa giacenza attuale" onClick={stampaGiacenza} disabled={!allRows.length || bulkLoading} className="flex items-center gap-1.5 border border-blue-300 bg-blue-50 text-blue-800 rounded-md px-3 sm:px-4 py-2 text-sm font-bold hover:bg-blue-100 transition-colors disabled:opacity-40">
+          <Printer size={16} weight="bold" /> <span className="hidden sm:inline">Giacenza attuale</span> ({allRows.length})
+        </button>
         <button data-testid="vending-pdf" aria-label={`Stampa ${proposteDaCaricare.length} colonne proposte`} title="Stampa proposte" onClick={stampaPdf} disabled={!proposteDaCaricare.length || bulkLoading} className="flex items-center gap-1.5 border border-slate-300 bg-white text-slate-900 rounded-md px-3 sm:px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           <Printer size={16} weight="bold" /> <span className="hidden sm:inline">Stampa</span> ({proposteDaCaricare.length})
         </button>
