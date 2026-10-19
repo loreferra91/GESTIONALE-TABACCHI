@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
+from pymongo.errors import BulkWriteError, OperationFailure
 import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -72,7 +72,10 @@ if __package__:
         plan_vending_inventory as _plan_vending_inventory,
     )
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
-    from .sales_router import VenditaGiornaliera, VenditaIn, create_sales_router
+    from .sales_router import (
+        BulkVenditaIn, CassaRapidaIn, VenditaGiornaliera, VenditaIn,
+        create_sales_router,
+    )
     from .vending_router import VendingColonna, VendingCreateIn, create_vending_router
 else:
     from adm_router import (
@@ -129,7 +132,10 @@ else:
         plan_vending_inventory as _plan_vending_inventory,
     )
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
-    from sales_router import VenditaGiornaliera, VenditaIn, create_sales_router
+    from sales_router import (
+        BulkVenditaIn, CassaRapidaIn, VenditaGiornaliera, VenditaIn,
+        create_sales_router,
+    )
     from vending_router import VendingColonna, VendingCreateIn, create_vending_router
 
 ROOT_DIR = Path(__file__).parent
@@ -811,307 +817,6 @@ async def reconcile_all_vending_stock() -> int:
         "prodotti_riconciliati": changed,
     })
     return changed
-
-
-class BulkVenditaIn(BaseModel):
-    canale: str = "NEGOZIO"
-    pagamento: str = "CONTANTI"
-    righe: List[Dict[str, Any]]  # {data, codice, descrizione, quantita, importo}
-
-
-class CassaRapidaIn(BaseModel):
-    """Vendita POS atomica: vendite, scorte e movimento cassa nello stesso batch."""
-    data: str
-    pagamento: str = "CONTANTI"
-    righe: List[Dict[str, Any]]
-    idempotency_key: Optional[str] = None
-
-
-@api.post("/vendite/bulk")
-async def bulk_vendite(body: BulkVenditaIn):
-    """Bulk paste da Excel: rows with data, codice, descrizione, quantita, importo."""
-    if str(body.canale or "").upper() == "VENDING":
-        raise HTTPException(422, "Per le vendite Vending usa il CSV distributore, che identifica la colonna reale")
-    batch_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).isoformat()
-    skipped = 0
-    errors = []
-    prepared = []
-    required_by_code: Dict[str, int] = {}
-    for i, r in enumerate(body.righe):
-        try:
-            codice = _product_code_text(r.get("codice"))
-            if not codice:
-                skipped += 1
-                continue
-            qta = int(float(r.get("quantita") or 0))
-            imp = nonnegative_money(r.get("importo", 0))
-            if qta <= 0:
-                raise ValueError("quantità non valida")
-            if imp < 0:
-                raise ValueError("importo non valido")
-            data = str(r.get("data") or datetime.now(timezone.utc).isoformat())
-            desc = str(r.get("descrizione") or "")
-            prod = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
-            if not prod:
-                raise ValueError(f"prodotto non trovato: {codice}")
-            required_by_code[codice] = required_by_code.get(codice, 0) + qta
-            prepared.append(VenditaGiornaliera(
-                data=data,
-                codice=codice,
-                descrizione=desc or prod.get("descrizione", ""),
-                quantita=qta,
-                importo=imp,
-                canale="NEGOZIO",
-                pagamento=str(body.pagamento or "CONTANTI").strip().upper(),
-                sorgente="BULK",
-                batch_id=batch_id,
-            ).model_dump())
-        except Exception as e:
-            errors.append({"riga": i + 1, "errore": str(e)})
-    for codice, required in required_by_code.items():
-        product = await db.prodotti.find_one({"codice": codice}, {"_id": 0, "giacenza_negozio": 1})
-        available = int((product or {}).get("giacenza_negozio") or 0)
-        if required > available:
-            errors.append({"codice": codice, "errore": f"giacenza {available}, richiesti {required}"})
-    if errors:
-        raise HTTPException(422, detail={"message": "Caricamento rifiutato: nessuna vendita registrata", "errori": errors})
-
-    async def operation(session):
-        kwargs = _session_kwargs(session)
-        changed: List[Dict[str, Any]] = []
-        inserted_ids: List[str] = []
-        try:
-            for sale in prepared:
-                quantity = int(sale["quantita"])
-                update = await db.prodotti.update_one(
-                    {"codice": sale["codice"], "giacenza_negozio": {"$gte": quantity}},
-                    {"$inc": {"giacenza_negozio": -quantity, "venduti_negozio": quantity}},
-                    **kwargs,
-                )
-                if update.modified_count != 1:
-                    raise RuntimeError(f"Giacenza cambiata per {sale['codice']}")
-                changed.append(sale)
-                await db.vendite.insert_one(sale.copy(), **kwargs)
-                inserted_ids.append(sale["id"])
-            if prepared:
-                await db.vendite_bulk_imports.insert_one({
-                    "id": batch_id,
-                    "created_at": created_at,
-                    "sorgente": "BULK",
-                    "canale": "NEGOZIO",
-                    "pagamento": str(body.pagamento or "CONTANTI").strip().upper(),
-                    "inseriti": len(prepared),
-                    "saltati": skipped,
-                    "status": "active",
-                }, **kwargs)
-        except Exception:
-            if session is None:
-                if inserted_ids:
-                    await db.vendite.delete_many({"id": {"$in": inserted_ids}, "batch_id": batch_id})
-                for sale in changed:
-                    quantity = int(sale["quantita"])
-                    await db.prodotti.update_one(
-                        {"codice": sale["codice"]},
-                        {"$inc": {"giacenza_negozio": quantity, "venduti_negozio": -quantity}},
-                    )
-                await db.vendite_bulk_imports.delete_one({"id": batch_id})
-            raise
-
-    await _run_transactionally(operation)
-    inserted = len(prepared)
-    return {
-        "inseriti": inserted,
-        "saltati": skipped,
-        "errori": errors,
-        "batch_id": batch_id if inserted else None,
-        "created_at": created_at if inserted else None,
-        "canale": body.canale,
-        "pagamento": body.pagamento,
-    }
-
-
-@api.post("/vendite/cassa-rapida")
-async def vendita_cassa_rapida(body: CassaRapidaIn, request: Request = None):
-    """Registra un carrello POS senza lasciare vendite o cassa a metà."""
-    key = str(body.idempotency_key or "").strip() or None
-    if key and not 10 <= len(key) <= 160:
-        raise HTTPException(422, "idempotency_key deve contenere da 10 a 160 caratteri")
-    pagamento = str(body.pagamento or "CONTANTI").strip().upper()
-    if not body.righe:
-        raise HTTPException(422, "Il carrello è vuoto")
-    if key:
-        existing = await db.cassa_rapida_batches.find_one({"idempotency_key": key}, {"_id": 0})
-        if existing:
-            return existing
-
-    batch_id = str(uuid.uuid4())
-    prepared = []
-    total = Decimal(0)
-    for index, row in enumerate(body.righe):
-        try:
-            codice = _product_code_text(row.get("codice"))
-            quantity = int(row.get("quantita") or 0)
-            if not codice or quantity <= 0:
-                raise ValueError("prodotto o quantità non validi")
-            product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
-            if not product:
-                raise ValueError(f"prodotto non trovato: {codice}")
-            unit_price = money_decimal(row.get("prezzo", product.get("prezzo", 0)), nonnegative=True)
-            line_total = unit_price * quantity
-            prepared.append({
-                "id": str(uuid.uuid4()), "data": body.data, "codice": codice,
-                "descrizione": str(row.get("descrizione") or product.get("descrizione") or ""),
-                "quantita": quantity, "importo": money(line_total), "canale": "NEGOZIO",
-                "pagamento": pagamento, "sorgente": "POS", "batch_id": batch_id,
-                "operatore": _request_operator(request),
-            })
-            total += line_total
-        except (TypeError, ValueError, ArithmeticError) as exc:
-            raise HTTPException(422, f"Riga {index + 1}: {exc}") from exc
-
-    total_float = money(total)
-    created_at = datetime.now(timezone.utc).isoformat()
-    batch = {"id": batch_id, "created_at": created_at, "sorgente": "POS", "pagamento": pagamento,
-             "totale": total_float, "pezzi": sum(int(row["quantita"]) for row in prepared),
-             "idempotency_key": key, "status": "active"}
-    cash_entry = MovimentoCassa(
-        data=body.data, tipo="ENTRATA", importo=total_float,
-        descrizione=f"Vendita banco ({batch['pezzi']} pz · {pagamento})",
-        operatore=_request_operator(request),
-    ).model_dump()
-
-    async def operation(session):
-        kwargs = _session_kwargs(session)
-        if key:
-            existing = await db.cassa_rapida_batches.find_one({"idempotency_key": key}, {"_id": 0}, **kwargs)
-            if existing:
-                return existing
-        changed = []
-        try:
-            for sale in prepared:
-                quantity = int(sale["quantita"])
-                result = await db.prodotti.update_one(
-                    {"codice": sale["codice"], "giacenza_negozio": {"$gte": quantity}},
-                    {"$inc": {"giacenza_negozio": -quantity, "venduti_negozio": quantity}}, **kwargs,
-                )
-                if result.modified_count != 1:
-                    raise RuntimeError(f"Giacenza insufficiente per il prodotto {sale['codice']}")
-                changed.append(sale)
-                await db.vendite.insert_one(sale.copy(), **kwargs)
-            await db.cassa.insert_one(cash_entry.copy(), **kwargs)
-            await db.cassa_rapida_batches.insert_one(batch.copy(), **kwargs)
-            return batch
-        except Exception:
-            if session is None:
-                await db.cassa.delete_one({"id": cash_entry["id"]})
-                await db.vendite.delete_many({"batch_id": batch_id, "sorgente": "POS"})
-                for sale in changed:
-                    await db.prodotti.update_one({"codice": sale["codice"]}, {"$inc": {
-                        "giacenza_negozio": int(sale["quantita"]), "venduti_negozio": -int(sale["quantita"])
-                    }})
-                await db.cassa_rapida_batches.delete_one({"id": batch_id})
-            raise
-
-    try:
-        return await _run_transactionally(operation)
-    except DuplicateKeyError:
-        if key:
-            existing = await db.cassa_rapida_batches.find_one({"idempotency_key": key}, {"_id": 0})
-            if existing:
-                return existing
-        raise
-
-
-@api.get("/vendite/bulk/ultimo")
-async def ultimo_bulk_vendite():
-    """Restituisce l'ultimo caricamento bulk ancora annullabile."""
-    return await db.vendite_bulk_imports.find_one(
-        {
-            "status": "active",
-            "$or": [{"sorgente": "BULK"}, {"sorgente": {"$exists": False}}],
-        },
-        {"_id": 0},
-        sort=[("created_at", -1)],
-    )
-
-
-@api.post("/vendite/bulk/{batch_id}/annulla")
-async def annulla_bulk_vendite(batch_id: str):
-    """Annulla un singolo caricamento bulk e ripristina le scorte coinvolte."""
-    claim = await db.vendite_bulk_imports.update_one(
-        {"id": batch_id, "status": "active"},
-        {"$set": {"status": "annulling"}},
-    )
-    if claim.modified_count != 1:
-        raise HTTPException(404, "Caricamento non trovato o già annullato")
-
-    async def operation(session):
-        kwargs = _session_kwargs(session)
-        sales = await db.vendite.find(
-            {"batch_id": batch_id, "sorgente": "BULK"},
-            {"_id": 0},
-            **kwargs,
-        ).to_list(None)
-        completed = []
-        current_stock_change = None
-        try:
-            for sale in sales:
-                field = "giacenza_vending" if sale.get("canale") == "VENDING" else "giacenza_negozio"
-                vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
-                quantity = int(sale.get("quantita") or 0)
-                stock_update = await db.prodotti.update_one(
-                    {"codice": sale.get("codice")},
-                    {"$inc": {field: quantity, vend_field: -quantity}},
-                    **kwargs,
-                )
-                if stock_update.modified_count != 1:
-                    raise RuntimeError(f"Prodotto non trovato: {sale.get('codice')}")
-                current_stock_change = (sale, field, vend_field, quantity)
-                deletion = await db.vendite.delete_one(
-                    {"id": sale.get("id"), "batch_id": batch_id}, **kwargs
-                )
-                if deletion.deleted_count != 1:
-                    raise RuntimeError("Una vendita del caricamento non è stata eliminata")
-                completed.append(current_stock_change)
-                current_stock_change = None
-
-            await db.vendite_bulk_imports.update_one(
-                {"id": batch_id, "status": "annulling"},
-                {"$set": {
-                    "status": "annulled",
-                    "annulled_at": datetime.now(timezone.utc).isoformat(),
-                    "rimossi": len(completed),
-                }},
-                **kwargs,
-            )
-            return len(completed)
-        except Exception:
-            if session is None:
-                if current_stock_change:
-                    sale, field, vend_field, quantity = current_stock_change
-                    await db.prodotti.update_one(
-                        {"codice": sale.get("codice")},
-                        {"$inc": {field: -quantity, vend_field: quantity}},
-                    )
-                for sale, field, vend_field, quantity in reversed(completed):
-                    await db.vendite.insert_one(sale.copy())
-                    await db.prodotti.update_one(
-                        {"codice": sale.get("codice")},
-                        {"$inc": {field: -quantity, vend_field: quantity}},
-                    )
-            raise
-
-    try:
-        removed = await _run_transactionally(operation)
-    except Exception as exc:
-        await db.vendite_bulk_imports.update_one(
-            {"id": batch_id, "status": "annulling"},
-            {"$set": {"status": "active"}},
-        )
-        raise HTTPException(500, f"Impossibile annullare il caricamento: {exc}") from exc
-
-    return {"ok": True, "batch_id": batch_id, "rimossi": removed}
 
 
 async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> bytes:
@@ -3477,6 +3182,11 @@ sales = create_sales_router(
     session_kwargs=_session_kwargs,
     run_transactionally=lambda operation: _run_transactionally(operation),
     sync_product_vending_stock=lambda *args, **kwargs: _sync_product_vending_stock(*args, **kwargs),
+    normalize_nonnegative_money=nonnegative_money,
+    decimal_money=money_decimal,
+    normalize_money=money,
+    request_operator=_request_operator,
+    cash_movement_model=MovimentoCassa,
 )
 sales_router = sales["router"]
 list_vendite = sales["list_vendite"]
@@ -3484,6 +3194,10 @@ add_vendita = sales["add_vendita"]
 del_vendita = sales["del_vendita"]
 ultima_vendita_manuale = sales["ultima_vendita_manuale"]
 annulla_vendita_manuale = sales["annulla_vendita_manuale"]
+bulk_vendite = sales["bulk_vendite"]
+vendita_cassa_rapida = sales["vendita_cassa_rapida"]
+ultimo_bulk_vendite = sales["ultimo_bulk_vendite"]
+annulla_bulk_vendite = sales["annulla_bulk_vendite"]
 orders = create_orders_router(
     get_database=lambda: db,
     cap_limit=_cap,
