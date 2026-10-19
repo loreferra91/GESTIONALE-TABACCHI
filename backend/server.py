@@ -43,7 +43,12 @@ if __package__:
     from .inventory_analytics_router import create_inventory_analytics_router
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
-    from .orders_router import OrdineIn, OrdineStorico, create_orders_router
+    from .orders_router import (
+        SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED,
+        SMART_VENUE_AUTO_ORDER_REPAIR_ID,
+        BulkOrdineIn, OrdineIn, OrdineStorico, create_orders_router,
+        receipt_quantities_by_code as _receipt_quantities_by_code,
+    )
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .products_router import (
         PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
@@ -80,7 +85,12 @@ else:
     from inventory_analytics_router import create_inventory_analytics_router
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
-    from orders_router import OrdineIn, OrdineStorico, create_orders_router
+    from orders_router import (
+        SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED,
+        SMART_VENUE_AUTO_ORDER_REPAIR_ID,
+        BulkOrdineIn, OrdineIn, OrdineStorico, create_orders_router,
+        receipt_quantities_by_code as _receipt_quantities_by_code,
+    )
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from products_router import (
         PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
@@ -3077,348 +3087,6 @@ async def vending_ricarica_pdf():
 
 
 # ------------------------- Storico ordini -------------------------
-class BulkOrdineIn(BaseModel):
-    file_sorgente: str = "carico manuale"
-    data: Optional[str] = None
-    idempotency_key: Optional[str] = None
-    righe: List[Dict[str, Any]]  # {codice, descrizione, quantita, prezzo}
-
-
-async def _increment_smart_venue_for_receipt(codice: str, quantita: int, session=None) -> bool:
-    """Mantiene il saldo operativo Smart Venue allineato a un carico merce.
-
-    SMART VENUE e il gestionale partono dalla stessa disponibilita fisica. Il
-    carico deve quindi incrementare entrambi; le vendite successive tornano a
-    emergere come differenza positiva da confermare. I prodotti non gestiti da
-    Smart Venue restano esclusi: questa funzione non crea nuove righe.
-    """
-    if not codice or quantita <= 0:
-        return False
-    result = await db.smart_venue.update_one(
-        {"codice": codice},
-        {
-            "$inc": {"smart_venue": quantita},
-            "$set": {
-                "ultimo_carico_smart_venue": quantita,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-        },
-        **_session_kwargs(session),
-    )
-    return bool(result.matched_count)
-
-
-SMART_VENUE_AUTO_ORDER_REPAIR_ID = "smart-venue-auto-order-2026-10-12-v1"
-SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED = {
-    "AMMS338": 150,
-    "AMMS9": 60,
-    "AMMS478": 40,
-    "AMMS20155": 40,
-    "AMMS20154": 40,
-    "AMMS536": 60,
-    "AMMS1784": 30,
-    "AMMS20659": 60,
-    "AMMS2982": 30,
-    "AMMS3422": 20,
-    "AMMS134": 20,
-    "AMMS3906": 10,
-    "AMMS3907": 30,
-    "AMMS91": 30,
-    "AMMS20041": 10,
-    "AMMS20151": 20,
-    "AMMS21037": 20,
-    "AMMS3221": 20,
-    "AMMS3458": 10,
-    "AMMS951": 10,
-    "AMMS81": 10,
-    "AMMS177": 10,
-    "AMMS3688": 20,
-    "AMMS1733": 20,
-    "AMMS20153": 20,
-    "AMMS21460": 10,
-    "AMMS245": 10,
-}
-
-
-def _receipt_quantities_by_code(rows: List[Dict[str, Any]]) -> Dict[str, int]:
-    quantities: Dict[str, int] = {}
-    for row in rows:
-        code = str(row.get("codice") or "").strip()
-        quantity = int(row.get("quantita", 0) or 0)
-        if code and quantity > 0:
-            quantities[code] = quantities.get(code, 0) + quantity
-    return quantities
-
-
-async def repair_smart_venue_auto_order_2026_10_12() -> Dict[str, Any]:
-    """Ripara una sola volta il carico Auto-Order che non aggiorno Smart Venue.
-
-    La riparazione si rifiuta di partire se lo storico reale non coincide con
-    le 27 righe gia verificate. Ogni riga Smart Venue conserva inoltre un
-    marcatore idempotente, cosi un'interruzione a meta non puo raddoppiare le
-    quantita al tentativo successivo.
-    """
-    migration = await db.app_migrations.find_one(
-        {"id": SMART_VENUE_AUTO_ORDER_REPAIR_ID},
-        {"_id": 0},
-    )
-    if migration:
-        return {"ok": True, "gia_applicata": True, **migration}
-
-    rows = await db.storico_ordini.find(
-        {"file_sorgente": "da auto-order (modificato)"},
-        {"_id": 0, "data": 1, "codice": 1, "quantita": 1},
-    ).to_list(1000)
-    rows = [row for row in rows if str(row.get("data") or "").startswith("2026-10-12")]
-    if not rows:
-        return {"ok": True, "non_applicabile": True}
-    actual = _receipt_quantities_by_code(rows)
-    if actual != SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED:
-        raise RuntimeError(
-            "Riparazione annullata: il carico storico del 12/10/2026 non "
-            f"coincide con quello verificato (atteso {SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED}, "
-            f"trovato {actual})."
-        )
-
-    codes = list(SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED)
-    smart_rows = await db.smart_venue.find(
-        {"codice": {"$in": codes}},
-        {"_id": 0, "codice": 1, "riparazioni_applicate": 1},
-    ).to_list(1000)
-    by_code = {row["codice"]: row for row in smart_rows}
-    missing = sorted(set(codes) - set(by_code))
-    if missing:
-        raise RuntimeError(
-            "Riparazione annullata: mancano righe Smart Venue per " + ", ".join(missing)
-        )
-
-    backup = await create_backup_snapshot(
-        "Prima riparazione Smart Venue carico Auto-Order 12/10/2026",
-        "riparazione-smart-venue-carico",
-        ["smart_venue", "storico_ordini"],
-    )
-    now = datetime.now(timezone.utc).isoformat()
-    operations = [
-        UpdateOne(
-            {
-                "codice": code,
-                "riparazioni_applicate": {"$ne": SMART_VENUE_AUTO_ORDER_REPAIR_ID},
-            },
-            {
-                "$inc": {"smart_venue": quantity},
-                "$addToSet": {"riparazioni_applicate": SMART_VENUE_AUTO_ORDER_REPAIR_ID},
-                "$set": {"updated_at": now},
-            },
-        )
-        for code, quantity in SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.items()
-    ]
-    if operations:
-        await db.smart_venue.bulk_write(operations, ordered=True)
-
-    repaired = await db.smart_venue.count_documents({
-        "codice": {"$in": codes},
-        "riparazioni_applicate": SMART_VENUE_AUTO_ORDER_REPAIR_ID,
-    })
-    if repaired != len(codes):
-        raise RuntimeError(
-            f"Riparazione incompleta: marcate {repaired} righe Smart Venue su {len(codes)}."
-        )
-
-    migration = {
-        "id": SMART_VENUE_AUTO_ORDER_REPAIR_ID,
-        "created_at": now,
-        "backup_id": backup["id"],
-        "righe_riparate": len(codes),
-        "pezzi_ripristinati": sum(SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.values()),
-    }
-    await db.app_migrations.insert_one(migration.copy())
-    return {"ok": True, "gia_applicata": False, **migration}
-
-
-@api.post("/ordini/bulk")
-async def bulk_carico(body: BulkOrdineIn, request: Request = None):
-    """Ricezione merce: registra il ricevuto e incrementa scorte/acquistati.
-
-    Un batch Auto-Order è solo un ordine fornitore; passa da questo endpoint
-    esclusivamente quando la merce è fisicamente arrivata. Una chiave
-    idempotente rende innocui doppio clic e retry di rete.
-    """
-    data = body.data or datetime.now(timezone.utc).isoformat()
-    idempotency_key = str(body.idempotency_key or uuid.uuid4()).strip()
-    if len(idempotency_key) > 200:
-        raise HTTPException(422, "Chiave idempotente troppo lunga")
-
-    existing_batch = await db.ricezioni_merce.find_one(
-        {"idempotency_key": idempotency_key},
-        {"_id": 0},
-    )
-    if existing_batch:
-        if existing_batch.get("status") == "completed" and existing_batch.get("response"):
-            return {**existing_batch["response"], "gia_registrato": True}
-        raise HTTPException(409, "Questo carico è già in elaborazione: attendi e aggiorna la pagina")
-
-    prepared = []
-    errors = []
-    for i, r in enumerate(body.righe):
-        try:
-            codice = str(r.get("codice") or "").strip()
-            raw_quantity = r.get("quantita")
-            numeric_quantity = float(raw_quantity)
-            if not numeric_quantity.is_integer():
-                raise ValueError("la quantità deve essere intera")
-            qta = int(numeric_quantity)
-            if not codice and qta == 0:
-                continue
-            if not codice:
-                raise ValueError("codice mancante")
-            if qta <= 0:
-                raise ValueError("la quantità deve essere maggiore di zero")
-            prezzo = nonnegative_money(r.get("prezzo", 0))
-            if prezzo < 0:
-                raise ValueError("il prezzo non può essere negativo")
-            desc = str(r.get("descrizione") or "")
-            prepared.append({
-                "index": i,
-                "codice": codice,
-                "quantita": qta,
-                "prezzo": prezzo,
-                "descrizione": desc,
-            })
-        except Exception as e:
-            errors.append({"riga": i + 1, "errore": str(e)})
-    if errors:
-        raise HTTPException(422, {"message": "Correggi le righe non valide", "errori": errors})
-    if not prepared:
-        raise HTTPException(422, "Nessuna riga valida da caricare")
-
-    batch_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).isoformat()
-    operator = _request_operator(request)
-
-    async def persist_receipt(session):
-        kwargs = _session_kwargs(session)
-        await db.ricezioni_merce.insert_one({
-            "id": batch_id,
-            "idempotency_key": idempotency_key,
-            "status": "processing",
-            "created_at": created_at,
-            "data": data,
-            "file_sorgente": body.file_sorgente,
-            "operatore": operator,
-        }, **kwargs)
-
-        inserted = 0
-        creati_prodotti = 0
-        movimenti = []
-        rollback_actions = []
-        try:
-            for row in prepared:
-                codice = row["codice"]
-                qta = row["quantita"]
-                prod = await db.prodotti.find_one({"codice": codice}, session=session) if session else await db.prodotti.find_one({"codice": codice})
-                smart_row = await db.smart_venue.find_one({"codice": codice}, {"_id": 1}, **kwargs)
-                smart_applicable = bool(smart_row)
-                movement = OrdineStorico(
-                    id=f"{batch_id}:{row['index']}",
-                    batch_id=batch_id,
-                    data=data,
-                    file_sorgente=body.file_sorgente,
-                    codice=codice,
-                    descrizione=row["descrizione"] or str((prod or {}).get("descrizione") or codice),
-                    quantita=qta,
-                    prezzo=row["prezzo"],
-                    smart_venue_applicabile=smart_applicable,
-                    caricato_smart_venue=False if smart_applicable else None,
-                    operatore=operator,
-                    created_at=created_at,
-                ).model_dump()
-                await db.storico_ordini.insert_one(dict(movement), **kwargs)
-
-                if prod:
-                    update = await db.prodotti.update_one(
-                        {"codice": codice},
-                        {"$inc": {"giacenza_negozio": qta, "acquistati": qta}},
-                        **kwargs,
-                    )
-                    if update.matched_count != 1:
-                        raise RuntimeError(f"prodotto {codice} cambiato durante il carico")
-                    rollback_actions.append(("existing_product", codice, qta))
-                    if smart_applicable:
-                        updated = await _increment_smart_venue_for_receipt(codice, qta, session=session)
-                        if not updated:
-                            raise RuntimeError(f"riga Smart Venue {codice} cambiata durante il carico")
-                        rollback_actions.append(("smart_venue", codice, qta))
-                else:
-                    new_product = Prodotto(
-                        codice=codice,
-                        descrizione=row["descrizione"] or codice,
-                        categoria=_cat_from_desc(row["descrizione"], codice),
-                        prezzo=row["prezzo"],
-                        acquistati=qta,
-                        giacenza_negozio=qta,
-                    ).model_dump()
-                    await db.prodotti.insert_one(dict(new_product), **kwargs)
-                    rollback_actions.append(("new_product", codice, new_product["id"]))
-                    creati_prodotti += 1
-                inserted += 1
-                movimenti.append(movement)
-
-            response = {
-                "caricate": inserted,
-                "prodotti_nuovi": creati_prodotti,
-                "errori": [],
-                "batch_id": batch_id,
-                "idempotency_key": idempotency_key,
-                "movimenti": movimenti,
-                "gia_registrato": False,
-            }
-            completed = await db.ricezioni_merce.update_one(
-                {"id": batch_id, "status": "processing"},
-                {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat(), "response": response}},
-                **kwargs,
-            )
-            if completed.matched_count != 1:
-                raise RuntimeError("stato del carico cambiato durante il salvataggio")
-            return response
-        except Exception:
-            if session is None:
-                # Compensazione per Mongo standalone: annulla in ordine
-                # inverso ogni effetto già applicato, mantenendo la chiave
-                # occupata per evitare un retry ambiguo.
-                for kind, code, value in reversed(rollback_actions):
-                    if kind == "smart_venue":
-                        await db.smart_venue.update_one(
-                            {"codice": code},
-                            {"$inc": {"smart_venue": -value}},
-                        )
-                    elif kind == "existing_product":
-                        await db.prodotti.update_one(
-                            {"codice": code},
-                            {"$inc": {"giacenza_negozio": -value, "acquistati": -value}},
-                        )
-                    elif kind == "new_product":
-                        await db.prodotti.delete_one({"codice": code, "id": value})
-                await db.storico_ordini.delete_many({"batch_id": batch_id})
-                await db.ricezioni_merce.update_one(
-                    {"id": batch_id},
-                    {"$set": {"status": "failed", "failed_at": datetime.now(timezone.utc).isoformat()}},
-                )
-            raise
-
-    try:
-        return await _run_transactionally(persist_receipt)
-    except DuplicateKeyError:
-        existing_batch = await db.ricezioni_merce.find_one(
-            {"idempotency_key": idempotency_key},
-            {"_id": 0},
-        )
-        if existing_batch and existing_batch.get("status") == "completed" and existing_batch.get("response"):
-            return {**existing_batch["response"], "gia_registrato": True}
-        raise HTTPException(409, "Questo carico è già stato inviato")
-
-
-
-
 # ------------------------- Auto-Order -------------------------
 @api.get("/auto-order")
 async def auto_order():
@@ -5621,13 +5289,21 @@ orders = create_orders_router(
     get_database=lambda: db,
     cap_limit=_cap,
     request_operator=_request_operator,
-    increment_smart_venue_for_receipt=_increment_smart_venue_for_receipt,
+    session_kwargs=_session_kwargs,
+    run_transactionally=_run_transactionally,
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    product_model=Prodotto,
+    categorize_description=_cat_from_desc,
+    normalize_nonnegative_money=nonnegative_money,
 )
 orders_router = orders["router"]
 list_ordini = orders["list_ordini"]
 add_ordine = orders["add_ordine"]
 conferma_carico_smart_venue = orders["conferma_carico_smart_venue"]
 del_ordine = orders["del_ordine"]
+bulk_carico = orders["bulk_carico"]
+_increment_smart_venue_for_receipt = orders["increment_smart_venue_for_receipt"]
+repair_smart_venue_auto_order_2026_10_12 = orders["repair_smart_venue_auto_order_2026_10_12"]
 backup = create_backup_router(
     get_database=lambda: db,
     session_kwargs=_session_kwargs,
