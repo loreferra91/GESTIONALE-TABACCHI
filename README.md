@@ -192,7 +192,9 @@ Prossimi passi tecnici:
    riconciliazione, audit, parametri, movimenti contabili, storico import,
    operatività, backup e ripristino, anagrafica prodotti, ordini e carichi
    merce, gestione e ricariche vending, giacenze reali, analisi magazzino e
-   listino ADM sono già isolati, mantenendo route e payload compatibili.
+   listino ADM sono già isolati. Anche il calcolo e la conferma Auto-Order sono
+   ora separati; restano da estrarre i relativi export PDF/Excel, mantenendo
+   route e payload compatibili.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 
