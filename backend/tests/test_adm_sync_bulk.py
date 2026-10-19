@@ -49,6 +49,7 @@ class SyncCollection:
     def __init__(self, documents=None):
         self.documents = documents or []
         self.batch_sizes = []
+        self.batches = []
         self.inserted = []
 
     def find(self, *_args, **_kwargs):
@@ -56,6 +57,7 @@ class SyncCollection:
 
     async def bulk_write(self, operations, ordered):
         self.batch_sizes.append(len(operations))
+        self.batches.append((operations, ordered))
         return SimpleNamespace(
             upserted_count=len(operations),
             matched_count=len(operations),
@@ -121,3 +123,9 @@ def test_adm_sync_processes_one_category_at_a_time_and_only_matching_products(mo
     assert result["righe"] == 2
     assert result["prodotti_aggiornati"] == 1
     assert len(fake_db.adm_sync.inserted) == 1
+
+    # A matched catalogue product must receive the official ADM retail price
+    # used by sales, as well as the imported ADM reference price.
+    product_update = fake_db.prodotti.batches[0][0][0]
+    assert product_update._doc["$set"]["prezzo"] == 1.0
+    assert product_update._doc["$set"]["adm_prezzo"] == 1.0

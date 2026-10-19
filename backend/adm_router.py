@@ -161,6 +161,9 @@ def _adm_product_update_operations(rows: List[Dict[str, Any]], product_codes: se
                 "categoria_adm": item["categoria_adm"],
                 "adm_codice": item["adm_codice"],
                 "adm_descrizione": item["descrizione"],
+                # The ADM retail price is also the price used by the product
+                # catalogue and sales workflows; keep both fields aligned.
+                "prezzo": item["prezzo"],
                 "adm_prezzo": item["prezzo"],
                 "adm_aggiornato_il": item.get("adm_aggiornato_il"),
             }},
