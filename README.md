@@ -188,7 +188,7 @@ e ogni variazione entra nell'audit log.
 
 Prossimi passi tecnici:
 
-1. Proseguire la suddivisione di `backend/server.py`: i router di
+1. La suddivisione dei macro-blocchi di `backend/server.py` è completata: i router di
    riconciliazione, audit, parametri, movimenti contabili, storico import,
    operatività, backup e ripristino, anagrafica prodotti, ordini e carichi
    merce, gestione e ricariche vending, giacenze reali, analisi magazzino e
@@ -199,7 +199,9 @@ Prossimi passi tecnici:
    preparazione, registro contabile e ciclo fisico preview/import/annullo sono
    ora completamente separati. Anche Import Excel e Smart Venue sono isolati in
    router dedicati, con alias pubblici e callback dinamiche per preservare la
-   compatibilità dei test e degli import esistenti.
+   compatibilità dei test e degli import esistenti. `server.py` mantiene
+   intenzionalmente bootstrap, sicurezza, seed, migrazioni, helper condivisi e
+   composizione dell'applicazione.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 
