@@ -43,6 +43,7 @@ if __package__:
     from .inventory_analytics_router import create_inventory_analytics_router
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
+    from .orders_router import OrdineIn, OrdineStorico, create_orders_router
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from .products_router import (
         PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
@@ -79,6 +80,7 @@ else:
     from inventory_analytics_router import create_inventory_analytics_router
     from money import Money, NonNegativeMoney, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
+    from orders_router import OrdineIn, OrdineStorico, create_orders_router
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
     from products_router import (
         PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
@@ -246,33 +248,6 @@ class VenditaIn(BaseModel):
 
 class SmartVenueBulkIn(BaseModel):
     testo: str
-
-
-class OrdineStorico(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    data: str
-    file_sorgente: str = ""
-    codice: str
-    descrizione: str = ""
-    quantita: int
-    prezzo: NonNegativeMoney = 0
-    batch_id: Optional[str] = None
-    smart_venue_applicabile: bool = False
-    caricato_smart_venue: Optional[bool] = None
-    caricato_smart_venue_il: Optional[str] = None
-    caricato_smart_venue_da: Optional[str] = None
-    operatore: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-
-
-class OrdineIn(BaseModel):
-    data: str
-    codice: str
-    descrizione: Optional[str] = ""
-    quantita: int
-    prezzo: NonNegativeMoney = 0
-    file_sorgente: Optional[str] = "manuale"
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -3102,67 +3077,6 @@ async def vending_ricarica_pdf():
 
 
 # ------------------------- Storico ordini -------------------------
-@api.get("/ordini")
-async def list_ordini(limit: int = 1000):
-    capped_limit = _cap(limit)
-    docs = await db.storico_ordini.find({}, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    return docs
-
-
-@api.post("/ordini")
-async def add_ordine(o: OrdineIn, request: Request = None):
-    if o.quantita <= 0:
-        raise HTTPException(422, "La quantità deve essere maggiore di zero")
-    smart_venue_applicabile = bool(await db.smart_venue.find_one({"codice": o.codice}, {"_id": 1}))
-    oo = OrdineStorico(
-        **o.model_dump(),
-        smart_venue_applicabile=smart_venue_applicabile,
-        caricato_smart_venue=False if smart_venue_applicabile else None,
-        operatore=_request_operator(request),
-    )
-    await db.storico_ordini.insert_one(oo.model_dump())
-    # aggiorna giacenza / acquisti. La conferma esterna resta separata.
-    if o.codice:
-        await db.prodotti.update_one({"codice": o.codice}, {"$inc": {"giacenza_negozio": o.quantita, "acquistati": o.quantita}})
-        await _increment_smart_venue_for_receipt(o.codice, o.quantita)
-    return oo.model_dump()
-
-
-@api.post("/ordini/{o_id}/conferma-smart-venue")
-async def conferma_carico_smart_venue(o_id: str, request: Request = None):
-    """Conferma soltanto l'operazione esterna, senza toccare alcuna giacenza."""
-    current = await db.storico_ordini.find_one({"id": o_id}, {"_id": 0})
-    if not current:
-        raise HTTPException(404, "Movimento di carico non trovato")
-    if not current.get("smart_venue_applicabile"):
-        raise HTTPException(422, "Il prodotto di questo carico non è gestito in Smart Venue")
-    if current.get("caricato_smart_venue") is True:
-        return {**current, "ok": True, "gia_confermato": True}
-
-    now = datetime.now(timezone.utc).isoformat()
-    result = await db.storico_ordini.update_one(
-        {"id": o_id, "caricato_smart_venue": {"$ne": True}},
-        {"$set": {
-            "caricato_smart_venue": True,
-            "caricato_smart_venue_il": now,
-            "caricato_smart_venue_da": _request_operator(request),
-        }},
-    )
-    if result.modified_count != 1:
-        latest = await db.storico_ordini.find_one({"id": o_id}, {"_id": 0})
-        if latest and latest.get("caricato_smart_venue") is True:
-            return {**latest, "ok": True, "gia_confermato": True}
-        raise HTTPException(409, "Il movimento è cambiato nel frattempo")
-    updated = await db.storico_ordini.find_one({"id": o_id}, {"_id": 0})
-    return {**updated, "ok": True, "gia_confermato": False}
-
-
-@api.delete("/ordini/{o_id}")
-async def del_ordine(o_id: str):
-    await db.storico_ordini.delete_one({"id": o_id})
-    return {"ok": True}
-
-
 class BulkOrdineIn(BaseModel):
     file_sorgente: str = "carico manuale"
     data: Optional[str] = None
@@ -5703,6 +5617,17 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+orders = create_orders_router(
+    get_database=lambda: db,
+    cap_limit=_cap,
+    request_operator=_request_operator,
+    increment_smart_venue_for_receipt=_increment_smart_venue_for_receipt,
+)
+orders_router = orders["router"]
+list_ordini = orders["list_ordini"]
+add_ordine = orders["add_ordine"]
+conferma_carico_smart_venue = orders["conferma_carico_smart_venue"]
+del_ordine = orders["del_ordine"]
 backup = create_backup_router(
     get_database=lambda: db,
     session_kwargs=_session_kwargs,
@@ -5849,6 +5774,7 @@ reconciliation_router, accounting_reconciliation, update_reconciliation_case = c
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
 api.include_router(backup_router)
+api.include_router(orders_router)
 api.include_router(real_stock_router)
 api.include_router(inventory_analytics_router)
 api.include_router(products_router)
