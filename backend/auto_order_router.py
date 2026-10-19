@@ -1,13 +1,16 @@
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import math
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
@@ -412,10 +415,262 @@ def create_auto_order_router(
 
         return {"ok": True, **batch, "duplicate": False}
 
+    @router.get("/auto-order/pdf")
+    async def auto_order_pdf(
+        fornitore: Optional[str] = "Fornitore",
+        categoria: Optional[str] = None,
+        selezione: Optional[str] = None,
+    ):
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+        from xml.sax.saxutils import escape as xml_escape
+
+        fornitore_safe = xml_escape((fornitore or "Fornitore")[:120])
+        categoria_filtro = (categoria or "").strip()[:120]
+        categoria_safe = xml_escape(categoria_filtro)
+
+        ao = await get_auto_order()
+        righe = auto_order_rows_from_query(ao, selezione)
+        if categoria_filtro:
+            righe = [row for row in righe if row.get("categoria") == categoria_filtro]
+        totale = sum_money(row.get("totale", 0) or 0 for row in righe)
+
+        buffer = io.BytesIO()
+        document = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            leftMargin=15 * mm,
+            rightMargin=15 * mm,
+            topMargin=15 * mm,
+            bottomMargin=15 * mm,
+        )
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "t",
+            parent=styles["Heading1"],
+            fontName="Helvetica-Bold",
+            fontSize=18,
+            textColor=colors.HexColor("#0F172A"),
+            spaceAfter=2,
+        )
+        subtitle_style = ParagraphStyle(
+            "s",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=9,
+            textColor=colors.HexColor("#64748B"),
+            spaceAfter=12,
+        )
+        cell_style = ParagraphStyle(
+            "cell",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=7,
+            leading=8,
+            textColor=colors.HexColor("#0F172A"),
+        )
+
+        story = [Paragraph("ORDINE FORNITORE - GOD SERVICES", title_style)]
+        today = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+        filter_label = f" &nbsp;·&nbsp; Selezione: <b>{categoria_safe}</b>" if categoria_filtro else ""
+        story.append(
+            Paragraph(
+                f"Destinatario: <b>{fornitore_safe}</b> &nbsp;·&nbsp; Data: <b>{today}</b>"
+                f"{filter_label} &nbsp;·&nbsp; Righe: <b>{len(righe)}</b> &nbsp;·&nbsp; "
+                f"Totale: <b>€ {totale:.2f}</b>",
+                subtitle_style,
+            )
+        )
+
+        data = [["CODICE", "ARTICOLO", "QTA", "TOTALE"]]
+        for row in righe:
+            data.append(
+                [
+                    row["codice"],
+                    Paragraph(xml_escape(row["descrizione"] or ""), cell_style),
+                    str(row["qta_da_ordinare"]),
+                    f"€ {row['totale']:.2f}",
+                ]
+            )
+        data.append(["", "", "TOTALE", f"€ {totale:.2f}"])
+
+        table = Table(data, colWidths=[25 * mm, 105 * mm, 15 * mm, 35 * mm], repeatRows=1)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 8),
+                    ("ALIGN", (0, 0), (-1, 0), "LEFT"),
+                    ("ALIGN", (2, 1), (3, -1), "RIGHT"),
+                    ("FONTNAME", (0, 1), (-1, -2), "Helvetica"),
+                    ("FONTSIZE", (0, 1), (-1, -1), 8),
+                    ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#0F172A")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
+                    ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#0F172A")),
+                    ("LINEBELOW", (0, -2), (-1, -2), 0.5, colors.HexColor("#E2E8F0")),
+                    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
+                    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, -1), (-1, -1), 9),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(table)
+        footer = Paragraph(
+            "Calcolo Auto-Order: domanda ponderata {peso_breve:.0f}% ultimi {breve}gg + "
+            "{peso_lungo:.0f}% ultimi {lungo}gg fino al {riferimento}; giacenza negozio = "
+            "stock fisico libero gia normalizzato dall'import; ordine sotto {copertura}gg "
+            "verso target {target}gg con sicurezza x{fattore:.2f}. Il PDF contiene solo "
+            "ORDINA ORA.".format(
+                peso_breve=float(ao.get("peso_breve", 0.70)) * 100,
+                peso_lungo=float(ao.get("peso_lungo", 0.30)) * 100,
+                breve=int(ao.get("finestra_breve_gg", 10)),
+                lungo=int(ao.get("finestra_lunga_gg", 30)),
+                riferimento=datetime.fromisoformat(ao["data_riferimento_domanda"]).strftime("%d/%m/%Y"),
+                copertura=int(ao["parametri"].get("GIORNI_COPERTURA_MIN", 7)),
+                target=int(ao["parametri"].get("GIORNI_COPERTURA_TARGET", 14)),
+                fattore=float(ao.get("fattore_sicurezza", 1.15)),
+            ),
+            subtitle_style,
+        )
+
+        def draw_footer(canvas, current_document):
+            footer.wrap(current_document.width, 14 * mm)
+            footer.drawOn(canvas, current_document.leftMargin, 4 * mm)
+
+        document.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
+        buffer.seek(0)
+        categoria_slug = re.sub(r"[^a-z0-9]+", "_", categoria_filtro.lower()).strip("_")
+        suffix = f"_{categoria_slug}" if categoria_slug else ""
+        filename = f"ordine{suffix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.pdf"
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Auto-Order-Category": categoria_filtro or "TUTTE",
+                "X-Auto-Order-Rows": str(len(righe)),
+            },
+        )
+
+    @router.get("/auto-order/excel")
+    async def auto_order_excel(
+        fornitore: Optional[str] = "Fornitore",
+        categoria: Optional[str] = None,
+        selezione: Optional[str] = None,
+    ):
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        fornitore_testo = (fornitore or "Fornitore").strip()[:120] or "Fornitore"
+        categoria_filtro = (categoria or "").strip()[:120]
+
+        ao = await get_auto_order()
+        righe = auto_order_rows_from_query(ao, selezione)
+        if categoria_filtro:
+            righe = [row for row in righe if row.get("categoria") == categoria_filtro]
+        totale = sum_money(row.get("totale", 0) or 0 for row in righe)
+
+        def excel_text(value: Any) -> str:
+            text = str(value or "")
+            return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Ordine fornitore"
+        worksheet.sheet_view.showGridLines = False
+        worksheet.freeze_panes = "A5"
+
+        dark_fill = PatternFill("solid", fgColor="0F172A")
+        light_fill = PatternFill("solid", fgColor="F1F5F9")
+        white_bold = Font(color="FFFFFF", bold=True)
+
+        worksheet.merge_cells("A1:D1")
+        worksheet["A1"] = "ORDINE FORNITORE - GOD SERVICES"
+        worksheet["A1"].font = Font(size=16, bold=True, color="0F172A")
+        worksheet["A1"].alignment = Alignment(vertical="center")
+        worksheet.row_dimensions[1].height = 26
+
+        worksheet["A2"] = "Destinatario"
+        worksheet["B2"] = excel_text(fornitore_testo)
+        worksheet["C2"] = "Data"
+        worksheet["D2"] = datetime.now(timezone.utc).date()
+        worksheet["D2"].number_format = "dd/mm/yyyy"
+        worksheet["A3"] = "Selezione"
+        worksheet["B3"] = excel_text(categoria_filtro or "Tutte le categorie")
+        worksheet["C3"] = "Righe"
+        worksheet["D3"] = len(righe)
+        for cell in (worksheet["A2"], worksheet["C2"], worksheet["A3"], worksheet["C3"]):
+            cell.font = Font(bold=True, color="475569")
+
+        header_row = 4
+        for column, label in enumerate(["CODICE", "ARTICOLO", "QTA", "TOTALE"], start=1):
+            cell = worksheet.cell(row=header_row, column=column, value=label)
+            cell.fill = dark_fill
+            cell.font = white_bold
+            cell.alignment = Alignment(horizontal="right" if column >= 3 else "left")
+
+        first_data_row = header_row + 1
+        for row_index, row in enumerate(righe, start=first_data_row):
+            worksheet.cell(row=row_index, column=1, value=excel_text(row.get("codice")))
+            worksheet.cell(row=row_index, column=2, value=excel_text(row.get("descrizione")))
+            worksheet.cell(row=row_index, column=3, value=int(row.get("qta_da_ordinare") or 0))
+            total_cell = worksheet.cell(row=row_index, column=4, value=float(row.get("totale") or 0))
+            total_cell.number_format = "€ #,##0.00"
+            worksheet.cell(row=row_index, column=3).alignment = Alignment(horizontal="right")
+            total_cell.alignment = Alignment(horizontal="right")
+
+        total_row = first_data_row + len(righe)
+        worksheet.cell(row=total_row, column=3, value="TOTALE")
+        worksheet.cell(row=total_row, column=4, value=totale)
+        for column in range(1, 5):
+            cell = worksheet.cell(row=total_row, column=column)
+            cell.fill = light_fill
+            cell.font = Font(bold=True, color="0F172A")
+        worksheet.cell(row=total_row, column=4).number_format = "€ #,##0.00"
+        worksheet.cell(row=total_row, column=3).alignment = Alignment(horizontal="right")
+        worksheet.cell(row=total_row, column=4).alignment = Alignment(horizontal="right")
+
+        last_filter_row = max(header_row, total_row - 1)
+        worksheet.auto_filter.ref = f"A{header_row}:D{last_filter_row}"
+        for column, width in {1: 20, 2: 55, 3: 14, 4: 18}.items():
+            worksheet.column_dimensions[get_column_letter(column)].width = width
+
+        workbook.properties.title = "Ordine fornitore"
+        workbook.properties.subject = categoria_filtro or "Tutte le categorie"
+        workbook.properties.creator = "God Services Gestionale"
+
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        categoria_slug = re.sub(r"[^a-z0-9]+", "_", categoria_filtro.lower()).strip("_")
+        suffix = f"_{categoria_slug}" if categoria_slug else ""
+        filename = f"ordine{suffix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Auto-Order-Category": categoria_filtro or "TUTTE",
+                "X-Auto-Order-Rows": str(len(righe)),
+            },
+        )
+
     return {
         "router": router,
         "auto_order": auto_order,
         "auto_order_selected_rows": auto_order_selected_rows,
         "auto_order_rows_from_query": auto_order_rows_from_query,
         "conferma_auto_order": conferma_auto_order,
+        "auto_order_pdf": auto_order_pdf,
+        "auto_order_excel": auto_order_excel,
     }
