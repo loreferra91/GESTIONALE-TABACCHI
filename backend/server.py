@@ -59,6 +59,7 @@ if __package__:
         plan_vending_inventory as _plan_vending_inventory,
     )
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
+    from .vending_router import VendingColonna, VendingCreateIn, create_vending_router
 else:
     from adm_router import (
         ADM_CATEGORY_ALIASES, ADM_PREZZI_URL, ListinoItem,
@@ -101,6 +102,7 @@ else:
         plan_vending_inventory as _plan_vending_inventory,
     )
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
+    from vending_router import VendingColonna, VendingCreateIn, create_vending_router
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -207,25 +209,6 @@ class SmartVenueProductIn(BaseModel):
 
 class SmartVenueBarcodeIn(BaseModel):
     barcode: str = ""
-
-
-class VendingColonna(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    colonna: str
-    codice: str = ""
-    descrizione: str = ""
-    giacenza: int = 0
-    capacita_max: int = 5
-    soglia_minima: int = 2
-
-
-class VendingCreateIn(BaseModel):
-    colonna: str
-    codice: str
-    capacita_max: int = 5
-    soglia_minima: int = 2
-    giacenza_iniziale: int = 0
 
 
 class VenditaGiornaliera(BaseModel):
@@ -2536,258 +2519,6 @@ async def annulla_csv_vending(batch_id: str):
 
 
 # ------------------------- Vending -------------------------
-@api.post("/vending")
-async def create_vending_column(payload: VendingCreateIn):
-    colonna = payload.colonna.strip().upper()
-    codice = _product_code_text(payload.codice)
-    if not re.fullmatch(r"[A-Z]\d+", colonna):
-        raise HTTPException(422, "La colonna deve avere un formato come A01")
-    if payload.capacita_max <= 0:
-        raise HTTPException(422, "La capacità deve essere maggiore di zero")
-    if payload.soglia_minima < 0 or payload.soglia_minima > payload.capacita_max:
-        raise HTTPException(422, "La soglia deve essere compresa tra zero e la capacità")
-    if payload.giacenza_iniziale < 0 or payload.giacenza_iniziale > payload.capacita_max:
-        raise HTTPException(422, "La giacenza iniziale deve essere compresa tra zero e la capacità")
-
-    existing, prodotto, params = await asyncio.gather(
-        db.vending.find_one({"colonna": colonna}),
-        db.prodotti.find_one({"codice": codice}),
-        get_params(),
-    )
-    if existing:
-        raise HTTPException(409, f"Colonna vending già presente: {colonna}")
-    if not prodotto:
-        raise HTTPException(404, f"Prodotto non trovato: {codice}")
-
-    scorta_minima = max(0, int(_param(params, "SCORTA_MINIMA_NEGOZIO_VENDING", 2)))
-    disponibile = max(0, int(prodotto.get("giacenza_negozio", 0) or 0))
-    caricabile = max(0, disponibile - scorta_minima)
-    if payload.giacenza_iniziale > caricabile:
-        raise HTTPException(
-            409,
-            f"Scorta negozio protetta: giacenza iniziale {payload.giacenza_iniziale}, "
-            f"caricabili {caricabile} (disponibili {disponibile}, riserva {scorta_minima})",
-        )
-
-    now = datetime.now(timezone.utc).isoformat()
-    document = VendingColonna(
-        colonna=colonna,
-        codice=codice,
-        descrizione=str(prodotto.get("descrizione") or codice),
-        giacenza=payload.giacenza_iniziale,
-        capacita_max=payload.capacita_max,
-        soglia_minima=payload.soglia_minima,
-    ).model_dump()
-    document.update({
-        "created_at": now,
-        "giacenza_aggiornata_il": now,
-        "giacenza_sorgente": "INSERIMENTO_MANUALE",
-    })
-
-    product_updated = False
-    try:
-        if payload.giacenza_iniziale:
-            result = await db.prodotti.update_one(
-                {
-                    "codice": codice,
-                    "giacenza_negozio": {"$gte": payload.giacenza_iniziale + scorta_minima},
-                },
-                {"$inc": {
-                    "giacenza_negozio": -payload.giacenza_iniziale,
-                    "giacenza_vending": payload.giacenza_iniziale,
-                }},
-            )
-            if result.matched_count == 0:
-                raise RuntimeError("la disponibilità negozio è cambiata")
-            product_updated = True
-        if await db.vending.find_one({"colonna": colonna}):
-            raise RuntimeError(f"la colonna {colonna} è stata creata nel frattempo")
-        # PyMongo aggiunge `_id` al dizionario ricevuto: inseriamo una copia per
-        # mantenere la risposta API priva di ObjectId e quindi serializzabile.
-        await db.vending.insert_one(dict(document))
-    except Exception as exc:
-        if product_updated:
-            await db.prodotti.update_one(
-                {"codice": codice},
-                {"$inc": {
-                    "giacenza_negozio": payload.giacenza_iniziale,
-                    "giacenza_vending": -payload.giacenza_iniziale,
-                }},
-            )
-        raise HTTPException(409, f"Inserimento vending annullato: {exc}")
-
-    return {
-        **document,
-        "giacenza_magazzino": disponibile - payload.giacenza_iniziale,
-        "scorta_minima_negozio": scorta_minima,
-        "giacenza_caricabile": caricabile - payload.giacenza_iniziale,
-    }
-
-
-@api.get("/vending")
-async def list_vending():
-    docs, prodotti, params = await asyncio.gather(
-        db.vending.find({}, {"_id": 0}).sort("colonna", 1).to_list(500),
-        db.prodotti.find({}, {"_id": 0, "codice": 1, "giacenza_negozio": 1}).to_list(5000),
-        get_params(),
-    )
-    scorta_minima = max(0, int(_param(params, "SCORTA_MINIMA_NEGOZIO_VENDING", 2)))
-    disponibilita_per_codice = {
-        p.get("codice"): max(0, int(p.get("giacenza_negozio", 0) or 0))
-        for p in prodotti
-        if p.get("codice")
-    }
-    caricabile_residuo_per_codice = {
-        codice: max(0, disponibile - scorta_minima)
-        for codice, disponibile in disponibilita_per_codice.items()
-    }
-    # arricchisci con esito/proposta
-    # Invariante ricarica vending:
-    # - una proposta automatica prova a portare la colonna fino alla capacità massima;
-    # - il magazzino usato qui è la giacenza_negozio fisica libera, già al netto
-    #   delle vendite/import e delle quantità presenti in vending;
-    # - la ricarica scatta quando la colonna è alla/sotto soglia minima;
-    # - la scorta minima negozio non può mai essere trasferita alla vending;
-    # - se lo stock eccedente non basta a riempire la colonna, proponiamo soltanto
-    #   la quantità sicura; per codici condivisi la disponibilità viene assegnata
-    #   una sola volta, in ordine di colonna.
-    out = []
-    for d in docs:
-        cap = d.get("capacita_max")
-        cap = 5 if cap is None else int(cap)
-        giac = d.get("giacenza", 0) or 0
-        soglia = d.get("soglia_minima")
-        soglia = 2 if soglia is None else int(soglia)
-        fabbisogno = max(0, cap - giac)
-        sotto_soglia = giac <= soglia
-        codice = d.get("codice")
-        disponibile = disponibilita_per_codice.get(codice, 0)
-        caricabile_totale = max(0, disponibile - scorta_minima)
-        caricabile_residuo = caricabile_residuo_per_codice.get(codice, 0)
-        proposta = min(fabbisogno, caricabile_residuo) if sotto_soglia and fabbisogno > 0 else 0
-        if proposta:
-            caricabile_residuo_per_codice[codice] = caricabile_residuo - proposta
-        # esito
-        if giac >= cap:
-            esito = "PIENO" if giac == cap else "OLTRE CAPACITA"
-        elif sotto_soglia and fabbisogno > 0:
-            if proposta <= 0:
-                esito = "SCORTA NEGOZIO"
-            elif proposta < fabbisogno:
-                esito = "CARICO PARZIALE"
-            else:
-                esito = "DA CARICARE"
-        else:
-            esito = "OK"
-        d["giacenza_magazzino"] = disponibile
-        d["scorta_minima_negozio"] = scorta_minima
-        d["giacenza_caricabile"] = caricabile_totale
-        d["fabbisogno"] = fabbisogno
-        d["proposta"] = proposta
-        d["esito"] = esito
-        out.append(d)
-    return out
-
-
-async def _sync_product_vending_stock(codice: str, session=None) -> None:
-    """Allinea il totale prodotto alla somma delle colonne vending reali."""
-    if not codice:
-        return
-    kwargs = _session_kwargs(session)
-    columns = await db.vending.find(
-        {"codice": codice},
-        {"_id": 0, "giacenza": 1},
-        **kwargs,
-    ).to_list(500)
-    totale = sum(max(0, int(row.get("giacenza", 0) or 0)) for row in columns)
-    await db.prodotti.update_one(
-        {"codice": codice}, {"$set": {"giacenza_vending": totale}}, **kwargs
-    )
-
-
-@api.put("/vending/{v_id}/giacenza")
-async def update_vending_giacenza(v_id: str, body: Dict[str, Any]):
-    """Corregge la fotografia fisica della vending senza muovere il magazzino."""
-    raw_value = body.get("giacenza")
-    try:
-        giacenza = int(raw_value)
-    except (TypeError, ValueError):
-        raise HTTPException(422, "Giacenza non valida")
-    if isinstance(raw_value, bool) or isinstance(raw_value, float) and not raw_value.is_integer():
-        raise HTTPException(422, "La giacenza deve essere un numero intero")
-    if isinstance(raw_value, str) and not re.fullmatch(r"[+-]?\d+", raw_value.strip()):
-        raise HTTPException(422, "La giacenza deve essere un numero intero")
-    if giacenza < 0:
-        raise HTTPException(422, "La giacenza non può essere negativa")
-
-    current = await db.vending.find_one({"id": v_id})
-    if not current:
-        raise HTTPException(404, "Colonna vending non trovata")
-    capacita = int(current.get("capacita_max", 0) or 0)
-    if capacita > 0 and giacenza > capacita:
-        raise HTTPException(422, f"La giacenza supera la capacità della colonna ({capacita})")
-
-    old_value = int(current.get("giacenza", 0) or 0)
-    result = await db.vending.update_one(
-        {"id": v_id, "giacenza": current.get("giacenza", 0)},
-        {"$set": {
-            "giacenza": giacenza,
-            "giacenza_aggiornata_il": datetime.now(timezone.utc).isoformat(),
-            "giacenza_sorgente": "CORREZIONE_MANUALE",
-        }},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(409, "La giacenza è cambiata nel frattempo: aggiorna la pagina e riprova")
-
-    await _sync_product_vending_stock(str(current.get("codice") or ""))
-    return {
-        "ok": True,
-        "id": v_id,
-        "colonna": current.get("colonna"),
-        "giacenza_precedente": old_value,
-        "giacenza": giacenza,
-    }
-
-
-@api.put("/vending/{v_id}")
-async def update_vending(v_id: str, body: Dict[str, Any]):
-    if "giacenza" in body:
-        raise HTTPException(422, "Per correggere la giacenza usa l'endpoint dedicato /giacenza")
-    if "codice" in body:
-        raise HTTPException(422, "Il codice prodotto della colonna può essere modificato solo tramite import controllato")
-    allowed = {k: body[k] for k in ("descrizione", "capacita_max", "soglia_minima") if k in body}
-    current = await db.vending.find_one({"id": v_id})
-    if not current:
-        raise HTTPException(404, "not found")
-    raw_capacita = allowed.get("capacita_max", current.get("capacita_max", 5))
-    raw_soglia = allowed.get("soglia_minima", current.get("soglia_minima", 2))
-    try:
-        capacita = int(raw_capacita)
-        soglia = int(raw_soglia)
-    except (TypeError, ValueError):
-        raise HTTPException(422, "Capacità e soglia devono essere numeri interi")
-    for value in (raw_capacita, raw_soglia):
-        if isinstance(value, bool) or isinstance(value, float) and not value.is_integer():
-            raise HTTPException(422, "Capacità e soglia devono essere numeri interi")
-        if isinstance(value, str) and not re.fullmatch(r"[+-]?\d+", value.strip()):
-            raise HTTPException(422, "Capacità e soglia devono essere numeri interi")
-    if capacita <= 0:
-        raise HTTPException(422, "La capacità deve essere maggiore di zero")
-    if soglia < 0 or soglia > capacita:
-        raise HTTPException(422, "La soglia deve essere compresa tra zero e la capacità")
-    if int(current.get("giacenza", 0) or 0) > capacita:
-        raise HTTPException(422, "La capacità non può essere inferiore alla giacenza attuale")
-    if "capacita_max" in allowed:
-        allowed["capacita_max"] = capacita
-    if "soglia_minima" in allowed:
-        allowed["soglia_minima"] = soglia
-    r = await db.vending.update_one({"id": v_id}, {"$set": allowed})
-    if r.matched_count == 0:
-        raise HTTPException(404, "not found")
-    doc = await db.vending.find_one({"id": v_id}, {"_id": 0})
-    return doc
-
-
 @api.post("/vending/{v_id}/ricarica")
 async def ricarica_vending(v_id: str, body: Dict[str, Any]):
     raw_qta = body.get("quantita", 0)
@@ -5285,6 +5016,19 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+vending = create_vending_router(
+    get_database=lambda: db,
+    get_params=lambda: get_params(),
+    param_value=_param,
+    product_code_text=_product_code_text,
+    session_kwargs=_session_kwargs,
+)
+vending_router = vending["router"]
+create_vending_column = vending["create_vending_column"]
+list_vending = vending["list_vending"]
+_sync_product_vending_stock = vending["sync_product_vending_stock"]
+update_vending_giacenza = vending["update_vending_giacenza"]
+update_vending = vending["update_vending"]
 orders = create_orders_router(
     get_database=lambda: db,
     cap_limit=_cap,
@@ -5451,6 +5195,7 @@ api.include_router(reconciliation_router)
 api.include_router(audit_router)
 api.include_router(backup_router)
 api.include_router(orders_router)
+api.include_router(vending_router)
 api.include_router(real_stock_router)
 api.include_router(inventory_analytics_router)
 api.include_router(products_router)
