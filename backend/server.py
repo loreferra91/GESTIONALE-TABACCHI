@@ -40,6 +40,15 @@ if __package__:
         ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
         Versamento, VersamentoIn, create_cash_movements_router,
     )
+    from .dashboard_router import (
+        create_dashboard_router,
+        is_cash_payment as _is_cash_payment,
+        is_sale_after_excel_import as _is_sale_after_excel_import,
+        latest_sale_date as _latest_sale_date,
+        parse_sale_date as _parse_sale_date,
+        parse_utc_datetime as _parse_utc_datetime,
+        vending_payment_bucket as _vending_payment_bucket,
+    )
     from .import_history_router import (
         create_import_history_router,
         import_includes_accounting as _import_includes_accounting,
@@ -86,6 +95,15 @@ else:
         MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
         ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
         Versamento, VersamentoIn, create_cash_movements_router,
+    )
+    from dashboard_router import (
+        create_dashboard_router,
+        is_cash_payment as _is_cash_payment,
+        is_sale_after_excel_import as _is_sale_after_excel_import,
+        latest_sale_date as _latest_sale_date,
+        parse_sale_date as _parse_sale_date,
+        parse_utc_datetime as _parse_utc_datetime,
+        vending_payment_bucket as _vending_payment_bucket,
     )
     from import_history_router import (
         create_import_history_router,
@@ -2490,450 +2508,6 @@ async def annulla_csv_vending(batch_id: str):
 
 
 # ------------------------- Storico ordini -------------------------
-# ------------------------- Dashboard KPIs -------------------------
-def _parse_sale_date(value: Any):
-    """Normalizza le date vendite ISO e italiane usate dalle due sorgenti."""
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
-    except ValueError:
-        pass
-    for date_format in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
-        try:
-            return datetime.strptime(raw[:10], date_format).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _latest_sale_date(documents: List[Dict[str, Any]]):
-    parsed_dates = [_parse_sale_date(document.get("data")) for document in documents]
-    return max((parsed for parsed in parsed_dates if parsed), default=None)
-
-
-def _parse_utc_datetime(value: Any):
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _is_sale_after_excel_import(
-    document: Dict[str, Any], latest_imported_sale: Any, latest_import_created_at: Any
-) -> bool:
-    """Include le registrazioni create dopo l'Excel, anche nello stesso giorno."""
-    import_cutoff = _parse_utc_datetime(latest_import_created_at)
-    created_at = _parse_utc_datetime(document.get("created_at"))
-    if import_cutoff and created_at:
-        return created_at > import_cutoff
-    sale_cutoff = _parse_sale_date(latest_imported_sale)
-    sale_day = _parse_sale_date(document.get("data"))
-    return not sale_cutoff or bool(sale_day and sale_day > sale_cutoff)
-
-
-def _is_cash_payment(payment_method: Any) -> bool:
-    normalized = unicodedata.normalize("NFKD", str(payment_method or "")).encode("ascii", "ignore").decode().upper()
-    return not normalized or "CONTANT" in normalized
-
-
-def _vending_payment_bucket(payment_method: Any) -> str:
-    normalized = unicodedata.normalize("NFKD", str(payment_method or "")).encode("ascii", "ignore").decode().upper()
-    normalized = re.sub(r"[^A-Z0-9]+", "", normalized)
-    if not normalized or "CONTANT" in normalized:
-        return "CONTANTI"
-    if "PAGOBANCOMAT" in normalized or normalized in {"BANCOMAT", "PAGOBANCO"}:
-        return "PAGOBANCOMAT"
-    if "CART" in normalized:
-        return "CARTE"
-    return "ALTRO_ELETTRONICO"
-
-
-def _vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -> List[tuple]:
-    """Estrae importo e pagamento dalle due sorgenti vending compatibili."""
-    values = []
-    for document in documents:
-        if legacy_raw:
-            raw = document.get("raw") or []
-            if len(raw) < 12:
-                continue
-            contabilizzata = str(raw[15] if len(raw) > 15 else "").strip().upper()
-            esito = str(raw[16] if len(raw) > 16 else "").strip().upper()
-            if contabilizzata and contabilizzata not in {"SI", "SÌ", "YES", "1", "TRUE"}:
-                continue
-            if "ANNULL" in esito:
-                continue
-            importo = raw[7]
-            pagamento = raw[11]
-        else:
-            importo = document.get("importo")
-            pagamento = document.get("pagamento")
-
-        try:
-            amount = money(importo or 0)
-        except (TypeError, ValueError):
-            continue
-        values.append((amount, str(pagamento or "").strip()))
-    return values
-
-
-def _latest_historical_vending_date(documents: List[Dict[str, Any]]):
-    """Restituisce l'ultima data coperta dallo storico vending Excel."""
-    parsed_dates = []
-    for document in documents:
-        raw = document.get("raw") or []
-        # DB_STORICO_VENDING_EXT: DATA è la terza colonna; DATA_ORA è il
-        # fallback per file legacy che non valorizzano la colonna DATA.
-        value = raw[2] if len(raw) > 2 and raw[2] else (raw[1] if len(raw) > 1 else None)
-        parsed = _parse_sale_date(value)
-        if parsed:
-            parsed_dates.append(parsed)
-    return max(parsed_dates, default=None)
-
-
-def _calculate_dashboard_balances(
-    vending_payments: List[tuple],
-    saldo_cassa: float,
-    totale_prelievi_vending: float = 0,
-    totale_scontrini: float = 0,
-    giacenza_iniziale_vending: float = 0,
-) -> Dict[str, float]:
-    """Calcola in un solo punto i saldi monetari esposti dalla dashboard.
-
-    I prelievi registrati sono la fonte autorevole per la giacenza fisica. La
-    giacenza è la giacenza iniziale più le vendite cash, meno quei prelievi.
-    Il prelievo contabile netto e il saldo combinato sottraggono invece gli
-    scontrini vending dal totale lordo prelevato.
-    """
-    cash = cards = pagobancomat = other_electronic = Decimal(0)
-    for amount, payment_method in vending_payments:
-        amount = money_decimal(amount)
-        bucket = _vending_payment_bucket(payment_method)
-        if bucket == "CONTANTI":
-            cash += amount
-        elif bucket == "CARTE":
-            cards += amount
-        elif bucket == "PAGOBANCOMAT":
-            pagobancomat += amount
-        else:
-            other_electronic += amount
-
-    cash, cards, pagobancomat, other_electronic = map(money, (cash, cards, pagobancomat, other_electronic))
-    electronic = money_sum([cards, pagobancomat, other_electronic])
-    total = money_sum([cash, electronic])
-    saldo_cassa = money(saldo_cassa or 0)
-    prelievo_vending_lordo = money(totale_prelievi_vending or 0)
-    totale_scontrini = money(totale_scontrini or 0)
-    prelievo_vending = money_sum([prelievo_vending_lordo, -totale_scontrini])
-    giacenza_iniziale_vending = money(giacenza_iniziale_vending or 0)
-    giacenza_vending = money_sum([giacenza_iniziale_vending, cash, -prelievo_vending_lordo])
-    saldo_casse = money_sum([prelievo_vending, saldo_cassa])
-    return {
-        "saldoVendingTotale": total,
-        "venditeVendingContanti": cash,
-        "giacenzaInizialeVendingContanti": giacenza_iniziale_vending,
-        "giacenzaVendingContanti": giacenza_vending,
-        "prelievoVendingLordo": prelievo_vending_lordo,
-        "prelievoVendingNetto": prelievo_vending,
-        "prelievoVending": prelievo_vending,
-        "scontriniVending": totale_scontrini,
-        "prelievoDaVending": prelievo_vending,
-        "prelieviContantiDaVending": prelievo_vending,
-        "prelieviContantiCassaVending": prelievo_vending,
-        "cassaVending": giacenza_vending,
-        "giacenzaAttualeCassaVending": giacenza_vending,
-        "prelieviVending": prelievo_vending,
-        "saldoCassaNegozioEVending": saldo_casse,
-        # Alias mantenuti per compatibilità con client meno recenti.
-        "saldoVendingContanti": cash,
-        "saldoVendingElettronico": electronic,
-        "venditeVendingCarte": cards,
-        "venditeVendingPagoBancomat": pagobancomat,
-        "venditeVendingAltroElettronico": other_electronic,
-        "saldoCassa": saldo_cassa,
-        "totalePrelievi": prelievo_vending,
-        "differenzaCassaVendingContanti": saldo_casse,
-    }
-
-
-async def _dashboard_balances(
-    saldo_cassa: float,
-    totale_prelievi_vending: float = 0,
-    totale_scontrini: float = 0,
-    latest_import_created_at: Any = None,
-    giacenza_iniziale_vending: float = 0,
-) -> Dict[str, float]:
-    # DB_STORICO_VENDING_EXT è la fonte primaria perché conserva il metodo di
-    # pagamento. Le vendite dell'app successive all'ultima data importata si
-    # aggiungono allo storico; il filtro temporale impedisce doppi conteggi al
-    # successivo import Excel.
-    historical_docs, app_docs, accounting_ledger, accounting_snapshot = await asyncio.gather(
-        db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
-        db.vendite.find(
-            {"canale": {"$regex": "^VENDING$", "$options": "i"}},
-            {
-                "_id": 0, "data": 1, "created_at": 1, "importo": 1,
-                "pagamento": 1, "sorgente": 1, "csv_event_key": 1,
-                "csv_file_sha256": 1,
-            },
-        ).to_list(None),
-        _vending_accounting_ledger_summary(),
-        _latest_vending_accounting_snapshot(),
-    )
-    accounting_source = accounting_ledger or accounting_snapshot
-    if accounting_source:
-        amounts = accounting_source.get("importi_pagamenti") or {}
-        payments = [(float(amount or 0), bucket) for bucket, amount in amounts.items()]
-        aligned_at = _parse_utc_datetime(
-            accounting_source.get("ledger_started_at") or accounting_source.get("created_at")
-        )
-        snapshot_event_keys = set(
-            accounting_source.get("csv_event_keys")
-            or [
-                *(accounting_source.get("baseline_event_keys") or []),
-                *(accounting_source.get("event_keys") or []),
-            ]
-        )
-        snapshot_file_sha256 = str(accounting_source.get("sha256") or "")
-        for document in app_docs:
-            if accounting_ledger and str(document.get("sorgente") or "").upper() == "CSV_VENDING":
-                # Ogni import CSV alimenta già il registro incrementale.
-                continue
-            # La fotografia CSV contiene gia' questi importi. Il confronto per
-            # evento copre anche CSV cumulativi; lo SHA mantiene compatibili le
-            # fotografie create prima dell'introduzione delle chiavi evento.
-            event_key = str(document.get("csv_event_key") or "")
-            file_sha256 = str(document.get("csv_file_sha256") or "")
-            if event_key and event_key in snapshot_event_keys:
-                continue
-            if snapshot_file_sha256 and file_sha256 == snapshot_file_sha256:
-                continue
-            created_at = _parse_utc_datetime(document.get("created_at"))
-            if not aligned_at or not created_at or created_at <= aligned_at:
-                continue
-            payments.extend(_vending_payment_values([document], legacy_raw=False))
-        result = _calculate_dashboard_balances(
-            payments,
-            saldo_cassa,
-            totale_prelievi_vending,
-            totale_scontrini,
-            giacenza_iniziale_vending,
-        )
-        result.update({
-            "fonteVendingContabile": "CSV_VENDING",
-            "fonteVendingFile": accounting_source.get("file_name"),
-            "fonteVendingRighe": accounting_source.get("righe"),
-            "fonteVendingDataDa": accounting_source.get("data_da"),
-            "fonteVendingDataA": accounting_source.get("data_a"),
-            "fonteVendingAllineataIl": accounting_source.get("created_at"),
-        })
-        return result
-
-    payments = _vending_payment_values(historical_docs, legacy_raw=True)
-    cutoff = _latest_historical_vending_date(historical_docs)
-    supplemental_app_docs = []
-    for document in app_docs:
-        if historical_docs and cutoff is None and not latest_import_created_at:
-            continue
-        if not _is_sale_after_excel_import(document, cutoff, latest_import_created_at):
-            continue
-        supplemental_app_docs.append(document)
-    payments.extend(_vending_payment_values(supplemental_app_docs, legacy_raw=False))
-    return _calculate_dashboard_balances(
-        payments,
-        saldo_cassa,
-        totale_prelievi_vending,
-        totale_scontrini,
-        giacenza_iniziale_vending,
-    )
-
-
-async def _supplemental_store_cash_sales(
-    latest_imported_sale: Any, latest_import_created_at: Any = None
-) -> float:
-    """Somma gli incassi negozio registrati dopo lo storico incluso nell'Excel.
-
-    RIEP_VENDITA contiene un totale cumulativo: il timestamp di registrazione
-    separa le nuove vendite da quelle già comprese nell'ultimo import Excel.
-    """
-    cutoff = _parse_sale_date(latest_imported_sale)
-    documents = await db.vendite.find(
-        {}, {"_id": 0, "data": 1, "created_at": 1, "canale": 1, "pagamento": 1, "importo": 1}
-    ).to_list(None)
-    total = Decimal(0)
-    for document in documents:
-        channel = str(document.get("canale") or "NEGOZIO").strip().upper()
-        if channel == "VENDING" or not _is_cash_payment(document.get("pagamento")):
-            continue
-        if not _is_sale_after_excel_import(document, cutoff, latest_import_created_at):
-            continue
-        try:
-            total += money_decimal(document.get("importo") or 0)
-        except (TypeError, ValueError):
-            continue
-    return money(total)
-
-
-async def _shop_sold_accounting_corrections(latest_import_created_at: Any = None) -> float:
-    """Somma le rettifiche monetarie successive all'ultima fotografia Excel.
-
-    Un nuovo import contabile incorpora nuovamente il totale cumulativo dei
-    venduti; escludere le rettifiche precedenti evita di contarle due volte.
-    Le rettifiche legacy prive di importo non alterano retroattivamente i saldi.
-    """
-    cutoff = _parse_utc_datetime(latest_import_created_at)
-    documents = await db.rettifiche_venduti.find(
-        {"campo": "venduti_negozio"},
-        {"_id": 0, "created_at": 1, "importo_contabile": 1},
-    ).to_list(None)
-    total = Decimal(0)
-    for document in documents:
-        created_at = _parse_utc_datetime(document.get("created_at"))
-        if cutoff and (not created_at or created_at <= cutoff):
-            continue
-        try:
-            total += money_decimal(document.get("importo_contabile") or 0)
-        except (TypeError, ValueError):
-            continue
-    return money(total)
-
-
-async def _dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
-    """Restituisce l'andamento fino all'ultimo giorno di vendita disponibile."""
-    # Il raggruppamento applicativo mantiene lo stesso risultato su MongoDB e
-    # sul database locale mongomock, che non implementa $substrBytes.
-    app_sales, imported_sales = await asyncio.gather(
-        db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-        db.db_storico_vend.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-    )
-
-    totals_by_date: Dict[Any, Decimal] = {}
-    for sale in [*imported_sales, *app_sales]:
-        parsed_day = _parse_sale_date(sale.get("data"))
-        if parsed_day is None:
-            continue
-        try:
-            amount = money_decimal(sale.get("importo") or 0)
-        except (TypeError, ValueError):
-            continue
-        totals_by_date[parsed_day] = totals_by_date.get(parsed_day, 0) + amount
-
-    if not totals_by_date:
-        return {
-            "ultimo_giorno": None,
-            "totale_ultimo_giorno": 0,
-            "variazione_pct": None,
-            "totale_periodo": 0,
-            "serie": [],
-        }
-
-    end_date = max(totals_by_date)
-    start_date = end_date - timedelta(days=days - 1)
-
-    series = []
-    for offset in range(days):
-        current_date = start_date + timedelta(days=offset)
-        series.append({"data": current_date.isoformat(), "importo": money(totals_by_date.get(current_date, 0))})
-
-    latest_total = money(totals_by_date.get(end_date, 0))
-    previous_values = [point["importo"] for point in series[:-1]]
-    previous_average = sum(previous_values) / len(previous_values) if previous_values else 0
-    variation = round(((latest_total - previous_average) / previous_average) * 100, 1) if previous_average else None
-    return {
-        "ultimo_giorno": end_date.isoformat(),
-        "totale_ultimo_giorno": latest_total,
-        "variazione_pct": variation,
-        "totale_periodo": money_sum(point["importo"] for point in series),
-        "serie": series,
-    }
-
-
-@api.get("/dashboard")
-async def dashboard():
-    pv = await pivot()
-    ultimo_import_contabile, date_vendite_importate = await asyncio.gather(
-        _latest_accounting_import(),
-        db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
-    )
-    ultima_vendita_importata = _latest_sale_date(date_vendite_importate)
-    import_totali = (ultimo_import_contabile or {}).get("totali", {})
-    venduto_negozio_excel = money(import_totali.get("valore_venduto_negozio_excel") or 0)
-    venduto_vending_excel = money(import_totali.get("valore_venduto_vending_excel") or 0)
-    venduto_totale_excel = money(import_totali.get("valore_venduto_totale_excel") or 0)
-    if venduto_totale_excel:
-        pv["kpi"]["valore_venduto"] = round(venduto_totale_excel, 2)
-        pv["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
-        pv["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
-        pv["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
-        pv["kpi"]["margine_lordo"] = money_sum([venduto_totale_excel, -(pv["kpi"].get("valore_acquistato") or 0)])
-    # vendite oggi
-    oggi = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    v_oggi = {"tot": Decimal(0), "pezzi": 0}
-    async for sale in db.vendite.find({"data": {"$regex": f"^{oggi}"}}, {"importo": 1, "quantita": 1}):
-        v_oggi["tot"] += money_decimal(sale.get("importo") or 0)
-        v_oggi["pezzi"] += sale.get("quantita") or 0
-    versamenti, prelievi, scontrini, giacenza_iniziale_doc, venduto_negozio_app_contanti, rettifiche_venduto_negozio = await asyncio.gather(
-        _versamenti_summary(),
-        _prelievi_vending_summary(),
-        _scontrini_vending_summary(),
-        db.parametri.find_one(
-            {"nome": "GIACENZA_INIZIALE_CONTANTI_VENDING"},
-            {"_id": 0, "valore": 1},
-        ),
-        _supplemental_store_cash_sales(
-            ultima_vendita_importata,
-            (ultimo_import_contabile or {}).get("created_at"),
-        ),
-        _shop_sold_accounting_corrections(
-            (ultimo_import_contabile or {}).get("created_at"),
-        ),
-    )
-    giacenza_iniziale_vending = money((giacenza_iniziale_doc or {}).get("valore") or 0)
-    venduto_negozio_contabilizzato = money_sum([
-        venduto_negozio_excel, venduto_negozio_app_contanti, rettifiche_venduto_negozio,
-    ])
-    liquidita_residua = money_sum([venduto_negozio_contabilizzato, -versamenti["totale"]])
-    saldi, andamento_vendite = await asyncio.gather(
-        _dashboard_balances(
-            liquidita_residua,
-            prelievi["totale"],
-            scontrini["totale"],
-            (ultimo_import_contabile or {}).get("created_at"),
-            giacenza_iniziale_vending,
-        ),
-        _dashboard_sales_trend(),
-    )
-    # vending
-    vending = await list_vending()
-    vend_da_caricare = sum(1 for v in vending if (v.get("proposta") or 0) > 0)
-    return {
-        "kpi": pv["kpi"],
-        "vendite_oggi": {"importo": money(v_oggi.get("tot") or 0), "pezzi": v_oggi.get("pezzi") or 0},
-        "totale_versamenti": versamenti["totale"],
-        "totale_prelievi": prelievi["totale"],
-        "totale_scontrini_vending": scontrini["totale"],
-        "giacenza_vending_contanti": saldi["giacenzaVendingContanti"],
-        "giacenza_iniziale_vending_contanti": giacenza_iniziale_vending,
-        "venduto_negozio_excel": round(venduto_negozio_excel, 2),
-        "venduto_negozio_app_contanti": venduto_negozio_app_contanti,
-        "rettifiche_venduto_negozio": rettifiche_venduto_negozio,
-        "venduto_negozio_contabilizzato": venduto_negozio_contabilizzato,
-        "liquidita_residua": liquidita_residua,
-        "saldo_cassa": liquidita_residua,
-        "saldi": saldi,
-        "andamento_vendite": andamento_vendite,
-        "vending_da_caricare": vend_da_caricare,
-        "vending_totale": len(vending),
-    }
-
-
 # ------------------------- Import Excel -------------------------
 @api.post("/import/excel")
 async def import_excel(file: UploadFile = File(...)):
@@ -4314,6 +3888,29 @@ _auto_order_rows_from_query = auto_order_module["auto_order_rows_from_query"]
 conferma_auto_order = auto_order_module["conferma_auto_order"]
 auto_order_pdf = auto_order_module["auto_order_pdf"]
 auto_order_excel = auto_order_module["auto_order_excel"]
+dashboard_module = create_dashboard_router(
+    get_database=lambda: db,
+    normalize_money=money,
+    decimal_money=money_decimal,
+    sum_money=money_sum,
+    get_pivot=lambda: pivot(),
+    get_latest_accounting_import=lambda: _latest_accounting_import(),
+    get_vending_accounting_ledger_summary=lambda: _vending_accounting_ledger_summary(),
+    get_latest_vending_accounting_snapshot=lambda: _latest_vending_accounting_snapshot(),
+    get_versamenti_summary=lambda: _versamenti_summary(),
+    get_prelievi_vending_summary=lambda: _prelievi_vending_summary(),
+    get_scontrini_vending_summary=lambda: _scontrini_vending_summary(),
+    get_vending_list=lambda: list_vending(),
+)
+dashboard_router = dashboard_module["router"]
+_vending_payment_values = dashboard_module["vending_payment_values"]
+_latest_historical_vending_date = dashboard_module["latest_historical_vending_date"]
+_calculate_dashboard_balances = dashboard_module["calculate_dashboard_balances"]
+_dashboard_balances = dashboard_module["dashboard_balances"]
+_supplemental_store_cash_sales = dashboard_module["supplemental_store_cash_sales"]
+_shop_sold_accounting_corrections = dashboard_module["shop_sold_accounting_corrections"]
+_dashboard_sales_trend = dashboard_module["dashboard_sales_trend"]
+dashboard = dashboard_module["dashboard"]
 reconciliation_router, accounting_reconciliation, update_reconciliation_case = create_reconciliation_router(
     get_database=lambda: db,
     payment_bucket=_vending_payment_bucket,
@@ -4334,6 +3931,7 @@ api.include_router(import_history_router)
 api.include_router(cash_movements_router)
 api.include_router(parameters_router)
 api.include_router(auto_order_router)
+api.include_router(dashboard_router)
 app.include_router(api)
 
 
