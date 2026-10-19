@@ -194,7 +194,8 @@ Prossimi passi tecnici:
    merce, gestione e ricariche vending, giacenze reali, analisi magazzino e
    listino ADM sono già isolati. Anche Auto-Order, inclusi conferma ed export
    PDF/Excel, e il dashboard KPI sono separati mantenendo route e payload
-   compatibili.
+   compatibili. Il nucleo delle vendite giornaliere manuali è separato; restano
+   da estrarre bulk, Cassa Rapida e import CSV vending.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 

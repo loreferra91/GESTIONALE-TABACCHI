@@ -72,6 +72,7 @@ if __package__:
         plan_vending_inventory as _plan_vending_inventory,
     )
     from .reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
+    from .sales_router import VenditaGiornaliera, VenditaIn, create_sales_router
     from .vending_router import VendingColonna, VendingCreateIn, create_vending_router
 else:
     from adm_router import (
@@ -128,6 +129,7 @@ else:
         plan_vending_inventory as _plan_vending_inventory,
     )
     from reconciliation_router import ReconciliationCaseIn, create_reconciliation_router
+    from sales_router import VenditaGiornaliera, VenditaIn, create_sales_router
     from vending_router import VendingColonna, VendingCreateIn, create_vending_router
 
 ROOT_DIR = Path(__file__).parent
@@ -235,34 +237,6 @@ class SmartVenueProductIn(BaseModel):
 
 class SmartVenueBarcodeIn(BaseModel):
     barcode: str = ""
-
-
-class VenditaGiornaliera(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    data: str
-    codice: str
-    descrizione: str = ""
-    quantita: int = 1
-    importo: NonNegativeMoney = 0
-    canale: str = "NEGOZIO"  # NEGOZIO / VENDING
-    pagamento: str = "CONTANTI"
-    colonna: Optional[str] = None
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    sorgente: str = "MANUALE"
-    batch_id: Optional[str] = None
-    undo_meta: Dict[str, Any] = Field(default_factory=dict)
-
-
-class VenditaIn(BaseModel):
-    data: str
-    codice: str
-    descrizione: Optional[str] = ""
-    quantita: int = Field(default=1, gt=0)
-    importo: NonNegativeMoney = Field(default=0, ge=0)
-    canale: str = "NEGOZIO"
-    pagamento: str = "CONTANTI"
-    colonna: Optional[str] = None
 
 
 class SmartVenueBulkIn(BaseModel):
@@ -837,224 +811,6 @@ async def reconcile_all_vending_stock() -> int:
         "prodotti_riconciliati": changed,
     })
     return changed
-
-
-# ------------------------- Vendite giornaliere -------------------------
-@api.get("/vendite")
-async def list_vendite(giorno: Optional[str] = None, limit: int = 500):
-    filt: Dict[str, Any] = {}
-    if giorno:
-        # data ISO stringa (2026-02-18...) — validiamo formato semplice
-        safe = re.sub(r"[^0-9\-T:.]", "", giorno)[:32]
-        filt["data"] = {"$regex": f"^{re.escape(safe)}"}
-    capped_limit = _cap(limit)
-    docs = await db.vendite.find(filt, {"_id": 0}).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-    return docs
-
-
-@api.post("/vendite")
-async def add_vendita(
-    v: VenditaIn,
-    idempotency_key: Optional[str] = Header(default=None, alias="X-Idempotency-Key"),
-):
-    """Registra una vendita una sola volta e scala una scorta realmente disponibile."""
-    channel = str(v.canale or "").strip().upper()
-    if channel not in {"NEGOZIO", "VENDING"}:
-        raise HTTPException(422, "Canale vendita non valido")
-    codice = _product_code_text(v.codice)
-    if not codice:
-        raise HTTPException(422, "Codice prodotto obbligatorio")
-    key = str(idempotency_key or "").strip() or None
-    if key and not 10 <= len(key) <= 160:
-        raise HTTPException(422, "X-Idempotency-Key deve contenere da 10 a 160 caratteri")
-    if key:
-        existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
-        if existing:
-            return existing
-
-    product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
-    if not product:
-        raise HTTPException(404, f"Prodotto non trovato: {codice}")
-
-    column_code = None
-    if channel == "VENDING":
-        column_code = _normalize_vending_column(v.colonna)
-        if not column_code:
-            raise HTTPException(422, "Per una vendita Vending devi indicare la colonna")
-
-    payload = v.model_dump()
-    payload.update({
-        "codice": codice,
-        "canale": channel,
-        "pagamento": str(v.pagamento or "CONTANTI").strip().upper(),
-        "descrizione": v.descrizione or product.get("descrizione", ""),
-        "colonna": column_code,
-    })
-    sale_doc = VenditaGiornaliera(**payload).model_dump()
-    if key:
-        sale_doc["idempotency_key"] = key
-
-    async def operation(session):
-        kwargs = _session_kwargs(session)
-        if key:
-            existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0}, **kwargs)
-            if existing:
-                return existing
-
-        column_changed = False
-        product_changed = False
-        try:
-            if channel == "VENDING":
-                column = await db.vending.find_one(
-                    {"colonna": column_code, "codice": codice},
-                    {"_id": 0},
-                    **kwargs,
-                )
-                if not column:
-                    raise HTTPException(422, "La colonna Vending non contiene il prodotto indicato")
-                result = await db.vending.update_one(
-                    {"id": column["id"], "codice": codice, "giacenza": {"$gte": v.quantita}},
-                    {"$inc": {"giacenza": -v.quantita}},
-                    **kwargs,
-                )
-                if result.modified_count != 1:
-                    raise HTTPException(409, f"Giacenza insufficiente nella colonna {column_code}")
-                column_changed = True
-                result = await db.prodotti.update_one(
-                    {"codice": codice},
-                    {"$inc": {"venduti_vending": v.quantita}},
-                    **kwargs,
-                )
-            else:
-                result = await db.prodotti.update_one(
-                    {"codice": codice, "giacenza_negozio": {"$gte": v.quantita}},
-                    {"$inc": {"giacenza_negozio": -v.quantita, "venduti_negozio": v.quantita}},
-                    **kwargs,
-                )
-            if result.modified_count != 1:
-                raise HTTPException(409, f"Giacenza insufficiente per il prodotto {codice}")
-            product_changed = True
-            await db.vendite.insert_one(sale_doc.copy(), **kwargs)
-            return sale_doc
-        except Exception:
-            # Mongo standalone e mongomock non hanno transazioni: compensiamo le
-            # modifiche già applicate. Su Atlas il rollback è gestito dal server.
-            if session is None:
-                if product_changed:
-                    increments = {"venduti_vending": -v.quantita} if channel == "VENDING" else {
-                        "giacenza_negozio": v.quantita,
-                        "venduti_negozio": -v.quantita,
-                    }
-                    await db.prodotti.update_one({"codice": codice}, {"$inc": increments})
-                if column_changed:
-                    await db.vending.update_one(
-                        {"colonna": column_code, "codice": codice},
-                        {"$inc": {"giacenza": v.quantita}},
-                    )
-            raise
-
-    try:
-        result = await _run_transactionally(operation)
-    except DuplicateKeyError:
-        if key:
-            existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
-            if existing:
-                result = existing
-            else:
-                raise
-        else:
-            raise
-    if channel == "VENDING":
-        await _sync_product_vending_stock(codice)
-    return result
-
-
-@api.delete("/vendite/{v_id}")
-async def del_vendita(v_id: str):
-    v = await db.vendite.find_one({"id": v_id})
-    if not v:
-        raise HTTPException(404, "Vendita non trovata")
-    if v.get("sorgente", "MANUALE") != "MANUALE":
-        raise HTTPException(409, "Questa vendita va annullata dal relativo caricamento")
-    return await annulla_vendita_manuale(v_id)
-
-
-@api.get("/vendite/manuale/ultima")
-async def ultima_vendita_manuale():
-    """Restituisce l'ultima vendita manuale ancora presente e annullabile."""
-    return await db.vendite.find_one(
-        {"sorgente": "MANUALE"},
-        {"_id": 0},
-        sort=[("created_at", -1)],
-    )
-
-
-@api.post("/vendite/manuale/{sale_id}/annulla")
-async def annulla_vendita_manuale(sale_id: str):
-    sale = await db.vendite.find_one({"id": sale_id, "sorgente": "MANUALE"}, {"_id": 0})
-    if not sale:
-        raise HTTPException(404, "Vendita manuale non trovata o già annullata")
-    vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
-    quantity = int(sale.get("quantita") or 0)
-    increments = {vend_field: -quantity}
-    is_vending = sale.get("canale") == "VENDING"
-    column_code = _normalize_vending_column(sale.get("colonna")) if is_vending else None
-    if is_vending and not column_code:
-        raise HTTPException(409, "Vendita Vending senza colonna: annullamento manuale richiesto")
-    if not is_vending:
-        increments["giacenza_negozio"] = quantity
-
-    async def operation(session):
-        kwargs = _session_kwargs(session)
-        column_changed = False
-        stock_changed = False
-        try:
-            if is_vending:
-                column_update = await db.vending.update_one(
-                    {"colonna": column_code, "codice": sale.get("codice")},
-                    {"$inc": {"giacenza": quantity}},
-                    **kwargs,
-                )
-                if column_update.modified_count != 1:
-                    raise RuntimeError("La colonna Vending della vendita non esiste più")
-                column_changed = True
-            stock_update = await db.prodotti.update_one(
-                {"codice": sale.get("codice")}, {"$inc": increments}, **kwargs
-            )
-            if stock_update.modified_count != 1:
-                raise RuntimeError("Il prodotto della vendita non esiste più")
-            stock_changed = True
-            deletion = await db.vendite.delete_one(
-                {"id": sale_id, "sorgente": "MANUALE"}, **kwargs
-            )
-            if deletion.deleted_count != 1:
-                raise RuntimeError("La vendita è cambiata durante l'annullamento")
-            if is_vending:
-                await _sync_product_vending_stock(str(sale.get("codice") or ""), session)
-        except Exception:
-            if session is None:
-                if stock_changed:
-                    rollback = {vend_field: quantity}
-                    if not is_vending:
-                        rollback["giacenza_negozio"] = -quantity
-                    await db.prodotti.update_one(
-                        {"codice": sale.get("codice")}, {"$inc": rollback}
-                    )
-                if column_changed:
-                    await db.vending.update_one(
-                        {"colonna": column_code, "codice": sale.get("codice")},
-                        {"$inc": {"giacenza": -quantity}},
-                    )
-                    await _sync_product_vending_stock(str(sale.get("codice") or ""))
-            raise
-
-    try:
-        await _run_transactionally(operation)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "rimossi": 1, "id": sale_id}
 
 
 class BulkVenditaIn(BaseModel):
@@ -3713,6 +3469,21 @@ update_vending = vending["update_vending"]
 ricarica_vending = vending["ricarica_vending"]
 ricarica_vending_completa = vending["ricarica_vending_completa"]
 vending_ricarica_pdf = vending["vending_ricarica_pdf"]
+sales = create_sales_router(
+    get_database=lambda: db,
+    cap_limit=_cap,
+    product_code_text=_product_code_text,
+    normalize_vending_column=_normalize_vending_column,
+    session_kwargs=_session_kwargs,
+    run_transactionally=lambda operation: _run_transactionally(operation),
+    sync_product_vending_stock=lambda *args, **kwargs: _sync_product_vending_stock(*args, **kwargs),
+)
+sales_router = sales["router"]
+list_vendite = sales["list_vendite"]
+add_vendita = sales["add_vendita"]
+del_vendita = sales["del_vendita"]
+ultima_vendita_manuale = sales["ultima_vendita_manuale"]
+annulla_vendita_manuale = sales["annulla_vendita_manuale"]
 orders = create_orders_router(
     get_database=lambda: db,
     cap_limit=_cap,
@@ -3922,6 +3693,7 @@ api.include_router(audit_router)
 api.include_router(backup_router)
 api.include_router(orders_router)
 api.include_router(vending_router)
+api.include_router(sales_router)
 api.include_router(real_stock_router)
 api.include_router(inventory_analytics_router)
 api.include_router(products_router)
