@@ -196,8 +196,8 @@ Prossimi passi tecnici:
    PDF/Excel, e il dashboard KPI sono separati mantenendo route e payload
    compatibili. Le vendite giornaliere, incluse operazioni bulk e Cassa Rapida,
    sono separate. Anche parsing e deduplicazione del CSV vending sono isolati;
-   preparazione, registro contabile e relativi endpoint sono ora separati.
-   Resta da estrarre il ciclo fisico preview/import/annullo delle vendite CSV.
+   preparazione, registro contabile e ciclo fisico preview/import/annullo sono
+   ora completamente separati. Restano Import Excel e Smart Venue.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 
