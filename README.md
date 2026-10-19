@@ -195,7 +195,8 @@ Prossimi passi tecnici:
    listino ADM sono già isolati. Anche Auto-Order, inclusi conferma ed export
    PDF/Excel, e il dashboard KPI sono separati mantenendo route e payload
    compatibili. Le vendite giornaliere, incluse operazioni bulk e Cassa Rapida,
-   sono separate; resta da estrarre l’import CSV vending.
+   sono separate. Anche parsing e deduplicazione del CSV vending sono isolati;
+   restano da estrarre preparazione, registro contabile e relativi endpoint.
 2. Separazione contanti/pagamenti elettronici nella Cassa Rapida, quando il
    flusso POS verrà utilizzato realmente.
 

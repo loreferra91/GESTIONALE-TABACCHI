@@ -14,7 +14,6 @@ import secrets
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
 from decimal import Decimal
 
 if __package__:
@@ -48,6 +47,15 @@ if __package__:
         parse_sale_date as _parse_sale_date,
         parse_utc_datetime as _parse_utc_datetime,
         vending_payment_bucket as _vending_payment_bucket,
+    )
+    from .csv_vending import (
+        create_csv_vending_parser,
+        csv_vending_datetime as _csv_vending_datetime,
+        filter_new_csv_vending_rows as _filter_new_csv_vending_rows,
+        latest_historical_vending_datetime as _latest_historical_vending_datetime,
+        local_sale_datetime as _local_sale_datetime,
+        normalize_vending_column as _normalize_vending_column,
+        parse_sale_datetime as _parse_sale_datetime,
     )
     from .import_history_router import (
         create_import_history_router,
@@ -108,6 +116,15 @@ else:
         parse_sale_date as _parse_sale_date,
         parse_utc_datetime as _parse_utc_datetime,
         vending_payment_bucket as _vending_payment_bucket,
+    )
+    from csv_vending import (
+        create_csv_vending_parser,
+        csv_vending_datetime as _csv_vending_datetime,
+        filter_new_csv_vending_rows as _filter_new_csv_vending_rows,
+        latest_historical_vending_datetime as _latest_historical_vending_datetime,
+        local_sale_datetime as _local_sale_datetime,
+        normalize_vending_column as _normalize_vending_column,
+        parse_sale_datetime as _parse_sale_datetime,
     )
     from import_history_router import (
         create_import_history_router,
@@ -832,245 +849,6 @@ async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> b
     return bytes(buf)
 
 
-def _csv_vending_datetime(value: Any) -> str:
-    """Normalizza le date esportate dal distributore in un ISO filtrabile."""
-    text = str(value or "").strip()
-    if not text:
-        return datetime.now(timezone.utc).isoformat()
-    normalized = text.replace("Z", "+00:00")
-    try:
-        return datetime.fromisoformat(normalized).isoformat()
-    except ValueError:
-        pass
-    for fmt in (
-        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
-        "%d/%m/%y %H:%M:%S", "%d/%m/%y %H:%M",
-        "%d-%m-%y %H:%M:%S", "%d-%m-%y %H:%M",
-        "%d/%m/%Y", "%d-%m-%Y",
-        "%d/%m/%y", "%d-%m-%y",
-    ):
-        try:
-            return datetime.strptime(text, fmt).isoformat()
-        except ValueError:
-            continue
-    raise ValueError(f"data non riconosciuta: {text}")
-
-
-def _normalize_vending_column(value: Any) -> str:
-    """Converte le colonne esportate come ``1-B02`` nel codice interno ``B02``."""
-    column = re.sub(r"\s+", "", str(value or "").strip().upper())
-    match = re.fullmatch(r"\d+[-/]([A-Z]+\d+)", column)
-    return match.group(1) if match else column
-
-
-def _parse_csv_vending(raw: str, pagamento: str = "CONTANTI") -> Dict[str, Any]:
-    """Condivide parsing e validazione tra anteprima e import effettivo."""
-    import csv
-    sample = raw[:2000]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        delim = dialect.delimiter
-    except Exception:
-        delim = ";" if sample.count(";") > sample.count(",") else ","
-    reader = csv.DictReader(io.StringIO(raw), delimiter=delim)
-    # normalizza header
-    def norm(s): return re.sub(r"\s+", " ", (s or "").strip().lower())
-    field_map = {norm(k): k for k in (reader.fieldnames or [])}
-    def pick(row, *keys):
-        for k in keys:
-            actual = field_map.get(norm(k))
-            if actual and row.get(actual) not in (None, ""):
-                return row.get(actual)
-        return None
-
-    skipped = 0
-    errors = []
-    rows = []
-    for i, row in enumerate(reader):
-        try:
-            codice = str(pick(row, "codice", "codice aams", "cod aams", "cod", "aams") or "").strip()
-            nome = str(pick(row, "nome prodotto", "prodotto", "descrizione", "articolo") or "").strip()
-            prezzo = pick(row, "prezzo", "importo")
-            data = pick(row, "data", "date")
-            colonna = _normalize_vending_column(pick(row, "colonna", "column"))
-            categoria = str(pick(row, "categoria", "tipo") or "").strip()
-            pag = str(pick(row, "pagamento", "payment") or pagamento).strip().upper() or pagamento.upper()
-
-            if not codice and not nome:
-                skipped += 1
-                continue
-            prezzo_f = nonnegative_money(prezzo) if prezzo not in (None, "") else 0.0
-            data_iso = _csv_vending_datetime(data)
-            rows.append({
-                "riga": i + 2,
-                "data": data_iso,
-                "codice": codice,
-                "nome": nome,
-                "prezzo": prezzo_f,
-                # Freeze the pre-hardening fingerprint: rounding money must not
-                # turn a previously imported fractional-cent row into a new sale.
-                "_identity_price": f"{float(str(prezzo or 0).replace(',', '.')):.2f}",
-                "colonna": colonna,
-                "categoria": categoria,
-                "pagamento": pag,
-            })
-        except Exception as exc:
-            errors.append({"riga": i + 2, "errore": str(exc)})
-    return {"righe": rows, "saltati": skipped, "errori": errors, "delimitatore": delim}
-
-
-def _summarize_vending_csv(parsed: Dict[str, Any]) -> Dict[str, Any]:
-    """Riepiloga l'intero CSV senza applicare filtri dello storico Excel."""
-    payment_counts: Dict[str, int] = {}
-    payment_amounts: Dict[str, float] = {}
-    dates = []
-    for row in parsed.get("righe", []):
-        bucket = _vending_payment_bucket(row.get("pagamento"))
-        payment_counts[bucket] = payment_counts.get(bucket, 0) + 1
-        payment_amounts[bucket] = money_sum([payment_amounts.get(bucket, 0), row.get("prezzo") or 0])
-        parsed_date = _parse_sale_datetime(row.get("data"))
-        if parsed_date:
-            dates.append(parsed_date)
-    electronic = money_sum(payment_amounts.get(bucket, 0) for bucket in ("CARTE", "PAGOBANCOMAT", "ALTRO_ELETTRONICO"))
-    total = money_sum(payment_amounts.values())
-    return {
-        "righe": len(parsed.get("righe", [])),
-        "saltati": int(parsed.get("saltati", 0)),
-        "errori": parsed.get("errori", []),
-        "pagamenti": payment_counts,
-        "importi_pagamenti": payment_amounts,
-        "totale_elettronici": electronic,
-        "totale": total,
-        "data_da": min(dates).isoformat() if dates else None,
-        "data_a": max(dates).isoformat() if dates else None,
-    }
-
-
-def _parse_sale_datetime(value: Any):
-    """Normalizza data e ora delle vendite senza perdere il dettaglio orario."""
-    text = str(value or "").strip()
-    if not text:
-        return None
-    normalized = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        parsed = None
-    if parsed:
-        return parsed.replace(tzinfo=None)
-    for fmt in (
-        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
-        "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
-        "%d/%m/%y %H:%M:%S", "%d/%m/%y %H:%M",
-        "%d-%m-%y %H:%M:%S", "%d-%m-%y %H:%M",
-        "%d/%m/%Y", "%d-%m-%Y",
-        "%d/%m/%y", "%d-%m-%y",
-    ):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def _latest_historical_vending_datetime(documents: List[Dict[str, Any]]):
-    """Restituisce l'ultimo timestamp già incluso nello storico vending Excel."""
-    parsed_datetimes = []
-    for document in documents:
-        raw = document.get("raw") or []
-        # DB_STORICO_VENDING_EXT: DATA_ORA è la seconda colonna. DATA resta
-        # il fallback per vecchi file che non conservano l'orario.
-        value = raw[1] if len(raw) > 1 and raw[1] else (raw[2] if len(raw) > 2 else None)
-        parsed = _parse_sale_datetime(value)
-        if parsed:
-            parsed_datetimes.append(parsed)
-    return max(parsed_datetimes, default=None)
-
-
-def _filter_new_csv_vending_rows(
-    rows: List[Dict[str, Any]], historical_documents: List[Dict[str, Any]]
-) -> tuple[List[Dict[str, Any]], Any]:
-    """Tiene solo le righe successive all'ultima vendita presente nell'Excel."""
-    cutoff = _latest_historical_vending_datetime(historical_documents)
-    if not cutoff:
-        return rows, None
-    return [row for row in rows if (_parse_sale_datetime(row.get("data")) or datetime.min) > cutoff], cutoff
-
-
-def _csv_vending_event_base(row: Dict[str, Any]) -> str:
-    """Identifica un tipo di riga senza confondere pezzi identici della stessa vendita."""
-    payload = {
-        "data": str(row.get("data") or ""),
-        "colonna": _normalize_vending_column(row.get("colonna")),
-        "codice": _product_code_text(row.get("codice")),
-        "prezzo": row.get("_identity_price", f"{float(row.get('prezzo') or 0):.2f}"),
-        "pagamento": str(row.get("pagamento") or "").strip().upper(),
-    }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _assign_csv_vending_event_keys(rows: List[Dict[str, Any]]) -> None:
-    """Assegna identità esatta e contabile a ogni riga del distributore.
-
-    ``csv_event_key`` conserva i secondi ed è utile per l'audit puntuale.
-    ``csv_accounting_key`` usa invece la firma compatibile al minuto: resta
-    stabile quando due export della stessa vendita alternano timestamp con e
-    senza secondi. L'occorrenza mantiene distinti più pezzi realmente venduti
-    nello stesso minuto con gli stessi dati.
-    """
-    exact_occurrences: Dict[str, int] = {}
-    for row in rows:
-        base = _csv_vending_event_base(row)
-        occurrence = exact_occurrences.get(base, 0) + 1
-        exact_occurrences[base] = occurrence
-        row["csv_event_occurrence"] = occurrence
-        row["csv_event_key"] = f"{base}:{occurrence}"
-    _assign_csv_vending_accounting_keys(rows)
-
-
-def _csv_vending_compatibility_key(row: Dict[str, Any]) -> str:
-    """Chiave al minuto per confrontare export vecchi e nuovi del distributore.
-
-    Gli export storici omettevano i secondi (``07/10/2026 23:58``), mentre
-    quelli recenti li includono (``07-10-2026 23:58:16``). La chiave evento
-    esatta resta la deduplicazione principale; questa firma viene usata solo
-    come compatibilita' per le righe che non hanno trovato una corrispondenza
-    esatta.
-    """
-    parsed = _parse_sale_datetime(row.get("data"))
-    minute = parsed.strftime("%Y-%m-%dT%H:%M") if parsed else str(row.get("data") or "")[:16]
-    raw_code = _product_code_text(row.get("codice"))
-    numeric_code = adm_numeric_code(raw_code) if raw_code.isdigit() or raw_code.startswith("AMMS") else ""
-    identity = numeric_code or raw_code
-    if not identity:
-        identity = re.sub(
-            r"\s+", " ", str(row.get("nome") or row.get("descrizione") or "").strip().upper()
-        )
-    payload = {
-        "minuto": minute,
-        "colonna": _normalize_vending_column(row.get("colonna")),
-        "prodotto": identity,
-        "prezzo": row.get("_identity_price", f"{float(row.get('prezzo', row.get('importo', 0)) or 0):.2f}"),
-        "pagamento": _vending_payment_bucket(row.get("pagamento")),
-    }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _assign_csv_vending_accounting_keys(rows: List[Dict[str, Any]]) -> None:
-    """Assegna la chiave contabile v2 senza modificare l'identità esatta."""
-    occurrences: Dict[str, int] = {}
-    for row in rows:
-        accounting_base = _csv_vending_compatibility_key(row)
-        occurrence = occurrences.get(accounting_base, 0) + 1
-        occurrences[accounting_base] = occurrence
-        row["csv_event_compatibility_key"] = accounting_base
-        row["csv_accounting_occurrence"] = occurrence
-        row["csv_accounting_key"] = f"{accounting_base}:{occurrence}"
-
-
 async def _exclude_imported_csv_vending_rows(
     rows: List[Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], int]:
@@ -1136,18 +914,6 @@ async def _exclude_imported_csv_vending_rows(
 
     new_rows = [row for row in rows if id(row) not in duplicate_ids]
     return new_rows, len(rows) - len(new_rows)
-
-
-def _local_sale_datetime(value: Any) -> Optional[datetime]:
-    """Confronta timestamp UTC di sistema e orari locali esportati dalla vending."""
-    parsed = _parse_sale_datetime(value)
-    if not parsed:
-        return None
-    text = str(value or "")
-    if parsed.tzinfo is None and not re.search(r"(?:Z|[+-]\d\d:\d\d)$", text):
-        return parsed
-    aware = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    return aware.astimezone(ZoneInfo("Europe/Rome")).replace(tzinfo=None)
 
 
 async def _latest_restored_vending_snapshot_at() -> Optional[str]:
@@ -3158,6 +2924,19 @@ async def import_excel_full(
 
 
 # ------------------------- Register -------------------------
+csv_vending_parser = create_csv_vending_parser(
+    normalize_nonnegative_money=nonnegative_money,
+    sum_money=money_sum,
+    payment_bucket=_vending_payment_bucket,
+    product_code_text=_product_code_text,
+    adm_numeric_code=adm_numeric_code,
+)
+_parse_csv_vending = csv_vending_parser["parse_csv_vending"]
+_summarize_vending_csv = csv_vending_parser["summarize_vending_csv"]
+_csv_vending_event_base = csv_vending_parser["csv_vending_event_base"]
+_assign_csv_vending_event_keys = csv_vending_parser["assign_csv_vending_event_keys"]
+_csv_vending_compatibility_key = csv_vending_parser["csv_vending_compatibility_key"]
+_assign_csv_vending_accounting_keys = csv_vending_parser["assign_csv_vending_accounting_keys"]
 vending = create_vending_router(
     get_database=lambda: db,
     get_params=lambda: get_params(),
