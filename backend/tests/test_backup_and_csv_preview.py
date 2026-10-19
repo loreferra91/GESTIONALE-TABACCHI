@@ -219,6 +219,52 @@ def test_restore_lock_rejects_concurrent_restore(monkeypatch):
     assert error.status_code == 409
 
 
+def test_restore_collections_compensates_standalone_failure(monkeypatch):
+    database = AsyncMongoMockClient()["restore_compensation"]
+
+    class FailingParametersCollection:
+        def __init__(self, collection):
+            self.collection = collection
+
+        def find(self, *args, **kwargs):
+            return self.collection.find(*args, **kwargs)
+
+        async def delete_many(self, *args, **kwargs):
+            return await self.collection.delete_many(*args, **kwargs)
+
+        async def insert_many(self, documents, **kwargs):
+            if any(document.get("nome") == "NEW_PARAM" for document in documents):
+                raise RuntimeError("simulated insert failure")
+            return await self.collection.insert_many(documents, **kwargs)
+
+    class RestoreDatabase:
+        def __getitem__(self, name):
+            if name == "parametri":
+                return FailingParametersCollection(database.parametri)
+            return database[name]
+
+    monkeypatch.setattr(server, "db", RestoreDatabase())
+
+    async def scenario():
+        await database.prodotti.insert_one({"id": "old-product", "codice": "OLD"})
+        await database.parametri.insert_one({"nome": "OLD_PARAM", "valore": 1})
+
+        with pytest.raises(RuntimeError, match="simulated insert failure"):
+            await server._restore_collections({
+                "prodotti": [{"id": "new-product", "codice": "NEW"}],
+                "parametri": [{"nome": "NEW_PARAM", "valore": 2}],
+            })
+        return (
+            await database.prodotti.find({}, {"_id": 0}).to_list(None),
+            await database.parametri.find({}, {"_id": 0}).to_list(None),
+        )
+
+    products, parameters = asyncio.run(scenario())
+
+    assert products == [{"id": "old-product", "codice": "OLD"}]
+    assert parameters == [{"nome": "OLD_PARAM", "valore": 1}]
+
+
 def test_csv_preview_preserves_payment_types_and_normalizes_dates():
     raw = (
         "Data;Nome prodotto;Prezzo;Colonna;Codice AAMS;Categoria;Pagamento\n"

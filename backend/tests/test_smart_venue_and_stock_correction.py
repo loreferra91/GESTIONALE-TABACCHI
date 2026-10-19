@@ -14,6 +14,41 @@ os.environ.setdefault("DB_NAME", "gestionale_test")
 import backend.server as server
 
 
+def test_manual_order_cancellation_compensates_stock_purchase_and_smart_venue(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "id": "p1", "codice": "P1", "descrizione": "Prodotto",
+            "giacenza_negozio": 10, "acquistati": 30,
+        })
+        await database.smart_venue.insert_one({"id": "sv1", "codice": "P1", "smart_venue": 4})
+        created = await server.add_ordine(server.OrdineIn(
+            data="2026-10-19", codice="P1", descrizione="Prodotto",
+            quantita=3, prezzo=5,
+        ))
+        cancelled = await server.del_ordine(created["id"])
+        repeated = await server.del_ordine(created["id"])
+        return (
+            cancelled,
+            repeated,
+            await database.prodotti.find_one({"codice": "P1"}, {"_id": 0}),
+            await database.smart_venue.find_one({"codice": "P1"}, {"_id": 0}),
+            await database.storico_ordini.find_one({"id": created["id"]}, {"_id": 0}),
+            await database.storico_ordini.count_documents({"annullato": {"$ne": True}}),
+        )
+
+    cancelled, repeated, product, smart, order, active_orders = asyncio.run(scenario())
+
+    assert cancelled == {"ok": True, "gia_annullato": False, "id": order["id"]}
+    assert repeated == {"ok": True, "gia_annullato": True, "id": order["id"]}
+    assert product["giacenza_negozio"] == 10
+    assert product["acquistati"] == 30
+    assert smart["smart_venue"] == 4
+    assert order["annullato"] is True
+    assert active_orders == 0
+
+
 def test_bulk_text_parser_groups_multiple_barcodes_by_adm_code():
     text = (
         "4033100045844 - BENSON BLUE - 02982 - Sigarette\n"

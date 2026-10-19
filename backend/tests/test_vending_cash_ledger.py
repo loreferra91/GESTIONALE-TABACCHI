@@ -3,6 +3,7 @@ import io
 import os
 from datetime import datetime, timedelta
 
+import pytest
 from mongomock_motor import AsyncMongoMockClient
 from starlette.datastructures import UploadFile
 
@@ -550,6 +551,54 @@ def test_registering_and_deleting_withdrawal_updates_vending_cash(monkeypatch):
 
     asyncio.run(server.del_prelievo_vending(movement["id"]))
     assert asyncio.run(server._vending_cash_balance()) == 237.55
+
+
+def test_withdrawal_rejects_insufficient_vending_cash_without_writes(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 20,
+        })
+        with pytest.raises(server.HTTPException) as caught:
+            await server.add_prelievo_vending(server.PrelievoVendingIn(
+                data="2026-10-04", importo=20.01, descrizione="Troppo alto",
+                idempotency_key="withdrawal-insufficient-001",
+            ))
+        return (
+            caught.value,
+            await server._vending_cash_balance(),
+            await database.prelievi_vending.count_documents({}),
+        )
+
+    error, balance, movements = asyncio.run(scenario())
+
+    assert error.status_code == 409
+    assert "insufficiente" in str(error.detail).lower()
+    assert balance == 20
+    assert movements == 0
+
+
+def test_withdrawal_idempotency_does_not_debit_vending_cash_twice(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 100,
+        })
+        body = server.PrelievoVendingIn(
+            data="2026-10-04", importo=25, descrizione="Test",
+            idempotency_key="withdrawal-idempotency-001",
+        )
+        first = await server.add_prelievo_vending(body)
+        second = await server.add_prelievo_vending(body)
+        return first, second, await server._vending_cash_balance(), await database.prelievi_vending.count_documents({})
+
+    first, second, balance, movements = asyncio.run(scenario())
+
+    assert first["id"] == second["id"]
+    assert balance == 75
+    assert movements == 1
 
 
 def test_updating_opening_cash_adjusts_current_balance_by_the_delta(monkeypatch):

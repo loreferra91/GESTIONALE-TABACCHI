@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
+import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
@@ -9,6 +9,8 @@ export default function Cassa() {
   const [data, setData] = useState({ movimenti: [], saldo: 0 });
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, tipo: "ENTRATA", importo: 0, descrizione: "", operatore: "" });
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(null);
 
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(data.movimenti || [], {
     initial: "data", dir: "desc",
@@ -16,23 +18,34 @@ export default function Cassa() {
   });
 
   const load = async () => {
-    const r = await api.get("/cassa");
-    setData(r.data);
+    try {
+      const r = await api.get("/cassa");
+      setData(r.data);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile caricare la cassa"));
+    }
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
-    await api.post("/cassa", form);
-    toast.success("Movimento registrato");
-    setForm({ ...form, importo: 0, descrizione: "" });
-    load();
+    setSaving(true);
+    try {
+      await api.post("/cassa", form);
+      toast.success("Movimento registrato");
+      setForm({ ...form, importo: 0, descrizione: "" });
+      await load();
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile registrare il movimento"));
+    } finally { setSaving(false); }
   };
 
   const del = async (id) => {
     if (!window.confirm("Eliminare?")) return;
-    await api.delete(`/cassa/${id}`);
-    load();
+    setDeleting(id);
+    try { await api.delete(`/cassa/${id}`); await load(); }
+    catch (error) { toast.error(apiErrorMessage(error, "Impossibile eliminare il movimento")); }
+    finally { setDeleting(null); }
   };
 
   return (
@@ -50,7 +63,7 @@ export default function Cassa() {
           </select>
           <input data-testid="cassa-importo" type="number" step="0.01" placeholder="Importo €" value={form.importo} onChange={e => setForm({...form, importo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <input data-testid="cassa-desc" placeholder="Descrizione" value={form.descrizione} onChange={e => setForm({...form, descrizione: e.target.value})} className="border rounded-md px-3 py-2 text-sm md:col-span-2" />
-          <button data-testid="cassa-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors">Registra</button>
+          <button data-testid="cassa-save-btn" onClick={save} disabled={saving} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">{saving ? "Registro…" : "Registra"}</button>
         </div>
       </Card>
 
@@ -80,7 +93,7 @@ export default function Cassa() {
                   <td className={`font-mono text-right font-semibold ${r.tipo === "USCITA" ? "text-red-600" : "text-emerald-700"}`}>
                     {r.tipo === "USCITA" ? "−" : "+"} {formatEur(r.importo)}
                   </td>
-                  <td className="text-right"><button onClick={() => del(r.id)} className="text-red-600 text-xs">✕</button></td>
+                  <td className="text-right"><button onClick={() => del(r.id)} disabled={deleting === r.id} className="text-red-600 text-xs disabled:opacity-40">✕</button></td>
                 </tr>
               ))}
               {rows.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nessun movimento</td></tr>}

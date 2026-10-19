@@ -48,6 +48,7 @@ def create_excel_import_router(
     get_database,
     read_capped,
     create_backup_snapshot,
+    restore_backup_collections,
     record_import_history,
     import_smart_venue,
     sync_product_vending_stock,
@@ -591,6 +592,33 @@ def create_excel_import_router(
         report: Dict[str, Any] = {}
         completed_steps = 0
 
+        async def rollback_import(error: Exception) -> None:
+            """Restore the explicit pre-import snapshot after a failed sheet."""
+            try:
+                await restore_backup_collections(backup["id"])
+            except Exception:
+                set_import_progress(
+                    import_job_id,
+                    "failed",
+                    "Import fallito e rollback non riuscito: intervento necessario",
+                    10,
+                    10,
+                    backup_id=backup["id"],
+                )
+                raise HTTPException(
+                    500,
+                    "Import fallito e rollback automatico non riuscito; ripristinare il backup "
+                    f"{backup['id']}",
+                ) from error
+            set_import_progress(
+                import_job_id,
+                "failed",
+                "Import fallito: dati ripristinati dal backup di sicurezza",
+                10,
+                10,
+                backup_id=backup["id"],
+            )
+
         async def run_sheet(name: str, importer):
             nonlocal completed_steps
             set_import_progress(
@@ -600,6 +628,12 @@ def create_excel_import_router(
             if name in workbook.sheetnames:
                 found_sheets.append(name)
                 report[name] = await importer(workbook[name])
+                errors = int(report[name].get("errori") or 0)
+                if errors:
+                    raise HTTPException(
+                        422,
+                        f"Foglio {name}: {errors} righe non valide; nessun dato è stato importato",
+                    )
             else:
                 missing_sheets.append(name)
             completed_steps += 1
@@ -613,38 +647,42 @@ def create_excel_import_router(
             adm_aliases = adm_alias_index(
                 workbook["LISTINO ADM"].iter_rows(min_row=2, values_only=True)
             )
-        if "RIEP_VENDITA" in workbook.sheetnames:
-            await run_sheet("RIEP_VENDITA", lambda ws: import_products(ws, adm_aliases))
-            product_report_key = "RIEP_VENDITA"
-        elif stock_sheet is not None:
-            stock_worksheet, stock_header_row, stock_columns = stock_sheet
-            product_report_key = stock_worksheet.title
-            set_import_progress(
-                import_job_id, "running",
-                f"Aggiornamento giacenze dal foglio {stock_worksheet.title}",
-                2, 10, sheet=stock_worksheet.title,
-            )
-            found_sheets.append(stock_worksheet.title)
-            report[product_report_key] = await import_product_stock_sheet(
-                stock_worksheet, stock_header_row, stock_columns, adm_aliases,
-            )
-            completed_steps += 1
-            set_import_progress(
-                import_job_id, "running",
-                f"Giacenze dal foglio {stock_worksheet.title} completate",
-                3, 10, sheet=stock_worksheet.title, result=report[product_report_key],
-            )
-        else:
-            await run_sheet("RIEP_VENDITA", lambda ws: import_products(ws, adm_aliases))
-            product_report_key = "RIEP_VENDITA"
+        try:
+            if "RIEP_VENDITA" in workbook.sheetnames:
+                await run_sheet("RIEP_VENDITA", lambda ws: import_products(ws, adm_aliases))
+                product_report_key = "RIEP_VENDITA"
+            elif stock_sheet is not None:
+                stock_worksheet, stock_header_row, stock_columns = stock_sheet
+                product_report_key = stock_worksheet.title
+                set_import_progress(
+                    import_job_id, "running",
+                    f"Aggiornamento giacenze dal foglio {stock_worksheet.title}",
+                    2, 10, sheet=stock_worksheet.title,
+                )
+                found_sheets.append(stock_worksheet.title)
+                report[product_report_key] = await import_product_stock_sheet(
+                    stock_worksheet, stock_header_row, stock_columns, adm_aliases,
+                )
+                completed_steps += 1
+                set_import_progress(
+                    import_job_id, "running",
+                    f"Giacenze dal foglio {stock_worksheet.title} completate",
+                    3, 10, sheet=stock_worksheet.title, result=report[product_report_key],
+                )
+            else:
+                await run_sheet("RIEP_VENDITA", lambda ws: import_products(ws, adm_aliases))
+                product_report_key = "RIEP_VENDITA"
 
-        await run_sheet("(SMART VENUE)", import_smart_venue)
-        await run_sheet("LISTINO ADM", import_price_list)
-        await run_sheet("RICARICA VENDING", import_vending)
-        await run_sheet("STORICO_ORDINI", import_order_history)
-        await run_sheet("PARAMETRI", import_parameters)
-        await run_sheet("DB_STORICO_VEND", import_historical_sales)
-        await run_sheet("DB_STORICO_VENDING_EXT", import_extended_vending_history)
+            await run_sheet("(SMART VENUE)", import_smart_venue)
+            await run_sheet("LISTINO ADM", import_price_list)
+            await run_sheet("RICARICA VENDING", import_vending)
+            await run_sheet("STORICO_ORDINI", import_order_history)
+            await run_sheet("PARAMETRI", import_parameters)
+            await run_sheet("DB_STORICO_VEND", import_historical_sales)
+            await run_sheet("DB_STORICO_VENDING_EXT", import_extended_vending_history)
+        except Exception as error:
+            await rollback_import(error)
+            raise
 
         totals = {
             "prodotti_inseriti": report.get(product_report_key, {}).get("inseriti", 0),

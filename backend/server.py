@@ -406,6 +406,10 @@ async def on_start():
         # Gli import fanno upsert su queste chiavi: senza indici Atlas deve
         # scandire le collezioni per ogni riga, anche quando usiamo bulk_write.
         await asyncio.gather(
+            # Business-key uniqueness was verified on the 2026-10-19 backup.
+            # Keep the existing non-unique indexes until a controlled live-DB
+            # migration can inspect duplicates and replace the old index options
+            # without risking an IndexOptionsConflict at application startup.
             db.prodotti.create_index("codice"),
             db.listino_adm.create_index("codice"),
             db.vending.create_index("colonna"),
@@ -828,6 +832,19 @@ async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> b
     return bytes(buf)
 
 
+async def _restore_backup_snapshot_collections(snapshot_id: str) -> None:
+    """Restore only the collections contained in a known internal snapshot."""
+    meta = await db.backup_snapshots.find_one(
+        {"id": snapshot_id, "status": {"$ne": "PRUNED"}},
+        {"_id": 0, "counts": 1},
+    )
+    if not meta:
+        raise RuntimeError(f"Backup di sicurezza {snapshot_id} non trovato")
+    names = [name for name in (meta.get("counts") or {}) if name in BACKUP_COLLECTIONS]
+    collections = await _backup_documents(snapshot_id, names)
+    await _run_transactionally(lambda session: _restore_collections(collections, session))
+
+
 # ------------------------- Register -------------------------
 _is_electronic_inhalation = is_electronic_inhalation
 _electronic_inhalation_filter = electronic_inhalation_filter
@@ -836,6 +853,7 @@ excel_import = create_excel_import_router(
     get_database=lambda: db,
     read_capped=_read_capped,
     create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    restore_backup_collections=lambda snapshot_id: _restore_backup_snapshot_collections(snapshot_id),
     record_import_history=lambda *args, **kwargs: record_import_history(*args, **kwargs),
     import_smart_venue=lambda worksheet: _import_smart_venue(worksheet),
     sync_product_vending_stock=lambda *args, **kwargs: _sync_product_vending_stock(*args, **kwargs),
@@ -967,6 +985,7 @@ orders = create_orders_router(
     product_model=Prodotto,
     categorize_description=_cat_from_desc,
     normalize_nonnegative_money=nonnegative_money,
+    record_audit_event=_record_audit_event,
 )
 orders_router = orders["router"]
 list_ordini = orders["list_ordini"]

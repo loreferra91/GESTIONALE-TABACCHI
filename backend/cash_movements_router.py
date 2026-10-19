@@ -123,7 +123,12 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
         )
         return money((state or {}).get("giacenza") or 0)
 
-    async def adjust_vending_cash_balance(amount: float, session=None):
+    async def adjust_vending_cash_balance(
+        amount: float,
+        session=None,
+        *,
+        require_nonnegative: bool = False,
+    ):
         database = get_database()
         kwargs = session_kwargs(session)
         delta = money_decimal(amount)
@@ -134,6 +139,11 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
             )
             previous = state.get("giacenza")
             updated = money(money_decimal(previous or 0) + delta)
+            if require_nonnegative and updated < 0:
+                raise HTTPException(
+                    409,
+                    f"Saldo vending insufficiente: disponibili {money(previous or 0):.2f} €",
+                )
             result = await database.cassa_vending_stato.update_one(
                 {"id": VENDING_CASH_STATE_ID, "giacenza": previous},
                 {"$set": {
@@ -230,9 +240,20 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
         if key:
             document["idempotency_key"] = key
         response = dict(document)
-        await database.prelievi_vending.insert_one(document)
         try:
-            await adjust_vending_cash_balance(-movement.importo)
+            await database.prelievi_vending.insert_one(document)
+        except DuplicateKeyError:
+            existing = await database.prelievi_vending.find_one(
+                {"idempotency_key": key}, {"_id": 0}
+            )
+            if existing:
+                return existing
+            raise HTTPException(409, "Prelievo già registrato")
+        try:
+            await adjust_vending_cash_balance(
+                -movement.importo,
+                require_nonnegative=True,
+            )
         except Exception:
             await database.prelievi_vending.delete_one({"id": document["id"]})
             raise

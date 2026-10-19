@@ -229,17 +229,42 @@ def create_backup_router(
         return collections
 
     async def restore_collections(collections, session=None):
+        """Replace backed-up collections, compensating on standalone Mongo.
+
+        Replica set/Atlas callers pass a transaction session, so Mongo rolls back
+        failures. Standalone Mongo has no multi-document transactions: preserve
+        an in-memory preimage and restore it if any delete/insert step fails.
+        """
         database = get_database()
         kwargs = session_kwargs(session)
-        for collection_name in BACKUP_COLLECTIONS:
-            if collection_name not in collections:
-                continue
-            await database[collection_name].delete_many({}, **kwargs)
-            documents = collections[collection_name]
-            for start in range(0, len(documents), 1000):
-                await database[collection_name].insert_many(
-                    documents[start:start + 1000], **kwargs
-                )
+        names = [name for name in BACKUP_COLLECTIONS if name in collections]
+        preimage = {}
+        if session is None:
+            for collection_name in names:
+                preimage[collection_name] = await database[collection_name].find(
+                    {}, {"_id": 0}
+                ).to_list(None)
+        try:
+            for collection_name in names:
+                await database[collection_name].delete_many({}, **kwargs)
+                documents = collections[collection_name]
+                for start in range(0, len(documents), 1000):
+                    await database[collection_name].insert_many(
+                        documents[start:start + 1000], **kwargs
+                    )
+        except Exception:
+            if session is None:
+                try:
+                    for collection_name in names:
+                        await database[collection_name].delete_many({})
+                        previous = preimage[collection_name]
+                        for start in range(0, len(previous), 1000):
+                            await database[collection_name].insert_many(
+                                previous[start:start + 1000]
+                            )
+                except Exception:
+                    logging.exception("Rollback del ripristino backup non riuscito")
+            raise
 
     @asynccontextmanager
     async def restore_lock():

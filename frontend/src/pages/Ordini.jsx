@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { api } from "../lib/api";
+import { api, apiErrorMessage } from "../lib/api";
 import { Badge, Card, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
@@ -9,6 +9,8 @@ export default function Ordini() {
   const [allRows, setAllRows] = useState([]);
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 10, prezzo: 0 });
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(null);
 
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRows, {
     initial: "data", dir: "desc",
@@ -16,23 +18,25 @@ export default function Ordini() {
   });
 
   const load = async () => {
-    const r = await api.get("/ordini");
-    setAllRows(r.data);
+    try { const r = await api.get("/ordini"); setAllRows(r.data); }
+    catch (error) { toast.error(apiErrorMessage(error, "Impossibile caricare gli ordini")); }
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async () => {
     if (!form.codice || !form.quantita) return toast.error("Codice e quantità richiesti");
-    await api.post("/ordini", form);
-    toast.success("Ordine registrato");
-    setForm({ ...form, codice: "", descrizione: "", quantita: 10, prezzo: 0 });
-    load();
+    setSaving(true);
+    try { await api.post("/ordini", form); toast.success("Ordine registrato"); setForm({ ...form, codice: "", descrizione: "", quantita: 10, prezzo: 0 }); await load(); }
+    catch (error) { toast.error(apiErrorMessage(error, "Impossibile registrare il carico")); }
+    finally { setSaving(false); }
   };
 
   const del = async (id) => {
     if (!window.confirm("Eliminare?")) return;
-    await api.delete(`/ordini/${id}`);
-    load();
+    setDeleting(id);
+    try { await api.delete(`/ordini/${id}`); await load(); }
+    catch (error) { toast.error(apiErrorMessage(error, "Impossibile annullare il carico")); }
+    finally { setDeleting(null); }
   };
 
   const totQ = rows.reduce((s, r) => s + (r.quantita || 0), 0);
@@ -48,7 +52,7 @@ export default function Ordini() {
           <input data-testid="ord-qta" type="number" placeholder="Qta" value={form.quantita} onChange={e => setForm({...form, quantita: parseInt(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono" />
           <div className="flex gap-2">
             <input data-testid="ord-prezzo" type="number" step="0.01" placeholder="Prezzo" value={form.prezzo} onChange={e => setForm({...form, prezzo: parseFloat(e.target.value) || 0})} className="border rounded-md px-3 py-2 text-sm font-mono flex-1" />
-            <button data-testid="ord-save-btn" onClick={save} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors">+</button>
+            <button data-testid="ord-save-btn" onClick={save} disabled={saving} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">{saving ? "…" : "+"}</button>
           </div>
         </div>
       </Card>
@@ -85,7 +89,7 @@ export default function Ordini() {
                   <td className="font-mono text-right font-semibold">{formatEur(r.quantita * r.prezzo)}</td>
                   <td className="text-xs text-slate-500">{r.file_sorgente}</td>
                   <td>{r.smart_venue_applicabile ? <Badge tone={r.caricato_smart_venue ? "ok" : "warning"}>{r.caricato_smart_venue ? "Confermato" : "Da confermare"}</Badge> : <span className="text-xs text-slate-400">Non previsto</span>}</td>
-                  <td className="text-right"><button onClick={() => del(r.id)} className="text-red-600 text-xs">✕</button></td>
+                  <td className="text-right"><button onClick={() => del(r.id)} disabled={deleting === r.id} className="text-red-600 text-xs disabled:opacity-40">✕</button></td>
                 </tr>
               ))}
             </tbody>

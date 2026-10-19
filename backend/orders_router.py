@@ -30,6 +30,9 @@ class OrdineStorico(BaseModel):
     caricato_smart_venue_da: Optional[str] = None
     operatore: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    annullato: bool = False
+    annullato_at: Optional[str] = None
+    annullato_da: Optional[str] = None
 
 
 class OrdineIn(BaseModel):
@@ -81,6 +84,7 @@ def create_orders_router(
     product_model,
     categorize_description,
     normalize_nonnegative_money,
+    record_audit_event,
 ):
     router = APIRouter()
 
@@ -195,7 +199,7 @@ def create_orders_router(
     async def list_ordini(limit: int = 1000):
         capped_limit = cap_limit(limit)
         return await get_database().storico_ordini.find(
-            {}, {"_id": 0}
+            {"annullato": {"$ne": True}}, {"_id": 0}
         ).sort("data", -1).limit(capped_limit).to_list(capped_limit)
 
     @router.post("/ordini")
@@ -266,9 +270,117 @@ def create_orders_router(
         return {**updated, "ok": True, "gia_confermato": False}
 
     @router.delete("/ordini/{order_id}")
-    async def del_ordine(order_id: str):
-        await get_database().storico_ordini.delete_one({"id": order_id})
-        return {"ok": True}
+    async def del_ordine(order_id: str, request: Request = None):
+        """Annulla un carico manuale compensandone tutti gli effetti fisici.
+
+        Lo storico rimane disponibile per audit, ma non viene più incluso nella
+        lista operativa. I carichi bulk hanno il proprio ciclo batch e non
+        possono essere annullati da questa route riga-per-riga.
+        """
+        database = get_database()
+
+        async def annul(session):
+            kwargs = session_kwargs(session)
+            order = await database.storico_ordini.find_one(
+                {"id": order_id}, {"_id": 0}, **kwargs
+            )
+            if not order:
+                raise HTTPException(404, "Movimento di carico non trovato")
+            if order.get("batch_id"):
+                raise HTTPException(
+                    409,
+                    "I carichi batch non possono essere annullati riga per riga",
+                )
+            if order.get("annullato"):
+                return {"ok": True, "gia_annullato": True, "id": order_id}
+
+            code = str(order.get("codice") or "").strip()
+            quantity = int(order.get("quantita") or 0)
+            if not code or quantity <= 0:
+                raise HTTPException(409, "Movimento di carico non compensabile")
+
+            product = await database.prodotti.find_one({"codice": code}, {"_id": 1}, **kwargs)
+            if not product:
+                raise HTTPException(409, f"Prodotto {code} non trovato: annullamento bloccato")
+
+            updated_product = await database.prodotti.update_one(
+                {
+                    "codice": code,
+                    "giacenza_negozio": {"$gte": quantity},
+                    "acquistati": {"$gte": quantity},
+                },
+                {"$inc": {"giacenza_negozio": -quantity, "acquistati": -quantity}},
+                **kwargs,
+            )
+            if updated_product.matched_count != 1:
+                raise HTTPException(
+                    409,
+                    "Il prodotto è cambiato: la giacenza o gli acquistati non consentono l'annullamento",
+                )
+
+            smart_venue_changed = False
+            try:
+                if order.get("smart_venue_applicabile"):
+                    smart = await database.smart_venue.find_one(
+                        {"codice": code}, {"_id": 1, "smart_venue": 1}, **kwargs
+                    )
+                    if not smart or int(smart.get("smart_venue") or 0) < quantity:
+                        raise HTTPException(
+                            409,
+                            "Saldo Smart Venue insufficiente: annullamento bloccato",
+                        )
+                    changed = await database.smart_venue.update_one(
+                        {"codice": code, "smart_venue": {"$gte": quantity}},
+                        {"$inc": {"smart_venue": -quantity}, "$set": {
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }},
+                        **kwargs,
+                    )
+                    if changed.matched_count != 1:
+                        raise HTTPException(409, "Smart Venue modificato contemporaneamente")
+                    smart_venue_changed = True
+
+                now = datetime.now(timezone.utc).isoformat()
+                marked = await database.storico_ordini.update_one(
+                    {"id": order_id, "annullato": {"$ne": True}},
+                    {"$set": {
+                        "annullato": True,
+                        "annullato_at": now,
+                        "annullato_da": request_operator(request),
+                    }},
+                    **kwargs,
+                )
+                if marked.matched_count != 1:
+                    raise HTTPException(409, "Movimento cambiato durante l'annullamento")
+            except Exception:
+                if session is None:
+                    if smart_venue_changed:
+                        await database.smart_venue.update_one(
+                            {"codice": code}, {"$inc": {"smart_venue": quantity}}
+                        )
+                    await database.prodotti.update_one(
+                        {"codice": code},
+                        {"$inc": {"giacenza_negozio": quantity, "acquistati": quantity}},
+                    )
+                raise
+
+            return {"ok": True, "gia_annullato": False, "id": order_id, "ordine": order}
+
+        result = await run_transactionally(annul)
+        if not result["gia_annullato"]:
+            order = result.pop("ordine")
+            await record_audit_event(
+                "ANNULLATO",
+                "ORDINE_MANUALE",
+                order_id,
+                prima=order,
+                dopo={
+                    "annullato": True,
+                    "codice": order.get("codice"),
+                    "quantita": order.get("quantita"),
+                },
+            )
+        return result
 
     @router.post("/ordini/bulk")
     async def bulk_carico(body: BulkOrdineIn, request: Request = None):
