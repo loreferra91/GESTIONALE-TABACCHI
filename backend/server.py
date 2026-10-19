@@ -72,6 +72,7 @@ if __package__:
         import_includes_accounting as _import_includes_accounting,
     )
     from .inventory_analytics_router import create_inventory_analytics_router
+    from .index_migrations import migrate_unique_business_indexes
     from .money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
     from .orders_router import (
@@ -156,6 +157,7 @@ else:
         import_includes_accounting as _import_includes_accounting,
     )
     from inventory_analytics_router import create_inventory_analytics_router
+    from index_migrations import migrate_unique_business_indexes
     from money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
     from orders_router import (
@@ -403,17 +405,12 @@ async def on_start():
                        for k, v in DEFAULT_PARAMS.items() if k not in existing]
             if missing:
                 await db.parametri.insert_many(missing)
+        unique_index_results = await migrate_unique_business_indexes(db)
+        logging.info("Business-key index migration: %s", unique_index_results)
         # Gli import fanno upsert su queste chiavi: senza indici Atlas deve
         # scandire le collezioni per ogni riga, anche quando usiamo bulk_write.
         await asyncio.gather(
-            # Business-key uniqueness was verified on the 2026-10-19 backup.
-            # Keep the existing non-unique indexes until a controlled live-DB
-            # migration can inspect duplicates and replace the old index options
-            # without risking an IndexOptionsConflict at application startup.
-            db.prodotti.create_index("codice"),
             db.listino_adm.create_index("codice"),
-            db.vending.create_index("colonna"),
-            db.parametri.create_index("nome"),
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
             db.vendite.create_index([("data", 1), ("codice", 1)]),
@@ -973,6 +970,7 @@ ultima_vendita_manuale = sales["ultima_vendita_manuale"]
 annulla_vendita_manuale = sales["annulla_vendita_manuale"]
 bulk_vendite = sales["bulk_vendite"]
 vendita_cassa_rapida = sales["vendita_cassa_rapida"]
+annulla_vendita_cassa_rapida = sales["annulla_vendita_cassa_rapida"]
 ultimo_bulk_vendite = sales["ultimo_bulk_vendite"]
 annulla_bulk_vendite = sales["annulla_bulk_vendite"]
 orders = create_orders_router(

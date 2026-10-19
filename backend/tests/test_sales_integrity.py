@@ -97,6 +97,36 @@ def test_pos_batch_is_atomic_and_idempotent(monkeypatch):
     assert cash == 1
 
 
+def test_pos_electronic_balance_and_cancellation_are_consistent(monkeypatch):
+    database = AsyncMongoMockClient()["pos_cancel"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "id": "p1", "codice": "P1", "descrizione": "Uno", "prezzo": 3,
+            "giacenza_negozio": 5, "venduti_negozio": 0,
+        })
+        batch = await server.vendita_cassa_rapida(server.CassaRapidaIn(
+            data="2026-10-19T10:00:00Z", pagamento="POS",
+            idempotency_key="pos-electronic-001",
+            righe=[{"codice": "P1", "quantita": 2, "prezzo": 3}],
+        ))
+        before = await server.list_cassa()
+        cancelled = await server.annulla_vendita_cassa_rapida(batch["id"])
+        after = await server.list_cassa()
+        product = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
+        return batch, before, cancelled, after, product
+
+    batch, before, cancelled, after, product = asyncio.run(scenario())
+    assert batch["pagamento"] == "POS"
+    assert before["saldo_contanti"] == 0
+    assert before["saldo_elettronico"] == before["pagamenti"]["POS"] == 6
+    assert cancelled["righe_annullate"] == 1
+    assert after["saldo_elettronico"] == 0
+    assert product["giacenza_negozio"] == 5
+    assert product["venduti_negozio"] == 0
+
+
 def test_manual_sale_rejects_ambiguous_idempotency_key(monkeypatch):
     database = AsyncMongoMockClient()["manual_sale_bad_idempotency"]
     monkeypatch.setattr(server, "db", database)

@@ -26,8 +26,8 @@ def s():
         pass
 
 
-# ---------- Excel full import (7 sheets) ----------
-def test_import_excel_full_7_sheets(s):
+# ---------- Excel full import (all supported sheets) ----------
+def test_import_excel_full_supported_sheets(s):
     assert FIXTURE.exists(), f"fixture missing: {FIXTURE}"
     with FIXTURE.open("rb") as fh:
         files = {"file": ("gods34.xlsm", fh,
@@ -37,7 +37,7 @@ def test_import_excel_full_7_sheets(s):
     j = r.json()
     assert j.get("ok") is True
     found = set(j["fogli_trovati"])
-    assert len(found) == 7, f"expected 7 sheets, got {len(found)}: {found}"
+    assert len(found) == 8, f"expected 8 sheets, got {len(found)}: {found}"
     for must in ("DB_STORICO_VEND", "DB_STORICO_VENDING_EXT"):
         assert must in found, f"missing sheet {must} in {found}"
     t = j["totali"]
@@ -72,7 +72,9 @@ def test_auto_order_uses_negozio_only(s):
         "descrizione": "TEST",
         "categoria": "SIGARETTE",
         "prezzo": 5.0,
-        "giacenza_negozio": 2,
+        # La giacenza vending si gestisce solo tramite le colonne dedicate:
+        # 7 in negozio consentono di trasferirne 5 mantenendo la riserva di 2.
+        "giacenza_negozio": 7,
         "giacenza_vending": 5,
         "acquistati": 10,
         "venduti_negozio": 0,
@@ -82,6 +84,14 @@ def test_auto_order_uses_negozio_only(s):
     assert r.status_code in (200, 201), r.text[:300]
     new_id = r.json().get("id")
     assert new_id
+    vending = s.post(f"{BASE}/api/vending", json={
+        "colonna": "Z999",
+        "codice": codice,
+        "capacita_max": 5,
+        "soglia_minima": 2,
+        "giacenza_iniziale": 5,
+    }, timeout=30)
+    assert vending.status_code in (200, 201), vending.text[:300]
 
     vendita_id = None
     try:

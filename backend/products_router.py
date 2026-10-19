@@ -129,8 +129,9 @@ def create_products_router(
         if await database.prodotti.find_one({"codice": payload["codice"]}):
             raise HTTPException(409, f"Codice prodotto già presente: {payload['codice']}")
         document = Prodotto(**payload).model_dump()
+        response = dict(document)
         await database.prodotti.insert_one(document)
-        return document
+        return response
 
     @router.put("/prodotti/{prod_id}")
     async def update_prodotto(prod_id: str, product: ProdottoIn):

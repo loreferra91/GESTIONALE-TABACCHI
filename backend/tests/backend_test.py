@@ -92,7 +92,14 @@ def test_vendite_bulk(s):
     r0 = s.get(f"{BASE}/api/prodotti", params={"limit": 5})
     prods = r0.json()
     assert len(prods) >= 2
-    p1, p2 = prods[0], prods[1]
+    stocked = [p for p in prods if (p.get("giacenza_negozio") or 0) >= 1]
+    if len(stocked) < 2:
+        stocked = [
+            p for p in s.get(f"{BASE}/api/prodotti", params={"limit": 1000}).json()
+            if (p.get("giacenza_negozio") or 0) >= 1
+        ]
+    assert len(stocked) >= 2, "fixture requires two products with available shop stock"
+    p1, p2 = stocked[0], stocked[1]
     # snapshot giacenze
     g1_before = p1.get("giacenza_negozio", 0)
     payload = {
@@ -122,10 +129,10 @@ def test_vendite_csv_vending(s):
     )
     files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
     r = s.post(f"{BASE}/api/vendite/import-csv-vending", files=files, params={"pagamento": "CONTANTI"})
-    assert r.status_code in (200, 201), r.text
-    d = r.json()
-    assert "delimitatore" in d
-    assert d.get("inseriti", 0) >= 1
+    # A raw CSV without a previously aligned vending-stock reference must not
+    # invent stock or silently drive it negative.
+    assert r.status_code == 409, r.text
+    assert "riferimento giacenza mancante" in r.json()["detail"]
 
 
 def test_import_excel_new_product_has_complete_model(s):

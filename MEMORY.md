@@ -36,3 +36,8 @@
   MongoDB. I backup non hanno più il limite di 25.000 documenti, includono
   checksum e lock di restore. In produzione autenticazione completa e CORS non
   wildcard sono requisiti di avvio.
+- Dal 2026-10-19 la Cassa Rapida registra il metodo di pagamento e mantiene
+  separati il contante fisico da POS, Satispay e altri elettronici. L'annullo
+  dell'ultima vendita ripristina atomicamente scorte, vendite e movimento di
+  cassa. Gli indici business su codice prodotto, colonna vending e nome
+  parametro vengono migrati a univoci con controllo duplicati fail-safe.

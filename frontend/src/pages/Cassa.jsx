@@ -6,7 +6,7 @@ import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 
 export default function Cassa() {
-  const [data, setData] = useState({ movimenti: [], saldo: 0 });
+  const [data, setData] = useState({ movimenti: [], saldo: 0, pagamenti: {} });
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ data: today, tipo: "ENTRATA", importo: 0, descrizione: "", operatore: "" });
   const [saving, setSaving] = useState(false);
@@ -50,8 +50,11 @@ export default function Cassa() {
 
   return (
     <Layout title="Cassa" subtitle="movimenti contabili">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Saldo cassa" value={formatEur(data.saldo)} tone={data.saldo < 0 ? "danger" : "success"} />
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+        <KpiCard label="Contanti in cassa" value={formatEur(data.saldo_contanti ?? data.saldo)} tone={(data.saldo_contanti ?? data.saldo) < 0 ? "danger" : "success"} />
+        <KpiCard label="POS" value={formatEur(data.pagamenti?.POS || 0)} />
+        <KpiCard label="Satispay" value={formatEur(data.pagamenti?.SATISPAY || 0)} />
+        <KpiCard label="Altri elettronici" value={formatEur(data.pagamenti?.ALTRO || 0)} />
         <KpiCard label="Movimenti" value={data.movimenti.length} />
       </div>
 
@@ -78,6 +81,7 @@ export default function Cassa() {
             <thead><tr>
               <Th sortKey="data" currentKey={sortKey} dir={sortDir} onClick={toggle}>Data</Th>
               <Th sortKey="tipo" currentKey={sortKey} dir={sortDir} onClick={toggle}>Tipo</Th>
+              <Th sortKey="pagamento" currentKey={sortKey} dir={sortDir} onClick={toggle}>Pagamento</Th>
               <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
               <Th sortKey="operatore" currentKey={sortKey} dir={sortDir} onClick={toggle}>Operatore</Th>
               <Th sortKey="importo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Importo</Th>
@@ -88,6 +92,7 @@ export default function Cassa() {
                 <tr key={r.id} data-testid={`cassa-row-${r.id}`}>
                   <td className="font-mono text-xs">{(r.data || "").slice(0, 10)}</td>
                   <td><Badge tone={r.tipo === "USCITA" ? "error" : "ok"}>{r.tipo}</Badge></td>
+                  <td><Badge>{r.pagamento || "CONTANTI"}</Badge></td>
                   <td>{r.descrizione}</td>
                   <td className="text-xs text-slate-500">{r.operatore}</td>
                   <td className={`font-mono text-right font-semibold ${r.tipo === "USCITA" ? "text-red-600" : "text-emerald-700"}`}>
@@ -96,7 +101,7 @@ export default function Cassa() {
                   <td className="text-right"><button onClick={() => del(r.id)} disabled={deleting === r.id} className="text-red-600 text-xs disabled:opacity-40">✕</button></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nessun movimento</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={7} className="text-center py-8 text-slate-400">Nessun movimento</td></tr>}
             </tbody>
           </table>
         </div>

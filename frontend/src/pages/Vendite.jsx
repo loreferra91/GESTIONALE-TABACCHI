@@ -4,6 +4,7 @@ import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
+import { parseBulkSales } from "../lib/bulkSales";
 
 function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
   return (
@@ -42,6 +43,7 @@ export default function Vendite() {
   const [bulkData, setBulkData] = useState(today);
   const [bulkResult, setBulkResult] = useState(null);
   const [bulkRows, setBulkRows] = useState([]); // canonical editable rows for preview
+  const [bulkExcludedRows, setBulkExcludedRows] = useState([]);
   const [bulkImporting, setBulkImporting] = useState(false);
   const [lastBulkImport, setLastBulkImport] = useState(undefined);
   const [bulkUndoing, setBulkUndoing] = useState(false);
@@ -166,47 +168,16 @@ export default function Vendite() {
   const tot = rows.reduce((s, r) => s + (r.importo || 0), 0);
   const pezzi = rows.reduce((s, r) => s + (r.quantita || 0), 0);
 
-  const parseBulk = (text, defaultData) => {
-    const raw = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    if (!raw.length) return [];
-
-    // Rileva "formato verticale": ogni cella su una riga separata (Excel a volte incolla così se si copia una singola colonna alla volta o più colonne di una sola riga)
-    // Se ogni riga contiene un solo campo (no TAB/;/,) e il numero totale è multiplo di 4 o 5, raggruppiamo.
-    const singleField = raw.every(l => !/\t|;|,/.test(l));
-    const groups = [];
-    if (singleField && (raw.length % 4 === 0 || raw.length % 5 === 0)) {
-      const step = raw.length % 5 === 0 ? 5 : 4;
-      for (let i = 0; i < raw.length; i += step) groups.push(raw.slice(i, i + step));
-    } else {
-      // Formato orizzontale classico. Excel usa TAB e mantiene la virgola
-      // decimale: scegliamo un solo delimitatore per non spezzare 6,00.
-      for (const line of raw) {
-        const delimiter = line.includes("\t") ? "\t" : (line.includes(";") ? ";" : ",");
-        groups.push(line.split(delimiter).map(x => x.trim()));
-      }
-    }
-
-    return groups.map((parts, idx) => {
-      let data, codice, descrizione, qta, importo;
-      if (parts.length >= 5) [data, codice, descrizione, qta, importo] = parts;
-      else if (parts.length === 4) { [codice, descrizione, qta, importo] = parts; data = defaultData; }
-      else if (parts.length === 3) { [codice, qta, importo] = parts; descrizione = ""; data = defaultData; }
-      else return null;
-      return {
-        _uid: `bulk-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
-        data: data || defaultData,
-        codice: (codice || "").trim(),
-        descrizione: (descrizione || "").trim(),
-        quantita: parseInt(String(qta || "0").replace(/[^\d-]/g, "")) || 0,
-        importo: parseFloat(String(importo || "0").replace(",", ".").replace(/[^\d.-]/g, "")) || 0,
-      };
-    }).filter(Boolean);
-  };
-
   const submitBulk = async () => {
     if (bulkImporting || bulkUndoing) return;
     const righe = bulkRows.filter(r => r.codice && r.quantita > 0);
-    if (!righe.length) return toast.error("Nessuna riga valida");
+    if (!righe.length) {
+      if (bulkExcludedRows.length) {
+        return toast.info(`Nessuna vendita da aggiornare: ${bulkExcludedRows.length} riepiloghi di categoria esclusi`);
+      }
+      return toast.error("Nessuna riga valida");
+    }
+    const excludedCount = bulkExcludedRows.length;
     setBulkImporting(true);
     try {
       const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) });
@@ -214,8 +185,10 @@ export default function Vendite() {
       if (r.data.batch_id) setLastBulkImport({ id: r.data.batch_id, ...r.data, status: "active" });
       setBulkText("");
       setBulkRows([]);
+      setBulkExcludedRows([]);
       await load();
-      toast.success(`Bulk: ${r.data.inseriti} inserite, ${r.data.saltati} saltate`);
+      const excludedMessage = excludedCount ? `, ${excludedCount} riepiloghi esclusi` : "";
+      toast.success(`Bulk: ${r.data.inseriti} inserite, ${r.data.saltati} saltate${excludedMessage}`);
     } catch (e) {
       toast.error(apiErrorMessage(e, "Errore bulk"));
     } finally {
@@ -242,9 +215,9 @@ export default function Vendite() {
 
   // Ri-parsing automatico quando cambia testo o data default
   useEffect(() => {
-    const parsed = parseBulk(bulkText, bulkData);
-    setBulkRows(parsed);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const parsed = parseBulkSales(bulkText, bulkData);
+    setBulkRows(parsed.rows);
+    setBulkExcludedRows(parsed.excludedRows);
   }, [bulkText, bulkData]);
 
   // Deriva stato in tempo reale
@@ -268,6 +241,7 @@ export default function Vendite() {
   };
   const clearBulk = () => {
     setBulkRows([]);
+    setBulkExcludedRows([]);
     setBulkText("");
     setBulkResult(null);
   };
@@ -477,6 +451,13 @@ export default function Vendite() {
           placeholder="AMMS338	WINSTON BLUE*AST20	5	29.00&#10;AMMS20659	TEREA AZURE	2	11.00&#10;..."
           className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"
         />
+
+        {bulkExcludedRows.length > 0 && (
+          <div data-testid="bulk-excluded-summaries" className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+            <b>{bulkExcludedRows.length} {bulkExcludedRows.length === 1 ? "riepilogo di categoria escluso" : "riepiloghi di categoria esclusi"}.</b>{" "}
+            Queste righe non verranno registrate né sottratte dal magazzino.
+          </div>
+        )}
 
         <div data-testid="bulk-live-total" className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
           <div>

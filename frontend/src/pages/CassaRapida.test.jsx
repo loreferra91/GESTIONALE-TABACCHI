@@ -94,3 +94,18 @@ test("mantiene il carrello quando il checkout viene rifiutato", async () => {
   expect(container.querySelector('[data-testid="cart-row-AMMS001"]')).not.toBeNull();
   expect(container.textContent).toContain("1 pezzi");
 });
+
+test("annulla l'ultima vendita confermata", async () => {
+  api.post.mockResolvedValueOnce({ data: { id: "batch-1", totale: 5.5 } });
+  window.confirm = jest.fn(() => true);
+  await act(async () => container.querySelector('[data-testid="pos-btn-AMMS001"]').click());
+  await act(async () => container.querySelector('[data-testid="pos-conferma"]').click());
+
+  const undo = container.querySelector('[data-testid="pos-undo-last"]');
+  expect(undo).not.toBeNull();
+  await act(async () => undo.click());
+
+  expect(window.confirm).toHaveBeenCalled();
+  expect(api.post).toHaveBeenLastCalledWith("/vendite/cassa-rapida/batch-1/annulla");
+  expect(container.querySelector('[data-testid="pos-undo-last"]')).toBeNull();
+});

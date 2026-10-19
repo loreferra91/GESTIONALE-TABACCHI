@@ -8,6 +8,7 @@ from pymongo.errors import BulkWriteError
 
 from backend import server
 from backend.server import _bulk_upsert
+from backend.sales_router import is_bulk_category_summary
 
 
 class FakeCollection:
@@ -56,6 +57,45 @@ def test_bulk_upsert_accepts_empty_input():
 
     assert collection.batch_sizes == []
     assert result == {"inseriti": 0, "aggiornati": 0, "errori": 0}
+
+
+@pytest.mark.parametrize(("codice", "descrizione"), [
+    ("10209", "ACCESSORI TABACCHI"),
+    ("10008", "InalazioneSenzaCombustione"),
+    ("10007", "TrinciatiPerSigarette"),
+    ("10004", "Sigari"),
+])
+def test_bulk_category_summaries_are_recognized(codice, descrizione):
+    assert is_bulk_category_summary(codice, descrizione)
+
+
+def test_bulk_category_summary_requires_matching_code_and_description():
+    assert not is_bulk_category_summary("10008", "OCB FILTRI")
+
+
+def test_bulk_sales_skip_category_summaries_without_touching_stock(monkeypatch):
+    database = AsyncMongoMockClient()["bulk_sales_category_summary_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto uno",
+            "giacenza_negozio": 5, "venduti_negozio": 0,
+        })
+        result = await server.bulk_vendite(server.BulkVenditaIn(righe=[
+            {"codice": "10008", "descrizione": "InalazioneSenzaCombustione", "quantita": 8, "importo": 56.70},
+            {"codice": "P1", "descrizione": "Prodotto uno", "quantita": 1, "importo": 5},
+        ]))
+        product = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
+        sales = await database.vendite.find({}, {"_id": 0}).to_list(None)
+        return result, product, sales
+
+    result, product, sales = asyncio.run(scenario())
+
+    assert result["inseriti"] == 1
+    assert result["saltati"] == 1
+    assert product["giacenza_negozio"] == 4
+    assert [sale["codice"] for sale in sales] == ["P1"]
 
 
 def test_bulk_sales_can_be_undone_and_stock_is_restored(monkeypatch):

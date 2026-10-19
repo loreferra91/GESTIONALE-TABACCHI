@@ -26,6 +26,8 @@ export default function CassaRapida() {
   const [cart, setCart] = useState([]); // {codice, descrizione, prezzo, qta}
   const [pagamento, setPagamento] = useState("CONTANTI");
   const [saving, setSaving] = useState(false);
+  const [lastSale, setLastSale] = useState(null);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     api.get("/prodotti", { params: { limit: 1000 } }).then(r => setProds(r.data));
@@ -59,7 +61,7 @@ export default function CassaRapida() {
     setSaving(true);
     const nowIso = new Date().toISOString();
     try {
-      await api.post("/vendite/cassa-rapida", {
+      const response = await api.post("/vendite/cassa-rapida", {
         data: nowIso,
         pagamento,
         righe: cart.map(x => ({
@@ -71,6 +73,7 @@ export default function CassaRapida() {
         idempotency_key: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`,
       });
       toast.success(`Vendita registrata: ${formatEur(totale)}`);
+      setLastSale(response.data);
       setCart([]);
     } catch (e) {
       toast.error("Errore registrazione");
@@ -79,9 +82,23 @@ export default function CassaRapida() {
     }
   };
 
+  const annullaUltima = async () => {
+    if (!lastSale?.id || !window.confirm("Annullare l'ultima vendita e ripristinare le giacenze?")) return;
+    setCancelling(true);
+    try {
+      await api.post(`/vendite/cassa-rapida/${lastSale.id}/annulla`);
+      toast.success("Vendita annullata e giacenze ripristinate");
+      setLastSale(null);
+    } catch (e) {
+      toast.error("Impossibile annullare la vendita");
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#F1F5F9] flex flex-col">
-      <header className="h-16 bg-slate-900 text-white px-6 flex items-center justify-between border-b border-slate-800">
+    <div className="min-h-screen lg:h-screen bg-[#F1F5F9] flex flex-col">
+      <header className="min-h-16 bg-slate-900 text-white px-3 sm:px-6 py-2 flex items-center justify-between border-b border-slate-800">
         <div className="flex items-center gap-4">
           <Link to="/" data-testid="pos-home" className="flex items-center gap-2 text-slate-300 hover:text-white transition-colors">
             <House size={18} /> <span className="text-sm">Torna al gestionale</span>
@@ -95,11 +112,11 @@ export default function CassaRapida() {
         <div className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-slate-300">NEGOZIO</div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Product grid */}
-        <div className="flex-1 flex flex-col p-4 overflow-hidden">
-          <div className="flex gap-2 mb-3">
-            <div className="relative flex-1">
+        <div className="h-[42rem] flex-none lg:h-auto lg:min-h-0 lg:flex-1 flex flex-col p-3 sm:p-4 overflow-hidden">
+          <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
+            <div className="relative min-w-48 flex-1">
               <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input data-testid="pos-search" value={q} onChange={e => setQ(e.target.value)} placeholder="Cerca codice o descrizione…" className="w-full border border-slate-300 rounded-md pl-9 pr-3 py-3 text-base bg-white" autoFocus />
             </div>
@@ -136,7 +153,7 @@ export default function CassaRapida() {
         </div>
 
         {/* Cart */}
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col">
+        <div className="w-full lg:w-96 min-h-[32rem] lg:min-h-0 bg-white border-t lg:border-t-0 lg:border-l border-slate-200 flex flex-col">
           <div className="p-4 border-b border-slate-200 flex items-center justify-between">
             <div>
               <div className="text-[10px] uppercase tracking-widest text-slate-500">Carrello</div>
@@ -171,6 +188,11 @@ export default function CassaRapida() {
           </div>
 
           <div className="p-4 border-t border-slate-200 bg-slate-50">
+            {lastSale && (
+              <button data-testid="pos-undo-last" onClick={annullaUltima} disabled={cancelling} className="mb-3 w-full rounded-md border border-red-200 bg-red-50 py-2 text-xs font-bold uppercase tracking-wider text-red-700 hover:bg-red-100 disabled:opacity-40">
+                {cancelling ? "Annullo…" : `Annulla ultima vendita (${formatEur(lastSale.totale)})`}
+              </button>
+            )}
             <div className="grid grid-cols-2 gap-2 mb-3">
               {["CONTANTI", "POS", "SATISPAY", "ALTRO"].map(p => (
                 <button key={p} data-testid={`pos-pag-${p}`} onClick={() => setPagamento(p)} className={`py-2 rounded-md text-xs font-bold uppercase tracking-wider ${pagamento === p ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-200"}`}>

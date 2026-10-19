@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import DuplicateKeyError
+import re
 
 if __package__:
     from .money import Money, NonNegativeMoney, money, money_decimal, money_sum
@@ -14,6 +15,17 @@ else:
 
 
 VENDING_CASH_STATE_ID = "saldo"
+ELECTRONIC_PAYMENT_METHODS = {"POS", "SATISPAY", "ALTRO"}
+
+
+def cash_payment_method(document):
+    """Classify current and legacy cash-register movements."""
+    explicit = str(document.get("pagamento") or "").strip().upper()
+    if explicit:
+        return explicit
+    description = str(document.get("descrizione") or "").upper()
+    legacy = re.search(r"·\s*(CONTANTI|POS|SATISPAY|ALTRO)\s*\)", description)
+    return legacy.group(1) if legacy else "CONTANTI"
 
 
 class MovimentoCassa(BaseModel):
@@ -24,6 +36,8 @@ class MovimentoCassa(BaseModel):
     importo: Money
     descrizione: str = ""
     operatore: str = ""
+    pagamento: str = "CONTANTI"
+    batch_id: str | None = None
 
 
 class MovimentoIn(BaseModel):
@@ -32,6 +46,7 @@ class MovimentoIn(BaseModel):
     importo: Money
     descrizione: str | None = ""
     operatore: str | None = ""
+    pagamento: str = "CONTANTI"
     idempotency_key: str | None = None
 
 
@@ -330,13 +345,24 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
         documents = await database.cassa.find(
             {}, {"_id": 0}
         ).sort("data", -1).limit(capped_limit).to_list(capped_limit)
-        balance = Decimal(0)
-        async for document in database.cassa.find({}, {"_id": 0, "tipo": 1, "importo": 1}):
-            if document["tipo"] in ("ENTRATA", "SALDO_INIZIALE"):
-                balance += money_decimal(document["importo"])
-            else:
-                balance -= money_decimal(document["importo"])
-        return {"movimenti": documents, "saldo": money(balance)}
+        balances = {"CONTANTI": Decimal(0), "POS": Decimal(0), "SATISPAY": Decimal(0), "ALTRO": Decimal(0)}
+        async for document in database.cassa.find({}, {"_id": 0}):
+            payment = cash_payment_method(document)
+            bucket = payment if payment in balances else "ALTRO"
+            signed = money_decimal(document["importo"])
+            if document["tipo"] not in ("ENTRATA", "SALDO_INIZIALE"):
+                signed = -signed
+            balances[bucket] += signed
+        cash_balance = money(balances["CONTANTI"])
+        electronic_balance = money(sum(balances[key] for key in ELECTRONIC_PAYMENT_METHODS))
+        return {
+            "movimenti": documents,
+            "saldo": cash_balance,
+            "saldo_contanti": cash_balance,
+            "saldo_elettronico": electronic_balance,
+            "saldo_totale": money(balances["CONTANTI"] + sum(balances[key] for key in ELECTRONIC_PAYMENT_METHODS)),
+            "pagamenti": {key: money(value) for key, value in balances.items()},
+        }
 
     @router.post("/cassa")
     async def add_cassa(movement: MovimentoIn):
@@ -344,6 +370,9 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
             raise HTTPException(422, "Tipo movimento cassa non valido")
         if movement.tipo != "SALDO_INIZIALE" and movement.importo <= 0:
             raise HTTPException(422, "Entrate e uscite richiedono un importo positivo")
+        payment = str(movement.pagamento or "CONTANTI").strip().upper()
+        if payment not in {"CONTANTI", *ELECTRONIC_PAYMENT_METHODS}:
+            raise HTTPException(422, "Metodo di pagamento non valido")
         database = get_database()
         key = str(movement.idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
@@ -356,6 +385,7 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
             key_: value for key_, value in movement.model_dump().items()
             if key_ != "idempotency_key"
         }).model_dump()
+        document["pagamento"] = payment
         if key:
             document["idempotency_key"] = key
         response = dict(document)

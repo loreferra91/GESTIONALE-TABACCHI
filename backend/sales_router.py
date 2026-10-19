@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -53,6 +54,23 @@ class CassaRapidaIn(BaseModel):
     pagamento: str = "CONTANTI"
     righe: List[Dict[str, Any]]
     idempotency_key: Optional[str] = None
+
+
+BULK_CATEGORY_SUMMARY_ROWS = {
+    "10209": "ACCESSORITABACCHI",
+    "10008": "INALAZIONESENZACOMBUSTIONE",
+    "10007": "TRINCIATIPERSIGARETTE",
+    "10004": "SIGARI",
+}
+
+
+def is_bulk_category_summary(codice: Any, descrizione: Any) -> bool:
+    normalized_code = str(codice or "").strip().upper()
+    decomposed = unicodedata.normalize("NFKD", str(descrizione or ""))
+    normalized_description = re.sub(
+        r"[^A-Z0-9]", "", decomposed.encode("ascii", "ignore").decode().upper()
+    )
+    return BULK_CATEGORY_SUMMARY_ROWS.get(normalized_code) == normalized_description
 
 
 def create_sales_router(
@@ -319,6 +337,9 @@ def create_sales_router(
                 if not codice:
                     skipped += 1
                     continue
+                if is_bulk_category_summary(codice, row.get("descrizione")):
+                    skipped += 1
+                    continue
                 quantity = int(float(row.get("quantita") or 0))
                 amount = normalize_nonnegative_money(row.get("importo", 0))
                 if quantity <= 0:
@@ -498,7 +519,10 @@ def create_sales_router(
             importo=total_float,
             descrizione=f"Vendita banco ({batch['pezzi']} pz · {pagamento})",
             operatore=request_operator(request),
+            pagamento=pagamento,
+            batch_id=batch_id,
         ).model_dump()
+        batch["movimento_cassa_id"] = cash_entry["id"]
 
         async def operation(session):
             kwargs = session_kwargs(session)
@@ -553,6 +577,73 @@ def create_sales_router(
                 if existing:
                     return existing
             raise
+
+    @router.post("/vendite/cassa-rapida/{batch_id}/annulla")
+    async def annulla_vendita_cassa_rapida(batch_id: str):
+        db = get_database()
+        batch = await db.cassa_rapida_batches.find_one(
+            {"id": batch_id, "status": "active"}, {"_id": 0}
+        )
+        if not batch:
+            raise HTTPException(404, "Vendita di Cassa Rapida non trovata o già annullata")
+
+        async def operation(session):
+            kwargs = session_kwargs(session)
+            current = await db.cassa_rapida_batches.find_one_and_update(
+                {"id": batch_id, "status": "active"},
+                {"$set": {"status": "annulling"}},
+                return_document=True,
+                **kwargs,
+            )
+            if not current:
+                raise HTTPException(409, "La vendita è già in fase di annullo")
+            sales = await db.vendite.find(
+                {"batch_id": batch_id, "sorgente": "POS"}, {"_id": 0}, **kwargs
+            ).to_list(None)
+            cash_entry = await db.cassa.find_one(
+                {"id": current.get("movimento_cassa_id")}, {"_id": 0}, **kwargs
+            )
+            restored = []
+            try:
+                for sale in sales:
+                    quantity = int(sale.get("quantita") or 0)
+                    await db.prodotti.update_one(
+                        {"codice": sale.get("codice")},
+                        {"$inc": {"giacenza_negozio": quantity, "venduti_negozio": -quantity}},
+                        **kwargs,
+                    )
+                    restored.append(sale)
+                await db.vendite.delete_many(
+                    {"batch_id": batch_id, "sorgente": "POS"}, **kwargs
+                )
+                await db.cassa.delete_one(
+                    {"id": current.get("movimento_cassa_id")}, **kwargs
+                )
+                await db.cassa_rapida_batches.update_one(
+                    {"id": batch_id, "status": "annulling"},
+                    {"$set": {"status": "annullata", "annullata_at": datetime.now(timezone.utc).isoformat()}},
+                    **kwargs,
+                )
+            except Exception:
+                if session is None:
+                    for sale in restored:
+                        quantity = int(sale.get("quantita") or 0)
+                        await db.prodotti.update_one(
+                            {"codice": sale.get("codice")},
+                            {"$inc": {"giacenza_negozio": -quantity, "venduti_negozio": quantity}},
+                        )
+                    for sale in sales:
+                        if not await db.vendite.find_one({"id": sale.get("id")}):
+                            await db.vendite.insert_one(sale)
+                    if cash_entry and not await db.cassa.find_one({"id": cash_entry.get("id")}):
+                        await db.cassa.insert_one(cash_entry)
+                    await db.cassa_rapida_batches.update_one(
+                        {"id": batch_id, "status": "annulling"}, {"$set": {"status": "active"}}
+                    )
+                raise
+            return {"ok": True, "batch_id": batch_id, "righe_annullate": len(sales)}
+
+        return await run_transactionally(operation)
 
     @router.get("/vendite/bulk/ultimo")
     async def ultimo_bulk_vendite():
@@ -659,6 +750,7 @@ def create_sales_router(
         "annulla_vendita_manuale": annulla_vendita_manuale,
         "bulk_vendite": bulk_vendite,
         "vendita_cassa_rapida": vendita_cassa_rapida,
+        "annulla_vendita_cassa_rapida": annulla_vendita_cassa_rapida,
         "ultimo_bulk_vendite": ultimo_bulk_vendite,
         "annulla_bulk_vendite": annulla_bulk_vendite,
     }
