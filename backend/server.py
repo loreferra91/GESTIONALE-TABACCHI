@@ -1,11 +1,11 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request, Header
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError, OperationFailure
+from pymongo.errors import OperationFailure
 import os, json, logging, uuid, io, re, asyncio, math, unicodedata, hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +14,6 @@ import secrets
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
-from decimal import Decimal
 
 if __package__:
     from .adm_router import (
@@ -61,6 +60,13 @@ if __package__:
         VENDING_ACCOUNTING_STATE_ID, create_csv_vending_accounting_router,
     )
     from .csv_vending_sales_router import create_csv_vending_sales_router
+    from .excel_import_router import (
+        ELECTRONIC_INHALATION_CATEGORY,
+        category_from_description,
+        create_excel_import_router,
+        electronic_inhalation_filter,
+        is_electronic_inhalation,
+    )
     from .import_history_router import (
         create_import_history_router,
         import_includes_accounting as _import_includes_accounting,
@@ -134,6 +140,13 @@ else:
         VENDING_ACCOUNTING_STATE_ID, create_csv_vending_accounting_router,
     )
     from csv_vending_sales_router import create_csv_vending_sales_router
+    from excel_import_router import (
+        ELECTRONIC_INHALATION_CATEGORY,
+        category_from_description,
+        create_excel_import_router,
+        electronic_inhalation_filter,
+        is_electronic_inhalation,
+    )
     from import_history_router import (
         create_import_history_router,
         import_includes_accounting as _import_includes_accounting,
@@ -280,35 +293,6 @@ class Parametro(BaseModel):
     nome: str
     valore: float
     descrizione: str = ""
-
-
-# Stato effimero degli import in corso. Serve soltanto a mostrare alla UI la
-# fase realmente raggiunta dal processo; i risultati definitivi restano nello
-# storico import salvato su MongoDB.
-IMPORT_PROGRESS: Dict[str, Dict[str, Any]] = {}
-
-
-def _set_import_progress(
-    job_id: Optional[str],
-    status: str,
-    message: str,
-    current: int = 0,
-    total: int = 1,
-    **extra: Any,
-) -> None:
-    if not job_id:
-        return
-    safe_total = max(1, total)
-    IMPORT_PROGRESS[job_id] = {
-        "job_id": job_id,
-        "status": status,
-        "message": message,
-        "current": current,
-        "total": safe_total,
-        "percent": min(100, max(0, round(current / safe_total * 100))),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        **extra,
-    }
 
 
 # ------------------------- Seed -------------------------
@@ -857,348 +841,7 @@ async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> b
     return bytes(buf)
 
 
-# ------------------------- Storico ordini -------------------------
-# ------------------------- Import Excel -------------------------
-@api.post("/import/excel")
-async def import_excel(file: UploadFile = File(...)):
-    try:
-        import openpyxl
-    except Exception:
-        raise HTTPException(500, "openpyxl non installato")
-    content = await _read_capped(file)
-    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
-    inserted = updated = 0
-    if "RIEP_VENDITA" in wb.sheetnames:
-        ws = wb["RIEP_VENDITA"]
-        for row in ws.iter_rows(min_row=3, values_only=True):
-            codice = row[0]
-            if not codice:
-                continue
-            desc = row[1] or ""
-            data_p = {
-                "codice": str(codice).strip(),
-                "descrizione": str(desc).strip(),
-                "acquistati": int(row[2] or 0),
-                "venduti_negozio": int(row[3] or 0),
-                "prezzo": nonnegative_money(row[7] or 0),
-                "giacenza_vending": int(row[13] or 0),
-                "venduti_vending": int(row[17] or 0),
-            }
-            data_p["giacenza_negozio"] = physical_shop_stock_from_excel(
-                row[6], data_p["giacenza_vending"], data_p["venduti_vending"]
-            )
-            insert_defaults = Prodotto(
-                codice=data_p["codice"],
-                descrizione=data_p["descrizione"],
-            ).model_dump()
-            insert_defaults = {k: v for k, v in insert_defaults.items() if k not in data_p}
-            r = await db.prodotti.update_one(
-                {"codice": data_p["codice"]},
-                {"$set": data_p, "$setOnInsert": insert_defaults},
-                upsert=True,
-            )
-            if r.upserted_id:
-                inserted += 1
-            else:
-                updated += 1
-    return {"ok": True, "inseriti": inserted, "aggiornati": updated}
-
-
-# ------------------------- Import Excel FULL (multi-sheet sync) -------------------------
-ELECTRONIC_INHALATION_CATEGORY = "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA"
-ELECTRONIC_INHALATION_BRANDS = ("ELFBAR", "ELFLIQ", "LOST MARY", "KIWI", "ELFA", "ELFX", "VAPORESSO")
-
-
-def _is_electronic_inhalation(desc: str) -> bool:
-    d = " ".join((desc or "").upper().split())
-    return any(brand in d for brand in ELECTRONIC_INHALATION_BRANDS)
-
-
-def _electronic_inhalation_filter() -> Dict[str, Any]:
-    return {"$or": [{"descrizione": {"$regex": re.escape(brand), "$options": "i"}} for brand in ELECTRONIC_INHALATION_BRANDS]}
-
-
-async def _apply_electronic_inhalation_categories() -> int:
-    """Reclassify ELFBAR/ELFLIQ/LOST MARY/KIWI even after ADM fallback to ACCESSORI."""
-    result = await db.prodotti.update_many(
-        _electronic_inhalation_filter(),
-        {"$set": {"categoria": ELECTRONIC_INHALATION_CATEGORY}},
-    )
-    return int(result.modified_count or 0)
-
-
-def _cat_from_desc(desc: str, code: str) -> str:
-    d = (desc or "").upper()
-    if _is_electronic_inhalation(d):
-        return ELECTRONIC_INHALATION_CATEGORY
-    for kw in ("VAPORESSO", "POD", "KIT", "MG/ML", "LIQUID", "TEREA"):
-        if kw in d:
-            return "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE"
-    if str(code or "").startswith("AMMS"):
-        return "SIGARETTE"
-    return "ACCESSORI"
-
-
-async def _bulk_upsert(collection, operations, batch_size: int = 1000) -> Dict[str, int]:
-    """Esegue gli upsert in batch per evitare un round-trip Atlas per ogni riga."""
-    inserted = updated = errors = 0
-    for start in range(0, len(operations), batch_size):
-        batch = operations[start:start + batch_size]
-        try:
-            result = await collection.bulk_write(batch, ordered=False)
-            inserted += result.upserted_count
-            updated += result.matched_count
-        except BulkWriteError as exc:
-            details = exc.details or {}
-            inserted += details.get("nUpserted", 0)
-            updated += details.get("nMatched", 0)
-            errors += len(details.get("writeErrors", [])) or len(batch)
-    return {"inseriti": inserted, "aggiornati": updated, "errori": errors}
-
-
-async def _bulk_update(collection, operations, batch_size: int = 1000) -> Dict[str, int]:
-    """Esegue aggiornamenti multipli in batch evitando un round-trip per riga."""
-    matched = modified = errors = 0
-    for start in range(0, len(operations), batch_size):
-        batch = operations[start:start + batch_size]
-        try:
-            result = await collection.bulk_write(batch, ordered=False)
-            matched += result.matched_count
-            modified += result.modified_count
-        except BulkWriteError as exc:
-            details = exc.details or {}
-            matched += details.get("nMatched", 0)
-            modified += details.get("nModified", 0)
-            errors += len(details.get("writeErrors", [])) or len(batch)
-    return {"trovati": matched, "modificati": modified, "errori": errors}
-
-
-async def _import_prodotti(ws, adm_aliases: Optional[Dict[str, List[Dict[str, str]]]] = None) -> Dict[str, int]:
-    adm_aliases = adm_aliases or {}
-    import_id = str(uuid.uuid4())
-    codici_importati = set()
-    alias_codes = set()
-    alias_mappings: Dict[str, str] = {}
-    products_by_code: Dict[str, Dict[str, Any]] = {}
-    canonical_rows = set()
-    valore_venduto_negozio_excel = Decimal(0)
-    valore_venduto_vending_excel = Decimal(0)
-    err = 0
-    for row in ws.iter_rows(min_row=3, values_only=True):
-        try:
-            codice = row[0]
-            if not codice:
-                continue
-            raw_code = _product_code_text(codice)
-            desc = str(row[1] or "").strip()
-            codice_s = _canonical_product_code(raw_code, desc, adm_aliases)
-            if codice_s != raw_code:
-                alias_codes.add(raw_code)
-                alias_mappings[raw_code] = codice_s
-            prezzo = nonnegative_money(row[7] or 0)
-            venduti_negozio = int(row[3] or 0)
-            venduti_vending = int(row[17] or 0)
-            valore_venduto_negozio_excel += venduti_negozio * money_decimal(prezzo)
-            valore_venduto_vending_excel += venduti_vending * money_decimal(prezzo)
-            codici_importati.add(codice_s)
-            row_data = {
-                "codice": codice_s,
-                "descrizione": desc,
-                "categoria": _cat_from_desc(desc, codice_s),
-                "acquistati": int(row[2] or 0),
-                "venduti_negozio": venduti_negozio,
-                "prezzo": prezzo,
-                "giacenza_vending": int(row[13] or 0),
-                "venduti_vending": venduti_vending,
-                "presente_ultimo_import": True,
-                "ultimo_import_id": import_id,
-            }
-            row_data["giacenza_negozio"] = physical_shop_stock_from_excel(
-                row[6], row_data["giacenza_vending"], row_data["venduti_vending"]
-            )
-            existing = products_by_code.get(codice_s)
-            if existing:
-                if raw_code == codice_s:
-                    products_by_code[codice_s] = row_data
-                    canonical_rows.add(codice_s)
-                elif codice_s not in canonical_rows and not existing.get("descrizione"):
-                    products_by_code[codice_s] = row_data
-            else:
-                products_by_code[codice_s] = row_data
-                if raw_code == codice_s:
-                    canonical_rows.add(codice_s)
-        except Exception:
-            err += 1
-    operations = []
-    for code, data in products_by_code.items():
-        insert_defaults = Prodotto(codice=code, descrizione=data["descrizione"]).model_dump()
-        insert_defaults = {key: value for key, value in insert_defaults.items() if key not in data}
-        operations.append(UpdateOne(
-            {"codice": code},
-            {"$set": data, "$setOnInsert": insert_defaults},
-            upsert=True,
-        ))
-    result = await _bulk_upsert(db.prodotti, operations)
-    if alias_codes:
-        for old_code, new_code in alias_mappings.items():
-            await _remap_code_references(old_code, new_code)
-        await db.prodotti.delete_many({"codice": {"$in": sorted(alias_codes)}})
-    if codici_importati:
-        await db.prodotti.update_many(
-            {"codice": {"$nin": list(codici_importati)}},
-            {"$set": {"presente_ultimo_import": False}},
-        )
-    result["errori"] += err
-    result["elettroniche"] = await _apply_electronic_inhalation_categories()
-    result["alias_unificati"] = len(alias_codes)
-    result["ultimo_import_id"] = import_id
-    result["valore_venduto_negozio_excel"] = money(valore_venduto_negozio_excel)
-    result["valore_venduto_vending_excel"] = money(valore_venduto_vending_excel)
-    result["valore_venduto_totale_excel"] = money(valore_venduto_negozio_excel + valore_venduto_vending_excel)
-    return result
-
-
-def _excel_header_key(value: Any) -> str:
-    text = unicodedata.normalize("NFKD", str(value or ""))
-    ascii_text = text.encode("ascii", "ignore").decode().lower()
-    return re.sub(r"[^a-z0-9]", "", ascii_text)
-
-
-def _find_product_stock_sheet(wb):
-    """Trova un foglio tabellare con le colonne della fotografia giacenze."""
-    aliases = {
-        "codice": {"codice", "cod", "code"},
-        "descrizione": {"descrizione", "descr", "prodotto"},
-        "acquistati": {"acquistati", "acquisti"},
-        "giacenza_negozio": {"giacenzanegozio", "giacnegozio", "rimanenzenegozio"},
-        "giacenza_vending": {"giacenzavending", "giacvending", "rimanenzevending"},
-    }
-    required = set(aliases)
-    for ws in wb.worksheets:
-        for row_number, row in enumerate(
-            ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True),
-            start=1,
-        ):
-            columns: Dict[str, int] = {}
-            for index, value in enumerate(row):
-                key = _excel_header_key(value)
-                for field, names in aliases.items():
-                    if key in names and field not in columns:
-                        columns[field] = index
-            if required.issubset(columns):
-                return ws, row_number, columns
-    return None
-
-
-async def _import_product_stock_sheet(
-    ws,
-    header_row: int,
-    columns: Dict[str, int],
-    adm_aliases: Optional[Dict[str, List[Dict[str, str]]]] = None,
-) -> Dict[str, int]:
-    """Importa soltanto le giacenze da un foglio con intestazioni esplicite.
-
-    ACQUISTATI viene usato esclusivamente per riconoscere il formato del file:
-    un aggiornamento inventariale non deve mai alterare la contabilità.
-    """
-    adm_aliases = adm_aliases or {}
-    rows_by_code: Dict[str, Dict[str, Any]] = {}
-    errors = 0
-    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
-        try:
-            raw_code = row[columns["codice"]] if len(row) > columns["codice"] else None
-            if raw_code in (None, ""):
-                continue
-            description = str(row[columns["descrizione"]] or "").strip()
-            code = _canonical_product_code(raw_code, description, adm_aliases)
-            if not code:
-                continue
-            rows_by_code[code] = {
-                "codice": code,
-                "descrizione": description,
-                "giacenza_negozio": int(row[columns["giacenza_negozio"]] or 0),
-                "giacenza_vending": int(row[columns["giacenza_vending"]] or 0),
-            }
-        except (IndexError, TypeError, ValueError):
-            errors += 1
-
-    operations = []
-    for code, data in rows_by_code.items():
-        insert_defaults = Prodotto(codice=code, descrizione=data["descrizione"]).model_dump()
-        insert_defaults = {key: value for key, value in insert_defaults.items() if key not in data}
-        operations.append(UpdateOne(
-            {"codice": code},
-            {"$set": data, "$setOnInsert": insert_defaults},
-            upsert=True,
-        ))
-    result = await _bulk_upsert(db.prodotti, operations)
-    result["errori"] += errors
-    result["righe_lette"] = len(rows_by_code)
-    return result
-
-
-async def _import_listino(ws) -> Dict[str, int]:
-    operations = []
-    err = 0
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        try:
-            if not row[0]:
-                continue
-            codice = str(row[0]).strip()
-            data_p = {
-                "codice": codice,
-                "descrizione": str(row[1] or "").strip(),
-                "prezzo": nonnegative_money(row[2] or 0),
-                "confezione": str(row[3] or "").strip(),
-            }
-            operations.append(UpdateOne({"codice": codice}, {"$set": data_p}, upsert=True))
-        except Exception:
-            err += 1
-    result = await _bulk_upsert(db.listino_adm, operations)
-    result["errori"] += err
-    return result
-
-
-async def _import_vending(ws) -> Dict[str, int]:
-    operations = []
-    codici_importati = set()
-    err = 0
-    snapshot_at = datetime.now(timezone.utc).isoformat()
-    for row in ws.iter_rows(min_row=4, values_only=True):
-        try:
-            if not row[0]:
-                continue
-            colonna = str(row[0]).strip()
-            if not re.match(r"^[A-Z]\d+$", colonna):
-                continue
-            data_p = {
-                "colonna": colonna,
-                "codice": str(row[1] or "").strip(),
-                "descrizione": str(row[2] or "").strip(),
-                "giacenza": int(row[3]) if row[3] is not None else 0,
-                "capacita_max": int(row[4] or 5),
-                "soglia_minima": int(row[5]) if row[5] is not None else 2,
-                "giacenza_aggiornata_il": snapshot_at,
-                "giacenza_sorgente": "IMPORT_EXCEL",
-            }
-            operations.append(UpdateOne({"colonna": colonna}, {"$set": data_p}, upsert=True))
-            if data_p["codice"]:
-                codici_importati.add(data_p["codice"])
-        except Exception:
-            err += 1
-    result = await _bulk_upsert(db.vending, operations)
-    # La giacenza registrata nelle singole colonne vending e' la fotografia
-    # fisica autorevole. RIEP_VENDITA puo' contenere un totale vecchio o anche
-    # negativo: dopo l'import delle colonne riallineiamo quindi il totale del
-    # prodotto alla loro somma, cosi' Prodotti, Magazzino e Smart Venue leggono
-    # tutti la stessa giacenza reale.
-    for codice in sorted(codici_importati):
-        await _sync_product_vending_stock(codice)
-    result["prodotti_riconciliati"] = len(codici_importati)
-    result["errori"] += err
-    return result
-
-
+# ------------------------- Smart Venue -------------------------
 async def _import_smart_venue(ws) -> Dict[str, int]:
     """Importa la fotografia SMART VENUE dal relativo foglio Excel.
 
@@ -1703,350 +1346,50 @@ async def delete_smart_venue_row(row_id: str):
     return {"ok": True, "id": row_id}
 
 
-async def _import_storico(ws) -> Dict[str, int]:
-    ins = 0
-    err = 0
-    # elimina intero storico e ricrea (source of truth)
-    await db.storico_ordini.delete_many({})
-    batch = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        try:
-            if not row[0]:
-                continue
-            data_v = row[0]
-            if isinstance(data_v, datetime):
-                data_v = data_v.isoformat()
-            o = OrdineStorico(
-                data=str(data_v),
-                file_sorgente=str(row[1] or ""),
-                codice=str(row[2] or "").strip(),
-                descrizione=str(row[3] or "").strip(),
-                quantita=int(row[4] or 0),
-                prezzo=nonnegative_money(row[5] or 0),
-            )
-            batch.append(o.model_dump())
-            if len(batch) >= 1000:
-                await db.storico_ordini.insert_many(batch)
-                ins += len(batch)
-                batch = []
-        except Exception:
-            err += 1
-    if batch:
-        await db.storico_ordini.insert_many(batch)
-        ins += len(batch)
-    return {"inseriti": ins, "aggiornati": 0, "errori": err}
-
-
-async def _import_parametri(ws) -> Dict[str, int]:
-    # aggiorna solo parametri che ESISTONO già nel DB (preserva custom come AGGIO_PCT)
-    operations = []
-    skip = err = 0
-    existing = {p["nome"] async for p in db.parametri.find({}, {"_id": 0, "nome": 1})}
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        try:
-            nome = row[0]
-            if not nome:
-                continue
-            nome_s = str(nome).strip()
-            valore = row[1]
-            if valore is None:
-                continue
-            v = float(str(valore).replace(",", "."))
-            if nome_s in existing:
-                operations.append(UpdateOne({"nome": nome_s}, {"$set": {"valore": v}}))
-            else:
-                skip += 1
-        except Exception:
-            err += 1
-    result = await _bulk_upsert(db.parametri, operations)
-    result["saltati"] = skip
-    result["errori"] += err
-    return result
-
-
-async def _import_db_storico_vend(ws) -> Dict[str, int]:
-    """DB_STORICO_VEND: vendite storiche giornaliere. Full replace (fonte di verità)."""
-    def header_key(value: Any) -> str:
-        text = unicodedata.normalize("NFKD", str(value or ""))
-        return re.sub(r"[^a-z0-9]", "", text.encode("ascii", "ignore").decode().lower())
-
-    aliases = {
-        "data": {"data", "giorno"},
-        "codice": {"codice", "cod", "code"},
-        "descrizione": {"descrizione", "descr", "prodotto"},
-        "quantita": {"qta", "quantita", "pezzi"},
-        "importo": {"importo", "totale", "valore"},
-        "categoria": {"categoria", "cat"},
-    }
-    columns: Dict[str, int] = {}
-    header_row = 0
-    for row_number, row in enumerate(
-        ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True),
-        start=1,
-    ):
-        candidate: Dict[str, int] = {}
-        for index, value in enumerate(row):
-            key = header_key(value)
-            for field, names in aliases.items():
-                if key in names and field not in candidate:
-                    candidate[field] = index
-        if {"data", "codice", "quantita"}.issubset(candidate):
-            columns = candidate
-            header_row = row_number
-            break
-
-    if not columns:
-        raise HTTPException(
-            422,
-            "DB_STORICO_VEND: intestazioni Data, Codice e Quantità non riconosciute; storico precedente conservato",
-        )
-
-    def value_at(row: tuple, field: str, default: Any = None) -> Any:
-        index = columns.get(field)
-        return row[index] if index is not None and index < len(row) else default
-
-    def iso_date(value: Any) -> str:
-        if isinstance(value, datetime):
-            return value.isoformat()
-        text = str(value or "").strip()
-        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
-            try:
-                return datetime.strptime(text, fmt).isoformat()
-            except ValueError:
-                pass
-        return text
-
-    def product_code(value: Any) -> str:
-        # Alcuni codici numerici nel file Excel ereditano erroneamente un formato
-        # data (es. 10 diventa 10/01/1900): recuperiamo il seriale originale.
-        if isinstance(value, datetime) and value.year < 1950:
-            from openpyxl.utils.datetime import to_excel
-            return str(int(to_excel(value)))
-        if isinstance(value, float) and value.is_integer():
-            return str(int(value))
-        return str(value or "").strip()
-
-    err = 0
-    documents = []
-    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
-        try:
-            data_v = value_at(row, "data")
-            codice = product_code(value_at(row, "codice"))
-            if not data_v or not codice:
-                continue
-            documents.append({
-                "id": str(uuid.uuid4()),
-                "data": iso_date(data_v),
-                "codice": codice,
-                "descrizione": str(value_at(row, "descrizione", "") or "").strip(),
-                "quantita": int(value_at(row, "quantita", 0) or 0),
-                "importo": money(value_at(row, "importo", 0) or 0),
-                "categoria": str(value_at(row, "categoria", "") or "").strip(),
-            })
-        except Exception:
-            err += 1
-
-    # Il full replace avviene soltanto dopo aver riconosciuto e letto il foglio:
-    # un cambio di layout non può più cancellare uno storico valido.
-    await db.db_storico_vend.delete_many({})
-    for start in range(0, len(documents), 1000):
-        await db.db_storico_vend.insert_many(documents[start:start + 1000])
-    return {"inseriti": len(documents), "aggiornati": 0, "errori": err}
-
-
-async def _import_db_storico_vending_ext(ws) -> Dict[str, int]:
-    """DB_STORICO_VENDING_EXT: storico dettagliato vendite vending. Full replace."""
-    ins = err = 0
-    await db.db_storico_vending_ext.delete_many({})
-    batch = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        try:
-            if not row or all(c in (None, "") for c in row):
-                continue
-            batch.append({
-                "id": str(uuid.uuid4()),
-                "raw": [str(c) if c is not None else "" for c in row[:18]],
-            })
-            if len(batch) >= 1000:
-                await db.db_storico_vending_ext.insert_many(batch)
-                ins += len(batch)
-                batch = []
-        except Exception:
-            err += 1
-    if batch:
-        await db.db_storico_vending_ext.insert_many(batch)
-        ins += len(batch)
-    return {"inseriti": ins, "aggiornati": 0, "errori": err}
-
-
-@api.get("/import/excel-full/status/{job_id}")
-async def import_excel_full_status(job_id: str):
-    progress = IMPORT_PROGRESS.get(job_id)
-    if not progress:
-        raise HTTPException(404, "Import non ancora avviato")
-    return progress
-
-
-@api.post("/import/excel-full")
-async def import_excel_full(
-    file: UploadFile = File(...),
-    import_job_id: Optional[str] = Header(None, alias="X-Import-Job-ID"),
-):
-    """Import multi-sheet: prodotti, SMART VENUE, listino, vending e storici.
-    Excel = fonte di verità (upsert). Righe DB non presenti nell'Excel sono conservate.
-    Parametri custom (non presenti nel foglio PARAMETRI) sono preservati.
-    """
-    try:
-        import openpyxl
-    except Exception:
-        raise HTTPException(500, "openpyxl non installato")
-    _set_import_progress(import_job_id, "running", "Ricezione e controllo del file Excel", 1, 10)
-    content = await _read_capped(file)
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
-    except Exception as e:
-        raise HTTPException(422, f"File non leggibile: {e}")
-
-    expected_sheets = {
-        "RIEP_VENDITA", "(SMART VENUE)", "LISTINO ADM", "RICARICA VENDING",
-        "STORICO_ORDINI", "PARAMETRI", "DB_STORICO_VEND", "DB_STORICO_VENDING_EXT",
-    }
-    stock_sheet = None if "RIEP_VENDITA" in wb.sheetnames else _find_product_stock_sheet(wb)
-    if not expected_sheets.intersection(wb.sheetnames) and stock_sheet is None:
-        message = (
-            "Nessun foglio importabile trovato. Usa il file gestionale completo oppure un foglio "
-            "con le colonne CODICE, DESCRIZIONE, ACQUISTATI, GIACENZA NEGOZIO e GIACENZA VENDING."
-        )
-        _set_import_progress(import_job_id, "failed", message, 10, 10)
-        raise HTTPException(422, message)
-
-    _set_import_progress(import_job_id, "running", "Creazione del backup di sicurezza", 2, 10)
-    backup = await create_backup_snapshot(
-        f"Prima import {file.filename or 'Excel'}",
-        "pre-import",
-        EXCEL_IMPORT_BACKUP_COLLECTIONS,
-    )
-
-    fogli_trovati: List[str] = []
-    fogli_mancanti: List[str] = []
-    report: Dict[str, Any] = {}
-
-    completed_steps = 0
-
-    async def _run(name: str, importer):
-        nonlocal completed_steps
-        _set_import_progress(
-            import_job_id,
-            "running",
-            f"Aggiornamento foglio {name}",
-            2 + completed_steps,
-            10,
-            sheet=name,
-        )
-        if name in wb.sheetnames:
-            fogli_trovati.append(name)
-            report[name] = await importer(wb[name])
-        else:
-            fogli_mancanti.append(name)
-        completed_steps += 1
-        _set_import_progress(
-            import_job_id,
-            "running",
-            f"Foglio {name} completato",
-            2 + completed_steps,
-            10,
-            sheet=name,
-            result=report.get(name),
-        )
-
-    adm_aliases = {}
-    if "LISTINO ADM" in wb.sheetnames:
-        adm_aliases = _adm_alias_index(wb["LISTINO ADM"].iter_rows(min_row=2, values_only=True))
-
-    if "RIEP_VENDITA" in wb.sheetnames:
-        await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
-        product_report_key = "RIEP_VENDITA"
-    elif stock_sheet is not None:
-        stock_ws, stock_header_row, stock_columns = stock_sheet
-        product_report_key = stock_ws.title
-        _set_import_progress(
-            import_job_id,
-            "running",
-            f"Aggiornamento giacenze dal foglio {stock_ws.title}",
-            2,
-            10,
-            sheet=stock_ws.title,
-        )
-        fogli_trovati.append(stock_ws.title)
-        report[product_report_key] = await _import_product_stock_sheet(
-            stock_ws,
-            stock_header_row,
-            stock_columns,
-            adm_aliases,
-        )
-        completed_steps += 1
-        _set_import_progress(
-            import_job_id,
-            "running",
-            f"Giacenze dal foglio {stock_ws.title} completate",
-            3,
-            10,
-            sheet=stock_ws.title,
-            result=report[product_report_key],
-        )
-    else:
-        await _run("RIEP_VENDITA", lambda ws: _import_prodotti(ws, adm_aliases))
-        product_report_key = "RIEP_VENDITA"
-    await _run("(SMART VENUE)", _import_smart_venue)
-    await _run("LISTINO ADM", _import_listino)
-    await _run("RICARICA VENDING", _import_vending)
-    await _run("STORICO_ORDINI", _import_storico)
-    await _run("PARAMETRI", _import_parametri)
-    await _run("DB_STORICO_VEND", _import_db_storico_vend)
-    await _run("DB_STORICO_VENDING_EXT", _import_db_storico_vending_ext)
-
-    totali = {
-        "prodotti_inseriti": report.get(product_report_key, {}).get("inseriti", 0),
-        "prodotti_aggiornati": report.get(product_report_key, {}).get("aggiornati", 0),
-        "listino_inseriti": report.get("LISTINO ADM", {}).get("inseriti", 0),
-        "listino_aggiornati": report.get("LISTINO ADM", {}).get("aggiornati", 0),
-        "vending_inseriti": report.get("RICARICA VENDING", {}).get("inseriti", 0),
-        "vending_aggiornati": report.get("RICARICA VENDING", {}).get("aggiornati", 0),
-        "smart_venue_righe": report.get("(SMART VENUE)", {}).get("inseriti", 0),
-        "storico_ricreato": report.get("STORICO_ORDINI", {}).get("inseriti", 0),
-        "parametri_aggiornati": report.get("PARAMETRI", {}).get("aggiornati", 0),
-        "parametri_saltati": report.get("PARAMETRI", {}).get("saltati", 0),
-        "db_storico_vend_righe": report.get("DB_STORICO_VEND", {}).get("inseriti", 0),
-        "db_storico_vending_ext_righe": report.get("DB_STORICO_VENDING_EXT", {}).get("inseriti", 0),
-        "ultimo_import_id": report.get("RIEP_VENDITA", {}).get("ultimo_import_id"),
-        "valore_venduto_negozio_excel": report.get("RIEP_VENDITA", {}).get("valore_venduto_negozio_excel", 0),
-        "valore_venduto_vending_excel": report.get("RIEP_VENDITA", {}).get("valore_venduto_vending_excel", 0),
-        "valore_venduto_totale_excel": report.get("RIEP_VENDITA", {}).get("valore_venduto_totale_excel", 0),
-    }
-    response = {
-        "ok": True,
-        "file": file.filename,
-        "backup_id": backup["id"],
-        "tipo_import": "completo" if "RIEP_VENDITA" in fogli_trovati else "giacenze",
-        "contabilita_inclusa": "RIEP_VENDITA" in fogli_trovati,
-        "fogli_trovati": fogli_trovati,
-        "fogli_mancanti": fogli_mancanti,
-        "dettaglio": report,
-        "totali": totali,
-    }
-    await record_import_history(file.filename or "Excel", response, backup["id"])
-    _set_import_progress(
-        import_job_id,
-        "completed",
-        "Aggiornamento completato",
-        10,
-        10,
-        totals=totali,
-    )
-    return response
-
-
 # ------------------------- Register -------------------------
+_is_electronic_inhalation = is_electronic_inhalation
+_electronic_inhalation_filter = electronic_inhalation_filter
+_cat_from_desc = category_from_description
+excel_import = create_excel_import_router(
+    get_database=lambda: db,
+    read_capped=_read_capped,
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    record_import_history=lambda *args, **kwargs: record_import_history(*args, **kwargs),
+    import_smart_venue=lambda worksheet: _import_smart_venue(worksheet),
+    sync_product_vending_stock=lambda *args, **kwargs: _sync_product_vending_stock(*args, **kwargs),
+    product_model=Prodotto,
+    historical_order_model=OrdineStorico,
+    physical_shop_stock_from_excel=physical_shop_stock_from_excel,
+    product_code_text=_product_code_text,
+    canonical_product_code=_canonical_product_code,
+    adm_alias_index=_adm_alias_index,
+    remap_code_references=lambda *args, **kwargs: _remap_code_references(*args, **kwargs),
+    normalize_nonnegative_money=nonnegative_money,
+    normalize_money=money,
+    decimal_money=money_decimal,
+    apply_electronic_categories=lambda: _apply_electronic_inhalation_categories(),
+    excel_import_backup_collections=EXCEL_IMPORT_BACKUP_COLLECTIONS,
+)
+excel_import_router = excel_import["router"]
+IMPORT_PROGRESS = excel_import["IMPORT_PROGRESS"]
+_set_import_progress = excel_import["set_import_progress"]
+_bulk_upsert = excel_import["bulk_upsert"]
+_bulk_update = excel_import["bulk_update"]
+_apply_electronic_inhalation_categories = excel_import["apply_electronic_inhalation_categories"]
+_import_prodotti = excel_import["import_products"]
+_excel_header_key = excel_import["excel_header_key"]
+_find_product_stock_sheet = excel_import["find_product_stock_sheet"]
+_import_product_stock_sheet = excel_import["import_product_stock_sheet"]
+_import_listino = excel_import["import_price_list"]
+_import_vending = excel_import["import_vending"]
+_import_storico = excel_import["import_order_history"]
+_import_parametri = excel_import["import_parameters"]
+_import_db_storico_vend = excel_import["import_historical_sales"]
+_import_db_storico_vending_ext = excel_import["import_extended_vending_history"]
+import_excel = excel_import["import_excel"]
+import_excel_full_status = excel_import["import_excel_full_status"]
+import_excel_full = excel_import["import_excel_full"]
+
 csv_vending_parser = create_csv_vending_parser(
     normalize_nonnegative_money=nonnegative_money,
     sum_money=money_sum,
@@ -2374,6 +1717,7 @@ api.include_router(operations_router)
 api.include_router(import_history_router)
 api.include_router(cash_movements_router)
 api.include_router(csv_vending_sales_router)
+api.include_router(excel_import_router)
 api.include_router(parameters_router)
 api.include_router(auto_order_router)
 api.include_router(dashboard_router)
