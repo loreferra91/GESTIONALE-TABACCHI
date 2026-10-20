@@ -18,6 +18,7 @@ export default function AutoOrder() {
   const [confirmedKeys, setConfirmedKeys] = useState(() => new Set());
   const [draftRows, setDraftRows] = useState([]);
   const [selectedToAdd, setSelectedToAdd] = useState("");
+  const [productSearch, setProductSearch] = useState("");
   const allRighe = draftRows;
   const allEsclusi = data?.esclusi || [];
   const categorieDisponibili = Array.from(new Set([...allRighe, ...allEsclusi].map(r => r.categoria).filter(Boolean))).sort();
@@ -111,9 +112,35 @@ export default function AutoOrder() {
       totale: Math.round(quantity * (row.prezzo || 0) * 100) / 100,
     }]);
     setSelectedToAdd("");
+    setProductSearch("");
   };
 
   const addableRows = allEsclusi.filter(row => !row.anomalia && !draftCodes.has(row.codice));
+  const productSearchResults = (() => {
+    const search = productSearch.trim().toLocaleLowerCase("it");
+    if (!search || selectedToAdd) return [];
+    return addableRows
+      .filter(row => [row.codice, row.descrizione, row.categoria]
+        .some(value => String(value || "").toLocaleLowerCase("it").includes(search)))
+      .slice(0, 8);
+  })();
+
+  const selectProduct = row => {
+    setSelectedToAdd(row.codice);
+    setProductSearch(`${row.codice} · ${row.descrizione}`);
+  };
+
+  const handleProductSearchKeyDown = event => {
+    if (event.key === "Escape") {
+      setProductSearch("");
+      setSelectedToAdd("");
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const code = selectedToAdd || productSearchResults[0]?.codice;
+    if (code) addRow(code);
+  };
 
   return (
     <Layout title="Auto-Order" subtitle="fabbisogno reale basato sulle vendite recenti">
@@ -148,15 +175,58 @@ export default function AutoOrder() {
       </div>
 
       <Card className="mb-4 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <label htmlFor="ao-add-product" className="text-sm font-semibold text-slate-700">Aggiungi articolo</label>
-          <select id="ao-add-product" data-testid="ao-add-product" value={selectedToAdd} onChange={e => setSelectedToAdd(e.target.value)} className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm">
-            <option value="">Seleziona un articolo escluso dal calcolo…</option>
-            {addableRows.map(row => <option key={row.codice} value={row.codice}>{row.codice} · {row.descrizione}</option>)}
-          </select>
-          <button data-testid="ao-add-product-btn" onClick={() => addRow()} disabled={!selectedToAdd} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-40">
-            <Plus size={16} /> Aggiungi
-          </button>
+        <div className="flex flex-col gap-2">
+          <label htmlFor="ao-add-product" className="text-sm font-semibold text-slate-700">Cerca e aggiungi un prodotto</label>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <div className="relative min-w-0 flex-1">
+              <input
+                id="ao-add-product"
+                data-testid="ao-add-product"
+                type="search"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={productSearchResults.length > 0}
+                aria-controls="ao-product-results"
+                autoComplete="off"
+                value={productSearch}
+                onChange={event => {
+                  setProductSearch(event.target.value);
+                  setSelectedToAdd("");
+                }}
+                onKeyDown={handleProductSearchKeyDown}
+                placeholder="Scrivi codice, descrizione o categoria…"
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              />
+              {productSearchResults.length > 0 ? (
+                <div id="ao-product-results" role="listbox" data-testid="ao-product-results" className="absolute z-30 mt-1 max-h-80 w-full overflow-y-auto rounded-md border border-slate-200 bg-white p-1 shadow-lg">
+                  {productSearchResults.map(row => (
+                    <button
+                      key={row.codice}
+                      type="button"
+                      role="option"
+                      aria-selected="false"
+                      data-testid={`ao-product-result-${row.codice}`}
+                      onClick={() => selectProduct(row)}
+                      className="flex w-full items-center justify-between gap-3 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 focus:bg-slate-100 focus:outline-none"
+                    >
+                      <span className="min-w-0">
+                        <span className="block font-mono font-bold text-slate-900">{row.codice}</span>
+                        <span className="block truncate text-slate-600">{row.descrizione}</span>
+                      </span>
+                      <span className="shrink-0 text-xs text-slate-500">{row.categoria} · lotto {formatNum(row.lotto_ordine || 1)}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {productSearch.trim() && !selectedToAdd && productSearchResults.length === 0 ? (
+                <p data-testid="ao-product-no-results" className="mt-2 text-xs text-slate-500">Nessun prodotto ordinabile trovato. Potrebbe essere già presente nell’ordine o avere uno stock anomalo.</p>
+              ) : null}
+            </div>
+            <button type="button" data-testid="ao-add-product-btn" onClick={() => addRow()} disabled={!selectedToAdd} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-40">
+              <Plus size={16} /> Aggiungi all’ordine
+            </button>
+          </div>
+          <p className="text-xs text-slate-500">Puoi selezionare un risultato oppure premere Invio per aggiungere il primo prodotto trovato.</p>
         </div>
       </Card>
 
