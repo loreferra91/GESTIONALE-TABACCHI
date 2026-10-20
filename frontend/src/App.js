@@ -1,11 +1,10 @@
 import React from "react";
 import "./App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
 import { Toaster } from "sonner";
 import Dashboard from "./pages/Dashboard";
 import Prodotti from "./pages/Prodotti";
 import Listino from "./pages/Listino";
-import Magazzino from "./pages/Magazzino";
 import Vending from "./pages/Vending";
 import Vendite from "./pages/Vendite";
 import AutoOrder from "./pages/AutoOrder";
@@ -65,7 +64,7 @@ function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/prodotti" element={<Prodotti />} />
           <Route path="/listino" element={<Listino />} />
-          <Route path="/magazzino" element={<Magazzino />} />
+          <Route path="/magazzino" element={<Navigate to="/giacenze-reali?tab=analisi" replace />} />
           <Route path="/vending" element={<Vending />} />
           <Route path="/smart-venue" element={<SmartVenue />} />
           <Route path="/smart-venue-controllo" element={<SmartVenueControllo />} />

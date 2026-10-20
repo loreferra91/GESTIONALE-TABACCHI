@@ -41,3 +41,9 @@
   dell'ultima vendita ripristina atomicamente scorte, vendite e movimento di
   cassa. Gli indici business su codice prodotto, colonna vending e nome
   parametro vengono migrati a univoci con controllo duplicati fail-safe.
+- Dal 2026-10-20 la vecchia pagina **Magazzino / Pivot** confluisce in
+  **Giacenze reali**, organizzata nelle tab **Inventario** e **Analisi scorte**.
+  L'analisi mostra separatamente giacenza negozio, vending e totale; usa la
+  giacenza negozio per copertura/riordino e il totale per la valorizzazione.
+  Il vecchio URL `/magazzino` reindirizza alla nuova analisi e l'import Excel
+  non viene più evidenziato nella barra di stato dell'interfaccia.

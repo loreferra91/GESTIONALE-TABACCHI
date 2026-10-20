@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FloppyDisk, Printer, WarningCircle, FunnelSimple, X, ArrowsDownUp } from "@phosphor-icons/react";
+import { Archive, FloppyDisk, Printer, WarningCircle, FunnelSimple, X, ArrowsDownUp, Package, Storefront } from "@phosphor-icons/react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import Layout from "../components/Layout";
 import { Badge, Card, formatNum } from "../components/UI";
@@ -7,6 +8,7 @@ import { SearchBar } from "../lib/tableHooks";
 import { api, apiErrorMessage } from "../lib/api";
 import { shortCategory } from "../lib/categories";
 import InventoryPrint from "../components/InventoryPrint";
+import StockAnalysis from "../components/StockAnalysis";
 import "./GiacenzeReali.css";
 
 const integerDraft = value => /^\d+$/.test(String(value ?? "")) ? Number(value) : null;
@@ -26,6 +28,25 @@ const SORT_OPTIONS = [
 ];
 
 const SENZA_CATEGORIA = "(senza categoria)";
+
+function InventoryMetricCard({ icon: Icon, label, value, tone }) {
+  const toneClasses = {
+    amber: "bg-amber-50 text-amber-700",
+    blue: "bg-blue-50 text-blue-700",
+    slate: "bg-slate-100 text-slate-700",
+  };
+  return (
+    <Card className="flex min-w-0 items-center gap-3 p-4 lg:p-5">
+      <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${toneClasses[tone]}`}>
+        <Icon size={23} weight="duotone" />
+      </div>
+      <div className="min-w-0">
+        <div className="text-sm font-semibold text-slate-600">{label}</div>
+        <div className="mt-1 truncate font-heading text-2xl font-black tabular-nums text-slate-950">{value}</div>
+      </div>
+    </Card>
+  );
+}
 
 function loadPrefs() {
   try {
@@ -80,6 +101,8 @@ function sortRows(list, sortValue) {
 }
 
 export default function GiacenzeReali() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get("tab") === "analisi" ? "analisi" : "inventario";
   const [rows, setRows] = useState([]);
   const [history, setHistory] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -281,12 +304,47 @@ export default function GiacenzeReali() {
     savePrefs({ filterMode: "include", selectedCats: [], sortValue: "nome_az" });
   };
 
+  const selectTab = tab => {
+    const next = new URLSearchParams(searchParams);
+    if (tab === "inventario") next.delete("tab");
+    else next.set("tab", "analisi");
+    setSearchParams(next, { replace: true });
+  };
+
   return (
-    <Layout title="GIACENZE REALI" subtitle="fotografia fisica di negozio e vending">
+    <Layout title="Giacenze reali" subtitle="inventario fisico e analisi delle scorte" statusMode="compact">
+      <div className="mb-5 border-b border-slate-200" role="tablist" aria-label="Viste giacenze reali">
+        <div className="flex gap-7">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "inventario"}
+            data-testid="real-stock-tab-inventory"
+            onClick={() => selectTab("inventario")}
+            className={`relative px-1 pb-3 text-sm font-bold transition-colors ${activeTab === "inventario" ? "text-slate-950" : "text-slate-500 hover:text-slate-800"}`}
+          >
+            Inventario
+            {activeTab === "inventario" ? <span className="absolute inset-x-0 bottom-[-1px] h-0.5 bg-amber-500" /> : null}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "analisi"}
+            data-testid="real-stock-tab-analysis"
+            onClick={() => selectTab("analisi")}
+            className={`relative px-1 pb-3 text-sm font-bold transition-colors ${activeTab === "analisi" ? "text-slate-950" : "text-slate-500 hover:text-slate-800"}`}
+          >
+            Analisi scorte
+            {activeTab === "analisi" ? <span className="absolute inset-x-0 bottom-[-1px] h-0.5 bg-amber-500" /> : null}
+          </button>
+        </div>
+      </div>
+
+      {activeTab === "analisi" ? <StockAnalysis /> : <>
       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Card className="p-4"><div className="overline">Giacenza negozio</div><div className="kpi-value mt-2 text-2xl">{formatNum(totalShop)}</div></Card>
-        <Card className="p-4"><div className="overline">Giacenza vending</div><div className="kpi-value mt-2 text-2xl">{formatNum(totalVending)}</div></Card>
-        <Card className="p-4"><div className="overline">Giacenza totale</div><div className="kpi-value mt-2 text-2xl">{formatNum(totalShop + totalVending)}</div></Card>
+        <InventoryMetricCard icon={Storefront} label="Giacenza negozio" value={formatNum(totalShop)} tone="amber" />
+        <InventoryMetricCard icon={Package} label="Giacenza vending" value={formatNum(totalVending)} tone="blue" />
+        <InventoryMetricCard icon={Archive} label="Giacenza totale" value={formatNum(totalShop + totalVending)} tone="slate" />
       </div>
 
       {/* Search + filter toggle + sort + actions */}
@@ -413,9 +471,12 @@ export default function GiacenzeReali() {
         </div>
       </Card>
 
-      <Card className="mt-6 overflow-hidden">
-        <div className="border-b border-slate-200 px-4 py-3"><h2 className="font-bold">Ultime rettifiche inventariali</h2></div>
-        <div className="overflow-x-auto">
+      <details className="group mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 font-bold text-slate-800 hover:bg-slate-50">
+          <span>Ultime rettifiche inventariali</span>
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{formatNum(history.length)}</span>
+        </summary>
+        <div className="overflow-x-auto border-t border-slate-200">
           <table className="data-table w-full min-w-[760px]">
             <thead><tr><th>Data</th><th>Prodotto</th><th>Ubicazione</th><th className="text-right">Prima</th><th className="text-right">Dopo</th><th className="text-right">Differenza</th><th>Motivazione</th></tr></thead>
             <tbody>
@@ -424,11 +485,12 @@ export default function GiacenzeReali() {
             </tbody>
           </table>
         </div>
-      </Card>
+      </details>
 
       {hasUnsavedChanges && <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-900 shadow-lg"><WarningCircle size={18} /> Modifiche non salvate</div>}
 
       {printMode && <InventoryPrint mode={printMode} rows={printRows} printedAt={printedAt} totalCatalog={rows.length} />}
+      </>}
     </Layout>
   );
 }
