@@ -19,7 +19,7 @@ def create_operations_router(
     get_current_anomalies,
     get_dashboard,
     get_auto_order,
-    ensure_daily_backup,
+    schedule_daily_backup,
 ):
     router = APIRouter()
 
@@ -79,7 +79,9 @@ def create_operations_router(
         daily_backup = None
         daily_backup_error = None
         try:
-            daily_backup = await ensure_daily_backup()
+            daily_backup = await schedule_daily_backup()
+            if daily_backup.get("error"):
+                daily_backup_error = daily_backup["error"]
         except Exception:
             logging.exception("Creazione del backup giornaliero non riuscita")
             daily_backup_error = "Backup giornaliero non riuscito"

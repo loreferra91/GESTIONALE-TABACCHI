@@ -1,12 +1,33 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { Badge, formatNum } from "./UI";
 
 export default function DataStatusBar({ compact = false }) {
   const [status, setStatus] = useState(null);
+  const backupWasInProgress = useRef(false);
 
   useEffect(() => {
-    api.get("/data-status").then(r => setStatus(r.data)).catch(() => {});
+    let cancelled = false;
+    let timer;
+    const loadStatus = () => {
+      api.get("/data-status").then(r => {
+        if (cancelled) return;
+        const next = r.data;
+        setStatus(next);
+        if (backupWasInProgress.current && next.daily_backup && !next.daily_backup.in_progress) {
+          window.dispatchEvent(new Event("backup-daily-ready"));
+        }
+        backupWasInProgress.current = Boolean(next.daily_backup?.in_progress);
+        if (next.daily_backup?.in_progress) {
+          timer = window.setTimeout(loadStatus, 2500);
+        }
+      }).catch(() => {});
+    };
+    loadStatus();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   if (!status) return null;
@@ -19,6 +40,8 @@ export default function DataStatusBar({ compact = false }) {
         <Badge tone={stale ? "warning" : "ok"}>{stale ? "Dati da aggiornare" : "Dati aggiornati"}</Badge>
         {status.daily_backup_error ? (
           <Badge tone="warning">Backup giornaliero da verificare</Badge>
+        ) : status.daily_backup?.in_progress ? (
+          <Badge tone="neutral">Backup giornaliero in corso</Badge>
         ) : status.daily_backup ? (
           <Badge tone="ok">Backup giornaliero attivo</Badge>
         ) : null}

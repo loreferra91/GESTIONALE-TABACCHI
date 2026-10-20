@@ -1007,6 +1007,7 @@ create_backup_snapshot = backup["create_backup_snapshot"]
 backup_retention_preview = backup["backup_retention_preview"]
 prune_backup_snapshots = backup["prune_backup_snapshots"]
 ensure_daily_backup = backup["ensure_daily_backup"]
+schedule_daily_backup = backup["schedule_daily_backup"]
 _backup_documents = backup["backup_documents"]
 _validate_backup_file = backup["validate_backup_file"]
 _restore_collections = backup["restore_collections"]
@@ -1085,7 +1086,7 @@ operations = create_operations_router(
     get_current_anomalies=lambda: anomalie(),
     get_dashboard=lambda: dashboard(),
     get_auto_order=lambda: auto_order(),
-    ensure_daily_backup=lambda: ensure_daily_backup(),
+    schedule_daily_backup=lambda: schedule_daily_backup(),
 )
 operations_router = operations["router"]
 data_status_payload = operations["data_status_payload"]

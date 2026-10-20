@@ -1,6 +1,7 @@
 """Backup snapshots, retention, export validation, and restore routes."""
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+import asyncio
 import hashlib
 import io
 import json
@@ -52,6 +53,14 @@ def create_backup_router(
     *, get_database, session_kwargs, run_transactionally, read_capped,
 ):
     router = APIRouter()
+    daily_backup_tasks: Dict[str, asyncio.Task] = {}
+    daily_backup_failures: Dict[str, str] = {}
+
+    def business_day_for(instant: Optional[datetime] = None) -> tuple[datetime, str]:
+        resolved = instant or datetime.now(timezone.utc)
+        if resolved.tzinfo is None:
+            resolved = resolved.replace(tzinfo=timezone.utc)
+        return resolved, resolved.astimezone(BUSINESS_TIMEZONE).date().isoformat()
 
     async def create_backup_snapshot(
         label: str,
@@ -208,10 +217,7 @@ def create_backup_router(
         A Mongo lock prevents two simultaneous page loads from duplicating it.
         """
         database = get_database()
-        instant = now or datetime.now(timezone.utc)
-        if instant.tzinfo is None:
-            instant = instant.replace(tzinfo=timezone.utc)
-        business_day = instant.astimezone(BUSINESS_TIMEZONE).date().isoformat()
+        instant, business_day = business_day_for(now)
         query = {
             "reason": DAILY_BACKUP_REASON,
             "backup_day": business_day,
@@ -269,6 +275,45 @@ def create_backup_router(
                 await database.operation_locks.delete_one(
                     {"_id": lock_id, "token": token}
                 )
+
+    async def schedule_daily_backup(
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Start the daily snapshot without tying it to the HTTP request."""
+        instant, business_day = business_day_for(now)
+        query = {
+            "reason": DAILY_BACKUP_REASON,
+            "backup_day": business_day,
+            "status": {"$ne": "PRUNED"},
+        }
+        existing = await get_database().backup_snapshots.find_one(query, {"_id": 0})
+        if existing:
+            return {**existing, "created_now": False, "in_progress": False}
+        if business_day in daily_backup_failures:
+            return {
+                "backup_day": business_day,
+                "in_progress": False,
+                "error": daily_backup_failures[business_day],
+            }
+        running = daily_backup_tasks.get(business_day)
+        if running and not running.done():
+            return {"backup_day": business_day, "in_progress": True}
+
+        task = asyncio.create_task(ensure_daily_backup(instant))
+        daily_backup_tasks[business_day] = task
+
+        def finish(completed: asyncio.Task):
+            daily_backup_tasks.pop(business_day, None)
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                logging.warning("Backup giornaliero %s interrotto", business_day)
+            except Exception:
+                logging.exception("Backup giornaliero %s non riuscito", business_day)
+                daily_backup_failures[business_day] = "Backup giornaliero non riuscito"
+
+        task.add_done_callback(finish)
+        return {"backup_day": business_day, "in_progress": True}
 
     async def backup_documents(
         snapshot_id: str,
@@ -510,6 +555,7 @@ def create_backup_router(
         "backup_retention_preview": backup_retention_preview,
         "prune_backup_snapshots": prune_backup_snapshots,
         "ensure_daily_backup": ensure_daily_backup,
+        "schedule_daily_backup": schedule_daily_backup,
         "backup_documents": backup_documents,
         "validate_backup_file": validate_backup_file,
         "restore_collections": restore_collections,

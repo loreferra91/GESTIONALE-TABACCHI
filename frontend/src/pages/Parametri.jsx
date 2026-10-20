@@ -77,7 +77,12 @@ export default function Parametri() {
     setBackups(b.data || []);
     setBackupRetention(retention.data || null);
   };
-  useEffect(() => { load(); loadAudit(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    load();
+    loadAudit();
+    window.addEventListener("backup-daily-ready", loadAudit);
+    return () => window.removeEventListener("backup-daily-ready", loadAudit);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const update = async (nome, valore) => {
     try {

@@ -187,6 +187,31 @@ def test_daily_backup_is_created_once_per_business_day(monkeypatch):
     assert count == 2
 
 
+def test_daily_backup_can_continue_after_status_response(monkeypatch):
+    database = AsyncMongoMockClient()["scheduled_daily_backup"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        instant = datetime(2026, 10, 22, 5, 30, tzinfo=timezone.utc)
+        scheduled = await server.schedule_daily_backup(instant)
+        for _ in range(20):
+            await asyncio.sleep(0)
+            ready = await database.backup_snapshots.find_one({
+                "reason": server.DAILY_BACKUP_REASON,
+                "backup_day": "2026-10-22",
+            })
+            if ready:
+                break
+        status = await server.schedule_daily_backup(instant)
+        return scheduled, status
+
+    scheduled, status = asyncio.run(scenario())
+
+    assert scheduled == {"backup_day": "2026-10-22", "in_progress": True}
+    assert status["in_progress"] is False
+    assert status["status"] == "READY"
+
+
 def test_backup_file_validation_requires_every_operational_collection():
     collections = {name: [] for name in server.BACKUP_COLLECTIONS}
     collections["vendite"] = [{"id": "sale-1", "importo": 5.8}]
