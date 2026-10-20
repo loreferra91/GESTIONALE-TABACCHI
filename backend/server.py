@@ -97,7 +97,8 @@ if __package__:
         create_sales_router,
     )
     from .smart_venue_router import (
-        SmartVenueBarcodeIn, SmartVenueBulkIn, SmartVenueProductIn,
+        SmartVenueBarcodeIn, SmartVenueBulkIn, SmartVenueEntryIn,
+        SmartVenueExitIn, SmartVenueProductIn,
         create_smart_venue_router,
     )
     from .vending_router import VendingColonna, VendingCreateIn, create_vending_router
@@ -183,7 +184,8 @@ else:
         create_sales_router,
     )
     from smart_venue_router import (
-        SmartVenueBarcodeIn, SmartVenueBulkIn, SmartVenueProductIn,
+        SmartVenueBarcodeIn, SmartVenueBulkIn, SmartVenueEntryIn,
+        SmartVenueExitIn, SmartVenueProductIn,
         create_smart_venue_router,
     )
     from vending_router import VendingColonna, VendingCreateIn, create_vending_router
@@ -1248,8 +1250,10 @@ import_smart_venue_excel = smart_venue["import_smart_venue_excel"]
 list_smart_venue = smart_venue["list_smart_venue"]
 create_smart_venue_product = smart_venue["create_smart_venue_product"]
 update_smart_venue_barcode = smart_venue["update_smart_venue_barcode"]
+confirm_smart_venue_exit = smart_venue["confirm_smart_venue_exit"]
 confirm_smart_venue_difference = smart_venue["confirm_smart_venue_difference"]
 confirm_smart_venue_entry = smart_venue["confirm_smart_venue_entry"]
+smart_venue_reconciliation_diagnostic = smart_venue["smart_venue_reconciliation_diagnostic"]
 delete_smart_venue_row = smart_venue["delete_smart_venue_row"]
 api.include_router(reconciliation_router)
 api.include_router(audit_router)

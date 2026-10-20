@@ -47,6 +47,17 @@ class SmartVenueEntryIn(BaseModel):
     differenza_attesa: int
     rettifica_id: Optional[str] = None
 
+class SmartVenueExitIn(BaseModel):
+    codice: str
+    quantita: int
+    motivazione: str
+    idempotency_key: str
+    saldo_atteso: int
+    differenza_attesa: int
+
+
+def _normalized_reason(value: Any) -> str:
+    return " ".join(str(value or "").split())
 
 def create_smart_venue_router(*, get_database, read_capped, create_backup_snapshot,
                               record_import_history, bulk_upsert, product_model,
@@ -56,6 +67,122 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                               vending_stock_by_code, run_transactionally, session_kwargs,
                               request_operator, record_audit_event):
     router = APIRouter()
+
+    @router.post("/smart-venue/{row_id}/conferma-uscita")
+    async def confirm_smart_venue_exit(row_id: str, body: SmartVenueExitIn, request: Request = None):
+        db = get_database()
+        reason = _normalized_reason(body.motivazione)
+        key = body.idempotency_key.strip()
+        if body.quantita <= 0 or not reason or not key:
+            raise HTTPException(422, "Quantità, motivazione e idempotency_key sono obbligatori")
+        # This lookup deliberately precedes all current-state checks. A retry
+        # must return its original outcome after its first request changed the
+        # balance (and hence the current difference).
+        existing = await db.smart_venue_movimenti.find_one({"idempotency_key": key}, {"_id": 0})
+        if existing:
+            expected = {
+                "tipo": "USCITA", "row_id": row_id,
+                "codice": body.codice, "quantita": body.quantita,
+                "saldo_precedente": body.saldo_atteso,
+                "differenza_precedente": body.differenza_attesa,
+                "motivazione": reason,
+            }
+            if any(existing.get(field) != value for field, value in expected.items()):
+                raise HTTPException(409, "idempotency_key già utilizzata con un payload diverso")
+            return {"ok": True, "gia_confermato": True, "id": row_id,
+                    "smart_venue": existing["saldo_successivo"], "quantita": existing["quantita"],
+                    "saldo_precedente": existing["saldo_precedente"],
+                    "saldo_successivo": existing["saldo_successivo"],
+                    "differenza": existing["differenza_successiva"]}
+        row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0})
+        if not row: raise HTTPException(404, "Riga SMARTV VENUE non trovata")
+        if body.codice != row.get("codice"):
+            raise HTTPException(422, "Codice non valido per questa riga Smart Venue")
+        if await db.smart_venue_movimenti.find_one({"tipo": "CARICO_IN_ENTRATA", "stato": "PENDENTE", "codice": row.get("codice")}, {"_id": 0, "id": 1}):
+            raise HTTPException(409, "Esiste un carico pendente: confermalo prima dallo Storico ordini")
+        product = await db.prodotti.find_one({"codice": row.get("codice")}, {"_id": 0}) or {}
+        vending = await vending_stock_by_code() or {}
+        shop = int(product.get("giacenza_negozio", 0) or 0)
+        vend = int(vending.get(str(row.get("codice") or ""), 0) or 0)
+        stock = shop + vend
+        current = int(row.get("smart_venue", row.get("rimanenze_smart", 0)) or 0)
+        difference = current - stock
+        if body.saldo_atteso != current:
+            raise HTTPException(409, "Saldo Smart Venue cambiato: ricarica e riprova")
+        if body.differenza_attesa != difference:
+            raise HTTPException(409, "Differenza Smart Venue cambiata: ricarica e riprova")
+        if difference <= 0:
+            raise HTTPException(422, "Differenza non positiva")
+        if body.quantita > difference:
+            raise HTTPException(422, "Quantità supera la differenza")
+        if body.quantita > current:
+            raise HTTPException(422, "Quantità supera il saldo")
+        updated = current - body.quantita
+        now = datetime.now(timezone.utc).isoformat()
+
+        async def confirm(session):
+            kwargs = session_kwargs(session)
+            raced = await db.smart_venue_movimenti.find_one(
+                {"idempotency_key": key}, {"_id": 0}, **kwargs
+            )
+            if raced:
+                return raced, True
+            result = await db.smart_venue.update_one(
+                {"id": row_id, "smart_venue": current},
+                {"$set": {"smart_venue": updated, "updated_at": now}},
+                **kwargs,
+            )
+            if result.matched_count != 1:
+                raise HTTPException(409, "Saldo Smart Venue cambiato: ricarica e riprova")
+            movement = {
+                "id": str(uuid.uuid4()), "row_id": row_id,
+                "idempotency_key": key, "codice": body.codice,
+                "tipo": "USCITA", "quantita": body.quantita,
+                "stato": "CONFERMATO", "saldo_precedente": current,
+                "saldo_successivo": updated,
+                "differenza_precedente": difference,
+                "differenza_successiva": updated - stock,
+                "motivazione": reason, "operatore": request_operator(request),
+                "created_at": now, "confirmed_at": now,
+            }
+            try:
+                await db.smart_venue_movimenti.insert_one(movement, **kwargs)
+            except Exception:
+                if session is None:
+                    await db.smart_venue.update_one(
+                        {"id": row_id, "smart_venue": updated},
+                        {"$set": {"smart_venue": current}},
+                    )
+                raise
+            return movement, False
+
+        movement, already = await run_transactionally(confirm)
+        if already:
+            expected = {
+                "tipo": "USCITA", "row_id": row_id,
+                "codice": body.codice, "quantita": body.quantita,
+                "saldo_precedente": body.saldo_atteso,
+                "differenza_precedente": body.differenza_attesa,
+                "motivazione": reason,
+            }
+            if any(movement.get(field) != value for field, value in expected.items()):
+                raise HTTPException(409, "idempotency_key già utilizzata con un payload diverso")
+        else:
+            await record_audit_event(
+                "CONFERMATO", "SMART_VENUE_USCITA", movement["id"],
+                prima={"saldo": current, "differenza": difference},
+                dopo={"saldo": updated, "differenza": movement["differenza_successiva"],
+                       "quantita": body.quantita, "motivazione": reason},
+                operatore=movement["operatore"], idempotency_key=key,
+            )
+        return {
+            "ok": True, "gia_confermato": already, "id": row_id,
+            "smart_venue": movement["saldo_successivo"],
+            "quantita": movement["quantita"],
+            "saldo_precedente": movement["saldo_precedente"],
+            "saldo_successivo": movement["saldo_successivo"],
+            "differenza": movement["differenza_successiva"],
+        }
 
     async def import_smart_venue(worksheet) -> Dict[str, int]:
         db = get_database()
@@ -266,38 +393,27 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
 
     @router.post("/smart-venue/{row_id}/conferma")
     async def confirm_smart_venue_difference(row_id: str, body: Optional[Dict[str, Any]] = None, request: Request = None):
-        """Record an explicitly confirmed external outgoing movement."""
-        db = get_database(); row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0});
-        if not row: raise HTTPException(404, "Riga SMARTV VENUE non trovata")
-        product = await db.prodotti.find_one({"codice": row.get("codice")}, {"_id": 0}) or {}; vending = await vending_stock_by_code() or {}; stock = int(product.get("giacenza_negozio", 0) or 0) + int(vending.get(str(product.get("codice") or ""), 0) or 0); current = int(row.get("smart_venue", row.get("rimanenze_smart", 0)) or 0); difference = current - stock; requested = (body or {}).get("inserimento_smart_venue"); quantity = difference if requested in (None, "") else parse_quantity(requested)
-        if difference <= 0: raise HTTPException(422, "L'uscita è disponibile solo per una differenza positiva")
-        if quantity <= 0: raise HTTPException(422, "La quantità di uscita deve essere positiva")
-        if quantity > difference: raise HTTPException(422, "L'uscita supera la differenza positiva")
-        if quantity > current: raise HTTPException(422, "Inserimento Smart Venue superiore alla quantità disponibile")
-        key = str((body or {}).get("idempotency_key") or uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat(); updated = current - quantity
-        async def confirm(session):
-            kwargs = session_kwargs(session)
-            existing = await db.smart_venue_movimenti.find_one({"idempotency_key": key}, {"_id": 0}, **kwargs)
-            if existing: return existing, True
-            result = await db.smart_venue.update_one({"id": row_id, "smart_venue": current}, {"$set": {"smart_venue": updated, "ultimo_inserimento_smart_venue": quantity, "updated_at": now}}, **kwargs)
-            if result.matched_count != 1: raise HTTPException(409, "Saldo Smart Venue cambiato: ricarica e riprova")
-            movement = {"id": str(uuid.uuid4()), "idempotency_key": key, "codice": row["codice"], "tipo": "USCITA", "quantita": quantity, "stato": "CONFERMATO", "saldo_precedente": current, "saldo_successivo": updated, "origine": "SMART_VENUE_RICONCILIAZIONE", "motivazione": str((body or {}).get("motivazione") or "Uscita registrata in Smart Venue"), "operatore": request_operator(request), "created_at": now, "confirmed_at": now}
-            await db.smart_venue_movimenti.insert_one(movement, **kwargs)
-            return movement, False
-        movement, already = await run_transactionally(confirm)
-        if not already: await record_audit_event("CONFERMATO", "SMART_VENUE_USCITA", movement["id"], prima={"saldo": current}, dopo={"saldo": updated, "quantita": quantity}, operatore=movement["operatore"])
-        return {"ok": True, "gia_confermato": already, "id": row_id, "rimanenze": stock, "smart_venue": movement.get("saldo_successivo", updated), "inserimento_smart_venue": quantity, "saldo_precedente": current, "saldo_successivo": updated, "differenza": updated - stock}
+        """Reject the retired non-idempotent contract.
+
+        Kept as an explicit response so stale clients cannot silently perform a
+        balance change without the expected balance, reason and stable key.
+        """
+        raise HTTPException(
+            410,
+            "Operazione sostituita: usa /conferma-uscita con chiave idempotente",
+        )
 
     @router.post("/smart-venue/{row_id}/conferma-entrata")
     async def confirm_smart_venue_entry(row_id: str, body: SmartVenueEntryIn, request: Request = None):
         db = get_database()
-        if body.quantita <= 0 or not body.motivazione.strip() or not body.idempotency_key.strip():
+        reason = _normalized_reason(body.motivazione)
+        key = body.idempotency_key.strip()
+        if body.quantita <= 0 or not reason or not key:
             raise HTTPException(422, "Quantità, motivazione e idempotency_key sono obbligatori")
         # This lookup deliberately precedes all current-state checks.  A retry
         # must return its original outcome after its first request changed the
         # balance (and hence the current difference).
-        existing = await db.smart_venue_movimenti.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+        existing = await db.smart_venue_movimenti.find_one({"idempotency_key": key}, {"_id": 0})
         if existing:
             expected = {
                 "tipo": "ENTRATA_RETTIFICA", "row_id": row_id,
@@ -305,6 +421,7 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                 "quantita": body.quantita, "saldo_precedente": body.saldo_atteso,
                 "differenza_precedente": body.differenza_attesa,
                 "rettifica_id": body.rettifica_id,
+                "motivazione": reason,
             }
             if any(existing.get(field) != value for field, value in expected.items()):
                 raise HTTPException(409, "idempotency_key già utilizzata con un payload diverso")
@@ -331,19 +448,67 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         now = datetime.now(timezone.utc).isoformat(); updated = current + body.quantita
         async def confirm(session):
             kwargs = session_kwargs(session)
+            raced = await db.smart_venue_movimenti.find_one(
+                {"idempotency_key": key}, {"_id": 0}, **kwargs
+            )
+            if raced:
+                return raced, True
             result = await db.smart_venue.update_one({"id": row_id, "smart_venue": current}, {"$set": {"smart_venue": updated, "updated_at": now}}, **kwargs)
             if result.matched_count != 1: raise HTTPException(409, "Saldo Smart Venue cambiato: ricarica e riprova")
-            movement = {"id": str(uuid.uuid4()), "row_id": row_id, "idempotency_key": body.idempotency_key, "codice": row["codice"], "tipo": "ENTRATA_RETTIFICA", "quantita": body.quantita, "stato": "CONFERMATO", "saldo_precedente": current, "saldo_successivo": updated, "differenza_precedente": difference, "differenza_successiva": updated - shop - vend, "rettifica_id": body.rettifica_id, "motivazione": body.motivazione.strip(), "operatore": request_operator(request), "created_at": now, "confirmed_at": now}
-            await db.smart_venue_movimenti.insert_one(movement, **kwargs); return movement, False
+            movement = {"id": str(uuid.uuid4()), "row_id": row_id, "idempotency_key": key, "codice": row["codice"], "tipo": "ENTRATA_RETTIFICA", "quantita": body.quantita, "stato": "CONFERMATO", "saldo_precedente": current, "saldo_successivo": updated, "differenza_precedente": difference, "differenza_successiva": updated - shop - vend, "rettifica_id": body.rettifica_id, "motivazione": reason, "operatore": request_operator(request), "created_at": now, "confirmed_at": now}
+            try:
+                await db.smart_venue_movimenti.insert_one(movement, **kwargs)
+            except Exception:
+                if session is None:
+                    await db.smart_venue.update_one(
+                        {"id": row_id, "smart_venue": updated},
+                        {"$set": {"smart_venue": current}},
+                    )
+                raise
+            return movement, False
         movement, already = await run_transactionally(confirm)
-        if not already: await record_audit_event("CONFERMATO", "SMART_VENUE_ENTRATA", movement["id"], prima={"saldo": current, "differenza": difference}, dopo={"saldo": updated, "differenza": updated - shop - vend, "quantita": body.quantita, "motivazione": body.motivazione.strip()}, operatore=movement["operatore"], idempotency_key=body.idempotency_key)
+        if already:
+            expected = {
+                "tipo": "ENTRATA_RETTIFICA", "row_id": row_id,
+                "codice": body.codice, "quantita": body.quantita,
+                "saldo_precedente": body.saldo_atteso,
+                "differenza_precedente": body.differenza_attesa,
+                "rettifica_id": body.rettifica_id, "motivazione": reason,
+            }
+            if any(movement.get(field) != value for field, value in expected.items()):
+                raise HTTPException(409, "idempotency_key già utilizzata con un payload diverso")
+        else:
+            await record_audit_event("CONFERMATO", "SMART_VENUE_ENTRATA", movement["id"], prima={"saldo": current, "differenza": difference}, dopo={"saldo": updated, "differenza": updated - shop - vend, "quantita": body.quantita, "motivazione": reason}, operatore=movement["operatore"], idempotency_key=key)
         return {"ok": True, "gia_confermato": already, "id": row_id, "smart_venue": movement["saldo_successivo"], "quantita": movement["quantita"], "differenza": movement["saldo_successivo"] - shop - vend}
 
     @router.get("/smart-venue/diagnostica/riconciliazioni")
     async def smart_venue_reconciliation_diagnostic():
         rows = await list_smart_venue()
         stati = sorted({row.get("stato") for row in rows})
-        return {"totale": len(rows), "per_stato": {stato: sum(row.get("stato") == stato for row in rows) for stato in stati}, "righe": rows}
+        per_stato = {
+            stato: sum(row.get("stato") == stato for row in rows)
+            for stato in stati
+        }
+        return {
+            "prodotti_totali": len(rows),
+            "allineati": per_stato.get("ALLINEATO", 0),
+            "codici_mancanti": per_stato.get("CODICE MANCANTE", 0),
+            "uscite_da_confermare": per_stato.get("USCITA DA CONFERMARE", 0),
+            "somma_uscite": sum(max(0, int(row.get("differenza") or 0)) for row in rows),
+            "entrate_da_verificare": per_stato.get("ENTRATA DA VERIFICARE", 0),
+            "somma_entrate": sum(
+                abs(min(0, int(row.get("differenza") or 0)))
+                for row in rows
+                if row.get("stato") in {"ENTRATA DA VERIFICARE", "RETTIFICA DA VERIFICARE"}
+            ),
+            "carichi_da_inserire": per_stato.get("CARICO DA INSERIRE", 0),
+            "quantita_carichi_pendenti": sum(int(row.get("carichi_pendenti") or 0) for row in rows),
+            "rettifiche_da_verificare": per_stato.get("RETTIFICA DA VERIFICARE", 0),
+            "anomalie_vending": per_stato.get("ANOMALIA VENDING", 0),
+            "differenza_totale": sum(int(row.get("differenza") or 0) for row in rows),
+            "per_stato": per_stato,
+            "righe": rows,
+        }
 
     @router.delete("/smart-venue/{row_id}")
     async def delete_smart_venue_row(row_id: str):
@@ -352,4 +517,4 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         if not await db.smart_venue_hidden.find_one({"product_id": row_id}): await db.smart_venue_hidden.insert_one({"id": str(uuid.uuid4()), "product_id": row_id, "codice": row.get("codice"), "hidden_at": datetime.now(timezone.utc).isoformat()})
         return {"ok": True, "id": row_id}
 
-    return {"router": router, "import_smart_venue": import_smart_venue, "parse_smart_venue_bulk_text": parse_bulk_text, "resolve_smart_venue_product_rows": resolve_rows, "smart_venue_bulk_comparison": comparison, "preview_smart_venue_bulk": preview_smart_venue_bulk, "import_smart_venue_bulk": import_smart_venue_bulk, "import_smart_venue_excel": import_smart_venue_excel, "list_smart_venue": list_smart_venue, "create_smart_venue_product": create_smart_venue_product, "update_smart_venue_barcode": update_smart_venue_barcode, "confirm_smart_venue_difference": confirm_smart_venue_difference, "confirm_smart_venue_entry": confirm_smart_venue_entry, "delete_smart_venue_row": delete_smart_venue_row}
+    return {"router": router, "import_smart_venue": import_smart_venue, "parse_smart_venue_bulk_text": parse_bulk_text, "resolve_smart_venue_product_rows": resolve_rows, "smart_venue_bulk_comparison": comparison, "preview_smart_venue_bulk": preview_smart_venue_bulk, "import_smart_venue_bulk": import_smart_venue_bulk, "import_smart_venue_excel": import_smart_venue_excel, "list_smart_venue": list_smart_venue, "create_smart_venue_product": create_smart_venue_product, "update_smart_venue_barcode": update_smart_venue_barcode, "confirm_smart_venue_exit": confirm_smart_venue_exit, "confirm_smart_venue_difference": confirm_smart_venue_difference, "confirm_smart_venue_entry": confirm_smart_venue_entry, "smart_venue_reconciliation_diagnostic": smart_venue_reconciliation_diagnostic, "delete_smart_venue_row": delete_smart_venue_row}

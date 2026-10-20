@@ -258,6 +258,7 @@ def isolated_db(monkeypatch):
         app_migrations=FakeCollection(),
         ricezioni_merce=FakeCollection(),
         rettifiche_inventario=FakeCollection(),
+        audit_events=FakeCollection(),
     )
     monkeypatch.setattr(server, "db", database)
     async def fake_backup(*_args, **_kwargs):
@@ -536,26 +537,28 @@ def test_new_smart_venue_product_response_is_json_serializable_with_mongo_ids(mo
     assert "_id" not in response
 
 
-def test_smart_venue_blank_insertion_uses_difference(monkeypatch):
+def test_legacy_smart_venue_confirmation_is_retired(monkeypatch):
     database = isolated_db(monkeypatch)
 
     async def seed_and_confirm():
         await database.prodotti.insert_one({
             "id": "prod-1", "codice": "P1", "giacenza_negozio": 7, "giacenza_vending": 3,
         })
+        await database.vending.insert_one({
+            "id": "v1", "codice": "P1", "giacenza": 3,
+        })
         await database.smart_venue.insert_one({
             "id": "smart-venue:P1", "codice": "P1", "smart_venue": 14,
         })
-        confirmed = await server.confirm_smart_venue_difference("smart-venue:P1", {})
-        stored = await database.smart_venue.find_one({"id": "smart-venue:P1"})
-        return confirmed, stored
+        with pytest.raises(HTTPException) as error:
+            await server.confirm_smart_venue_difference("smart-venue:P1", {})
+        return error.value, await database.smart_venue.find_one({"id": "smart-venue:P1"})
 
-    confirmed, stored = asyncio.run(seed_and_confirm())
+    error, stored = asyncio.run(seed_and_confirm())
 
-    assert confirmed["inserimento_smart_venue"] == 7
-    assert confirmed["smart_venue"] == 7
-    assert confirmed["differenza"] == 0
-    assert stored["smart_venue"] == 7
+    assert error.status_code == 410
+    assert "conferma-uscita" in error.detail
+    assert stored["smart_venue"] == 14
 
 
 def test_smart_venue_barcode_can_be_edited_and_cleared(monkeypatch):
@@ -581,25 +584,33 @@ def test_smart_venue_barcode_can_be_edited_and_cleared(monkeypatch):
     assert rows[0]["barcode"] == ""
 
 
-def test_smart_venue_manual_insertion_decreases_smart_value(monkeypatch):
+def test_smart_venue_exit_decreases_smart_value(monkeypatch):
     database = isolated_db(monkeypatch)
 
     async def seed_and_confirm():
         await database.prodotti.insert_one({
             "id": "prod-1", "codice": "P1", "giacenza_negozio": 7, "giacenza_vending": 3,
         })
+        await database.vending.insert_one({
+            "id": "v-exit", "codice": "P1", "giacenza": 3,
+        })
         await database.smart_venue.insert_one({
             "id": "smart-venue:P1", "codice": "P1", "smart_venue": 20,
         })
-        return await server.confirm_smart_venue_difference(
-            "smart-venue:P1", {"inserimento_smart_venue": 3}
+        return await server.confirm_smart_venue_exit(
+            "smart-venue:P1",
+            server.SmartVenueExitIn(
+                codice="P1", quantita=3, motivazione="uscita test",
+                idempotency_key="exit-test", saldo_atteso=20,
+                differenza_attesa=10,
+            ),
         )
 
     confirmed = asyncio.run(seed_and_confirm())
 
-    assert confirmed["inserimento_smart_venue"] == 3
+    assert confirmed["quantita"] == 3
     assert confirmed["smart_venue"] == 17
-    assert confirmed["differenza"] == 10
+    assert confirmed["differenza"] == 7
 
 
 def test_manual_vending_stock_correction_updates_product_total_without_shop_movement(monkeypatch):
