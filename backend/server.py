@@ -423,10 +423,14 @@ async def on_start():
             db.db_storico_vend.create_index([("data", 1), ("codice", 1)]),
             db.storico_ordini.create_index("codice"),
             db.storico_ordini.create_index("batch_id"),
+            db.storico_ordini.create_index("smart_venue_stato"),
             db.ordini_fornitore.create_index("batch_key", unique=True),
             db.ordini_fornitore_righe.create_index("batch_key"),
             db.ricezioni_merce.create_index("idempotency_key", unique=True),
             db.ricezioni_merce.create_index("created_at"),
+            db.smart_venue_movimenti.create_index("idempotency_key", unique=True),
+            db.smart_venue_movimenti.create_index([("codice", 1), ("stato", 1), ("created_at", -1)]),
+            db.smart_venue_movimenti.create_index("ordine_id"),
             db.rettifiche_inventario.create_index([("codice", 1), ("created_at", -1)]),
             db.rettifiche_venduti.create_index([("codice", 1), ("created_at", -1)]),
             db.reconciliation_cases.create_index("fingerprint", unique=True),
@@ -996,8 +1000,8 @@ conferma_carico_smart_venue = orders["conferma_carico_smart_venue"]
 del_ordine = orders["del_ordine"]
 bulk_carico = orders["bulk_carico"]
 preview_auto_order_excel = orders["preview_auto_order_excel"]
-_increment_smart_venue_for_receipt = orders["increment_smart_venue_for_receipt"]
 repair_smart_venue_auto_order_2026_10_12 = orders["repair_smart_venue_auto_order_2026_10_12"]
+historical_smart_venue_metadata_migration = orders["historical_smart_venue_metadata_migration"]
 backup = create_backup_router(
     get_database=lambda: db,
     session_kwargs=_session_kwargs,
@@ -1228,6 +1232,10 @@ smart_venue = create_smart_venue_router(
     nonnegative_money=nonnegative_money,
     money_product=money_product,
     vending_stock_by_code=_vending_stock_by_code,
+    run_transactionally=_run_transactionally,
+    session_kwargs=_session_kwargs,
+    request_operator=_request_operator,
+    record_audit_event=_record_audit_event,
 )
 smart_venue_router = smart_venue["router"]
 _import_smart_venue = smart_venue["import_smart_venue"]

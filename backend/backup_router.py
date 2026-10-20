@@ -24,7 +24,7 @@ BACKUP_COLLECTIONS = [
     "vending_accounting_state", "vending_accounting_events", "cassa",
     "ordini_fornitore", "ordini_fornitore_righe", "import_history", "adm_sync",
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
-    "smart_venue_values", "ricezioni_merce", "rettifiche_inventario",
+    "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
     "rettifiche_venduti", "reconciliation_cases", "audit_events",
 ]
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
@@ -33,7 +33,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "vendite_bulk_imports", "scontrini_vending", "cassa_vending_stato",
     "vending_accounting_snapshots", "vending_accounting_state",
     "vending_accounting_events", "anomalie_ignorate", "smart_venue",
-    "smart_venue_hidden", "smart_venue_values", "ricezioni_merce",
+    "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
     "audit_events",
 }
@@ -45,7 +45,7 @@ BUSINESS_TIMEZONE = ZoneInfo("Europe/Rome")
 EXCEL_IMPORT_BACKUP_COLLECTIONS = [
     "prodotti", "listino_adm", "vending", "storico_ordini", "parametri",
     "db_storico_vend", "db_storico_vending_ext", "smart_venue",
-    "smart_venue_hidden", "smart_venue_values",
+    "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti",
 ]
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -105,9 +106,9 @@ def test_smart_venue_resolves_old_codes_and_collapses_duplicate_snapshots(monkey
     rows = asyncio.run(seed_and_compare())
 
     assert [(row["codice"], row["smart_venue"], row["stato"]) for row in rows] == [
-        ("AMMS20933", 8, "OK"),
-        ("AMMS21601", 22, "OK"),
-        ("AMMS233", 81, "OK"),
+        ("AMMS20933", 8, "ALLINEATO"),
+        ("AMMS21601", 22, "ALLINEATO"),
+        ("AMMS233", 81, "ALLINEATO"),
     ]
     assert rows[0]["codici_sorgente"] == ["AMMS20933", "AMMS21000"]
     assert rows[1]["codici_sorgente"] == ["AMMS20697", "AMMS21601"]
@@ -178,6 +179,8 @@ class FakeCollection:
                         return False
                     if not isinstance(current, list) and current == value["$ne"]:
                         return False
+                if "$regex" in value and not re.search(value["$regex"], str(current or "")):
+                    return False
             elif isinstance(current, list):
                 if value not in current:
                     return False
@@ -223,6 +226,15 @@ class FakeCollection:
             return SimpleNamespace(matched_count=0, modified_count=0, upserted_id="fake-id")
         return SimpleNamespace(matched_count=0, modified_count=0)
 
+    async def update_many(self, query, update, upsert=False):
+        matched = modified = 0
+        for row in self.documents:
+            if self._matches(row, query):
+                matched += 1
+                row.update(update.get("$set", {}))
+                modified += 1
+        return SimpleNamespace(matched_count=matched, modified_count=modified)
+
     async def count_documents(self, query):
         return sum(1 for row in self.documents if self._matches(row, query))
 
@@ -239,6 +251,7 @@ def isolated_db(monkeypatch):
         smart_venue=FakeCollection(),
         smart_venue_hidden=FakeCollection(),
         smart_venue_values=FakeCollection(),
+        smart_venue_movimenti=FakeCollection(),
         vending=FakeCollection(),
         prodotti=FakeCollection(),
         storico_ordini=FakeCollection(),
@@ -253,7 +266,7 @@ def isolated_db(monkeypatch):
     return database
 
 
-def test_bulk_receipt_increments_existing_smart_venue_balance_only(monkeypatch):
+def test_bulk_receipt_creates_pending_smart_venue_movement_without_changing_balance(monkeypatch):
     database = isolated_db(monkeypatch)
 
     async def seed_and_receive():
@@ -284,8 +297,10 @@ def test_bulk_receipt_increments_existing_smart_venue_balance_only(monkeypatch):
     assert response["caricate"] == 2
     assert smart_product["giacenza_negozio"] == 8
     assert smart_product["acquistati"] == 13
-    assert smart_row["smart_venue"] == 11
-    assert smart_row["ultimo_carico_smart_venue"] == 3
+    assert smart_row["smart_venue"] == 8
+    assert len(database.smart_venue_movimenti.documents) == 1
+    assert database.smart_venue_movimenti.documents[0]["stato"] == "PENDENTE"
+    assert database.smart_venue_movimenti.documents[0]["quantita"] == 3
     assert normal_product["giacenza_negozio"] == 4
     assert count_rows_for_code(database.smart_venue.documents, "P2") == 0
 
@@ -294,7 +309,7 @@ def count_rows_for_code(rows, code):
     return sum(1 for row in rows if row.get("codice") == code)
 
 
-def test_single_receipt_increments_smart_venue_balance(monkeypatch):
+def test_single_receipt_creates_pending_smart_venue_movement(monkeypatch):
     database = isolated_db(monkeypatch)
 
     async def seed_and_receive():
@@ -316,7 +331,45 @@ def test_single_receipt_increments_smart_venue_balance(monkeypatch):
 
     smart_row = asyncio.run(seed_and_receive())
 
-    assert smart_row["smart_venue"] == 10
+    assert smart_row["smart_venue"] == 8
+    assert database.smart_venue_movimenti.documents[0]["stato"] == "PENDENTE"
+
+
+def test_confirming_pending_load_increments_smart_venue_once(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.prodotti.insert_one({"codice": "P1", "descrizione": "Prodotto", "acquistati": 1, "giacenza_negozio": 1})
+        await database.smart_venue.insert_one({"id": "smart-venue:P1", "codice": "P1", "smart_venue": 8})
+        receipt = await server.bulk_carico(server.BulkOrdineIn(file_sorgente="TEST", righe=[{"codice": "P1", "quantita": 3, "prezzo": 5}]))
+        order_id = receipt["movimenti"][0]["id"]
+        first = await server.conferma_carico_smart_venue(order_id)
+        second = await server.conferma_carico_smart_venue(order_id)
+        return first, second, await database.smart_venue.find_one({"codice": "P1"}), database.smart_venue_movimenti.documents[0]
+
+    first, second, smart, movement = asyncio.run(scenario())
+    assert first["gia_confermato"] is False
+    assert second["gia_confermato"] is True
+    assert smart["smart_venue"] == 11
+    assert movement["stato"] == "CONFERMATO"
+
+
+def test_historical_metadata_migration_is_dry_run_then_idempotent(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.app_migrations.insert_one({"id": server.SMART_VENUE_AUTO_ORDER_REPAIR_ID, "pezzi_ripristinati": 810})
+        await database.storico_ordini.insert_many([{"id": f"o-{code}", "data": "2026-10-12T00:00:00+00:00", "file_sorgente": "da auto-order (modificato)", "codice": code, "quantita": quantity} for code, quantity in server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED.items()])
+        await database.smart_venue.insert_many([{"codice": code, "riparazioni_applicate": [server.SMART_VENUE_AUTO_ORDER_REPAIR_ID]} for code in server.SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED])
+        preview = await server.historical_smart_venue_metadata_migration()
+        applied = await server.historical_smart_venue_metadata_migration(dry_run=False)
+        repeated = await server.historical_smart_venue_metadata_migration(dry_run=False)
+        return preview, applied, repeated
+
+    preview, applied, repeated = asyncio.run(scenario())
+    assert preview["ok"] is True and preview["dry_run"] is True and preview["modifiche_previste"] == 27
+    assert applied["righe_aggiornate"] == 27 and applied["pezzi_verificati"] == 810
+    assert repeated["gia_applicata"] is True
 
 
 def test_verified_auto_order_repair_totals_27_rows_and_810_pieces():

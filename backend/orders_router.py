@@ -29,6 +29,9 @@ class OrdineStorico(BaseModel):
     caricato_smart_venue: Optional[bool] = None
     caricato_smart_venue_il: Optional[str] = None
     caricato_smart_venue_da: Optional[str] = None
+    smart_venue_stato: str = "NON_APPLICABILE"
+    smart_venue_movimento_id: Optional[str] = None
+    smart_venue_riferimento_migrazione: Optional[str] = None
     operatore: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     annullato: bool = False
@@ -53,6 +56,7 @@ class BulkOrdineIn(BaseModel):
 
 
 SMART_VENUE_AUTO_ORDER_REPAIR_ID = "smart-venue-auto-order-2026-10-12-v1"
+SMART_VENUE_AUTO_ORDER_METADATA_MIGRATION_ID = "smart-venue-auto-order-2026-10-12-metadata-v1"
 SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED = {
     "AMMS338": 150, "AMMS9": 60, "AMMS478": 40, "AMMS20155": 40,
     "AMMS20154": 40, "AMMS536": 60, "AMMS1784": 30, "AMMS20659": 60,
@@ -194,33 +198,36 @@ def create_orders_router(
 ):
     router = APIRouter()
 
+    def smart_state(applicable: bool, confirmed: bool = False) -> str:
+        return "CONFERMATO" if confirmed else "DA_INSERIRE" if applicable else "NON_APPLICABILE"
+
+    async def create_pending_smart_movement(*, order_id: str, batch_id: Optional[str],
+                                            code: str, quantity: int, operator: str,
+                                            created_at: str, session=None) -> str:
+        """Create the external-load obligation. The unique key protects retry paths."""
+        movement_id = f"smart-venue-load:{order_id}"
+        document = {
+            "id": movement_id, "idempotency_key": movement_id, "codice": code,
+            "tipo": "CARICO_IN_ENTRATA", "quantita": quantity, "stato": "PENDENTE",
+            "ordine_id": order_id, "batch_id": batch_id, "origine": "CARICO_MERCE",
+            "operatore": operator, "created_at": created_at,
+        }
+        try:
+            await get_database().smart_venue_movimenti.insert_one(document, **session_kwargs(session))
+        except DuplicateKeyError:
+            existing = await get_database().smart_venue_movimenti.find_one(
+                {"idempotency_key": movement_id}, {"_id": 0}, **session_kwargs(session)
+            )
+            if not existing or existing.get("ordine_id") != order_id:
+                raise HTTPException(409, "Movimento Smart Venue già presente ma non coerente")
+        return movement_id
+
     @router.post("/ordini/import-auto-order/preview")
     async def preview_auto_order_excel(file: UploadFile = File(...)):
         filename = str(file.filename or "").replace("\\", "/").rsplit("/", 1)[-1][:180]
         if not filename.lower().endswith(".xlsx"):
             raise HTTPException(422, "Seleziona il file .xlsx esportato da Auto-Order")
         return parse_auto_order_excel(await read_capped(file), filename)
-
-    async def increment_smart_venue_for_receipt(
-        codice: str,
-        quantita: int,
-        session=None,
-    ) -> bool:
-        """Keep Smart Venue aligned with a physical merchandise receipt."""
-        if not codice or quantita <= 0:
-            return False
-        result = await get_database().smart_venue.update_one(
-            {"codice": codice},
-            {
-                "$inc": {"smart_venue": quantita},
-                "$set": {
-                    "ultimo_carico_smart_venue": quantita,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                },
-            },
-            **session_kwargs(session),
-        )
-        return bool(result.matched_count)
 
     async def repair_smart_venue_auto_order_2026_10_12() -> Dict[str, Any]:
         database = get_database()
@@ -308,6 +315,61 @@ def create_orders_router(
         await database.app_migrations.insert_one(migration.copy())
         return {"ok": True, "gia_applicata": False, **migration}
 
+    async def historical_smart_venue_metadata_migration(dry_run: bool = True) -> Dict[str, Any]:
+        """Annotate the already repaired 12 October receipt, never touching balances."""
+        database = get_database()
+        migration = await database.app_migrations.find_one(
+            {"id": SMART_VENUE_AUTO_ORDER_METADATA_MIGRATION_ID}, {"_id": 0}
+        )
+        if migration:
+            return {"ok": True, "dry_run": dry_run, "gia_applicata": True, **migration}
+        origin = await database.app_migrations.find_one(
+            {"id": SMART_VENUE_AUTO_ORDER_REPAIR_ID}, {"_id": 0}
+        )
+        rows = await database.storico_ordini.find(
+            {"file_sorgente": "da auto-order (modificato)"}, {"_id": 0}
+        ).to_list(1000)
+        rows = [row for row in rows if str(row.get("data") or "").startswith("2026-10-12")]
+        actual = receipt_quantities_by_code(rows)
+        anomalies = []
+        if actual != SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED:
+            anomalies.append({"tipo": "QUANTITA_STORICHE_NON_CORRISPONDENTI", "trovato": actual})
+        if not origin or int(origin.get("pezzi_ripristinati") or 0) != 810:
+            anomalies.append({"tipo": "RIPARAZIONE_ORIGINALE_NON_VERIFICATA"})
+        codes = list(SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED)
+        smart_rows = await database.smart_venue.find({"codice": {"$in": codes}}, {"_id": 0, "codice": 1, "riparazioni_applicate": 1}).to_list(1000)
+        repaired = {row.get("codice") for row in smart_rows if SMART_VENUE_AUTO_ORDER_REPAIR_ID in (row.get("riparazioni_applicate") or [])}
+        missing = sorted(set(codes) - repaired)
+        if missing: anomalies.append({"tipo": "SALDI_ORIGINALI_NON_MARCATI", "codici": missing})
+        report = {"ok": not anomalies, "dry_run": dry_run, "righe": len(rows), "pezzi": sum(actual.values()), "codici": sorted(actual), "anomalie": anomalies, "modifiche_previste": len(rows)}
+        if dry_run or anomalies:
+            return report
+        backup = await create_backup_snapshot("Prima migrazione metadati Smart Venue 12/10/2026", "migrazione-smart-venue-metadata-2026-10-12", ["prodotti", "smart_venue", "storico_ordini", "ricezioni_merce", "rettifiche_inventario", "smart_venue_movimenti", "app_migrations"])
+        now = datetime.now(timezone.utc).isoformat()
+        result = await database.storico_ordini.update_many(
+            {"file_sorgente": "da auto-order (modificato)", "data": {"$regex": "^2026-10-12"}, "codice": {"$in": codes}},
+            {"$set": {"smart_venue_applicabile": True, "caricato_smart_venue": True,
+                      "smart_venue_stato": "CONFERMATO_MIGRAZIONE_STORICA",
+                      "caricato_smart_venue_il": now, "caricato_smart_venue_da": "MIGRAZIONE_STORICA",
+                      "smart_venue_riferimento_migrazione": SMART_VENUE_AUTO_ORDER_REPAIR_ID}},
+        )
+        migration = {"id": SMART_VENUE_AUTO_ORDER_METADATA_MIGRATION_ID, "created_at": now,
+                     "backup_id": backup["id"], "righe_aggiornate": result.modified_count,
+                     "pezzi_verificati": 810, "riferimento_migrazione_origine": SMART_VENUE_AUTO_ORDER_REPAIR_ID}
+        await database.app_migrations.insert_one(migration.copy())
+        return {"ok": True, "dry_run": False, "gia_applicata": False, **migration}
+
+    @router.get("/smart-venue/migrazioni/2026-10-12/dry-run")
+    async def smart_venue_metadata_dry_run():
+        return await historical_smart_venue_metadata_migration(dry_run=True)
+
+    @router.post("/smart-venue/migrazioni/2026-10-12/applica")
+    async def apply_smart_venue_metadata_migration():
+        preview = await historical_smart_venue_metadata_migration(dry_run=True)
+        if not preview["ok"]:
+            raise HTTPException(409, preview)
+        return await historical_smart_venue_metadata_migration(dry_run=False)
+
     @router.get("/ordini")
     async def list_ordini(limit: int = 1000):
         capped_limit = cap_limit(limit)
@@ -327,6 +389,7 @@ def create_orders_router(
             **order.model_dump(),
             smart_venue_applicabile=smart_venue_applicable,
             caricato_smart_venue=False if smart_venue_applicable else None,
+            smart_venue_stato=smart_state(smart_venue_applicable),
             operatore=request_operator(request),
         ).model_dump()
         await database.storico_ordini.insert_one(document)
@@ -338,7 +401,10 @@ def create_orders_router(
                     "acquistati": order.quantita,
                 }},
             )
-            await increment_smart_venue_for_receipt(order.codice, order.quantita)
+            if smart_venue_applicable:
+                movement_id = await create_pending_smart_movement(order_id=document["id"], batch_id=None, code=order.codice, quantity=order.quantita, operator=document["operatore"], created_at=document["created_at"])
+                await database.storico_ordini.update_one({"id": document["id"]}, {"$set": {"smart_venue_movimento_id": movement_id}})
+                document["smart_venue_movimento_id"] = movement_id
         return document
 
     @router.post("/ordini/{order_id}/conferma-smart-venue")
@@ -346,7 +412,7 @@ def create_orders_router(
         order_id: str,
         request: Request = None,
     ):
-        """Confirm only the external operation without changing stock."""
+        """Confirm a pending external load and increase the known external balance once."""
         database = get_database()
         current = await database.storico_ordini.find_one(
             {"id": order_id}, {"_id": 0}
@@ -360,16 +426,22 @@ def create_orders_router(
             )
         if current.get("caricato_smart_venue") is True:
             return {**current, "ok": True, "gia_confermato": True}
+        if current.get("annullato"):
+            raise HTTPException(409, "Il carico è annullato e non può essere confermato")
 
         now = datetime.now(timezone.utc).isoformat()
-        result = await database.storico_ordini.update_one(
-            {"id": order_id, "caricato_smart_venue": {"$ne": True}},
-            {"$set": {
-                "caricato_smart_venue": True,
-                "caricato_smart_venue_il": now,
-                "caricato_smart_venue_da": request_operator(request),
-            }},
-        )
+        async def confirm(session):
+            kwargs = session_kwargs(session)
+            movement = await database.smart_venue_movimenti.find_one({"ordine_id": order_id, "stato": "PENDENTE"}, {"_id": 0}, **kwargs)
+            if not movement:
+                raise HTTPException(409, "Movimento Smart Venue pendente non trovato")
+            quantity = int(movement["quantita"])
+            updated_smart = await database.smart_venue.update_one({"codice": current["codice"]}, {"$inc": {"smart_venue": quantity}, "$set": {"updated_at": now}}, **kwargs)
+            if updated_smart.matched_count != 1: raise HTTPException(409, "Saldo Smart Venue cambiato durante la conferma")
+            changed = await database.smart_venue_movimenti.update_one({"id": movement["id"], "stato": "PENDENTE"}, {"$set": {"stato": "CONFERMATO", "saldo_successivo": None, "confirmed_at": now, "operatore": request_operator(request)}}, **kwargs)
+            if changed.matched_count != 1: raise HTTPException(409, "Movimento Smart Venue cambiato nel frattempo")
+            return await database.storico_ordini.update_one({"id": order_id, "caricato_smart_venue": {"$ne": True}}, {"$set": {"caricato_smart_venue": True, "smart_venue_stato": "CONFERMATO", "caricato_smart_venue_il": now, "caricato_smart_venue_da": request_operator(request)}}, **kwargs)
+        result = await run_transactionally(confirm)
         if result.modified_count != 1:
             latest = await database.storico_ordini.find_one(
                 {"id": order_id}, {"_id": 0}
@@ -406,6 +478,11 @@ def create_orders_router(
                 )
             if order.get("annullato"):
                 return {"ok": True, "gia_annullato": True, "id": order_id}
+            if order.get("caricato_smart_venue") is True:
+                raise HTTPException(
+                    409,
+                    "Carico già confermato in Smart Venue: annullamento bloccato finché non viene registrata una compensazione esterna esplicita",
+                )
 
             code = str(order.get("codice") or "").strip()
             quantity = int(order.get("quantita") or 0)
@@ -431,33 +508,22 @@ def create_orders_router(
                     "Il prodotto è cambiato: la giacenza o gli acquistati non consentono l'annullamento",
                 )
 
-            smart_venue_changed = False
             try:
                 if order.get("smart_venue_applicabile"):
-                    smart = await database.smart_venue.find_one(
-                        {"codice": code}, {"_id": 1, "smart_venue": 1}, **kwargs
-                    )
-                    if not smart or int(smart.get("smart_venue") or 0) < quantity:
-                        raise HTTPException(
-                            409,
-                            "Saldo Smart Venue insufficiente: annullamento bloccato",
-                        )
-                    changed = await database.smart_venue.update_one(
-                        {"codice": code, "smart_venue": {"$gte": quantity}},
-                        {"$inc": {"smart_venue": -quantity}, "$set": {
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        }},
+                    changed = await database.smart_venue_movimenti.update_one(
+                        {"ordine_id": order_id, "stato": "PENDENTE"},
+                        {"$set": {"stato": "ANNULLATO", "cancelled_at": datetime.now(timezone.utc).isoformat(), "operatore": request_operator(request)}},
                         **kwargs,
                     )
                     if changed.matched_count != 1:
-                        raise HTTPException(409, "Smart Venue modificato contemporaneamente")
-                    smart_venue_changed = True
+                        raise HTTPException(409, "Movimento Smart Venue pendente non trovato o già modificato")
 
                 now = datetime.now(timezone.utc).isoformat()
                 marked = await database.storico_ordini.update_one(
                     {"id": order_id, "annullato": {"$ne": True}},
                     {"$set": {
                         "annullato": True,
+                        "smart_venue_stato": "ANNULLATO",
                         "annullato_at": now,
                         "annullato_da": request_operator(request),
                     }},
@@ -467,9 +533,10 @@ def create_orders_router(
                     raise HTTPException(409, "Movimento cambiato durante l'annullamento")
             except Exception:
                 if session is None:
-                    if smart_venue_changed:
-                        await database.smart_venue.update_one(
-                            {"codice": code}, {"$inc": {"smart_venue": quantity}}
+                    if order.get("smart_venue_applicabile"):
+                        await database.smart_venue_movimenti.update_one(
+                            {"ordine_id": order_id, "stato": "ANNULLATO"},
+                            {"$set": {"stato": "PENDENTE"}},
                         )
                     await database.prodotti.update_one(
                         {"codice": code},
@@ -607,10 +674,22 @@ def create_orders_router(
                         prezzo=row["prezzo"],
                         smart_venue_applicabile=smart_applicable,
                         caricato_smart_venue=False if smart_applicable else None,
+                        smart_venue_stato=smart_state(smart_applicable),
                         operatore=operator,
                         created_at=created_at,
                     ).model_dump()
                     await database.storico_ordini.insert_one(dict(movement), **kwargs)
+                    if smart_applicable:
+                        movement_id = await create_pending_smart_movement(
+                            order_id=movement["id"], batch_id=batch_id, code=code,
+                            quantity=quantity, operator=operator, created_at=created_at,
+                            session=session,
+                        )
+                        movement["smart_venue_movimento_id"] = movement_id
+                        await database.storico_ordini.update_one(
+                            {"id": movement["id"]},
+                            {"$set": {"smart_venue_movimento_id": movement_id}}, **kwargs
+                        )
 
                     if product:
                         update = await database.prodotti.update_one(
@@ -628,15 +707,6 @@ def create_orders_router(
                         rollback_actions.append(
                             ("existing_product", code, quantity)
                         )
-                        if smart_applicable:
-                            updated = await increment_smart_venue_for_receipt(
-                                code, quantity, session=session
-                            )
-                            if not updated:
-                                raise RuntimeError(
-                                    f"riga Smart Venue {code} cambiata durante il carico"
-                                )
-                            rollback_actions.append(("smart_venue", code, quantity))
                     else:
                         new_product = product_model(
                             codice=code,
@@ -685,12 +755,7 @@ def create_orders_router(
             except Exception:
                 if session is None:
                     for kind, code, value in reversed(rollback_actions):
-                        if kind == "smart_venue":
-                            await database.smart_venue.update_one(
-                                {"codice": code},
-                                {"$inc": {"smart_venue": -value}},
-                            )
-                        elif kind == "existing_product":
+                        if kind == "existing_product":
                             await database.prodotti.update_one(
                                 {"codice": code},
                                 {"$inc": {
@@ -705,6 +770,7 @@ def create_orders_router(
                     await database.storico_ordini.delete_many(
                         {"batch_id": batch_id}
                     )
+                    await database.smart_venue_movimenti.delete_many({"batch_id": batch_id})
                     await database.ricezioni_merce.update_one(
                         {"id": batch_id},
                         {"$set": {
@@ -736,6 +802,6 @@ def create_orders_router(
         "del_ordine": del_ordine,
         "bulk_carico": bulk_carico,
         "preview_auto_order_excel": preview_auto_order_excel,
-        "increment_smart_venue_for_receipt": increment_smart_venue_for_receipt,
         "repair_smart_venue_auto_order_2026_10_12": repair_smart_venue_auto_order_2026_10_12,
+        "historical_smart_venue_metadata_migration": historical_smart_venue_metadata_migration,
     }

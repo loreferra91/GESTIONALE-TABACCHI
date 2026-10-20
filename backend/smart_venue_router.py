@@ -44,7 +44,8 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                               product_categories, product_code_text,
                               product_identity_tokens, adm_numeric_code,
                               adm_local_code, nonnegative_money, money_product,
-                              vending_stock_by_code):
+                              vending_stock_by_code, run_transactionally, session_kwargs,
+                              request_operator, record_audit_event):
     router = APIRouter()
 
     async def import_smart_venue(worksheet) -> Dict[str, int]:
@@ -130,15 +131,30 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                 current[field] = list(dict.fromkeys([*(current.get(field) or []), *incoming]))
         return sorted(resolved.values(), key=lambda row: row["codice"])
 
+    async def pending_by_code():
+        rows = await get_database().smart_venue_movimenti.find(
+            {"tipo": "CARICO_IN_ENTRATA", "stato": "PENDENTE"}, {"_id": 0, "codice": 1, "quantita": 1}
+        ).to_list(5000)
+        totals = {}
+        for row in rows: totals[row["codice"]] = totals.get(row["codice"], 0) + int(row.get("quantita") or 0)
+        return totals
+
+    def reconciliation_status(*, has_product, difference, pending, has_adjustment=False):
+        if not has_product: return "CODICE MANCANTE"
+        if pending: return "CARICO DA INSERIRE"
+        if difference > 0: return "USCITA DA CONFERMARE"
+        if difference < 0: return "RETTIFICA DA VERIFICARE" if has_adjustment else "ANOMALIA VENDING"
+        return "ALLINEATO"
+
     async def comparison(rows):
         db = get_database()
-        products, vending = await asyncio.gather(db.prodotti.find({}, {"_id": 0}).to_list(5000), vending_stock_by_code())
+        products, vending, pending = await asyncio.gather(db.prodotti.find({}, {"_id": 0}).to_list(5000), vending_stock_by_code(), pending_by_code())
         rows = resolve_rows(rows, products); by_code = {str(p.get("codice") or ""): p for p in products}; vending = vending or {}; result = []
         for row in rows:
             code = str(row.get("codice") or ""); product = by_code.get(code) or next((p for p in products if adm_numeric_code(p.get("codice")) == adm_numeric_code(code)), None)
             code = str((product or {}).get("codice") or code); smart = int(row.get("smart_venue", 0) or 0); vend = int(vending.get(code, 0) or 0); shop = int((product or {}).get("giacenza_negozio", 0) or 0); diff = smart - shop - vend; inferred = smart - vend
-            status = "CODICE MANCANTE" if not product else "ANOMALIA VENDING" if inferred < 0 else "OK" if diff == 0 else "DIFFERENZA"
-            result.append({**row, "codice": code, "prodotto_trovato": bool(product), "giacenza_vending": vend, "giacenza_negozio": shop, "gestionale_totale": shop + vend, "negozio_calcolato": inferred, "differenza": diff, "stato": status})
+            status = reconciliation_status(has_product=bool(product), difference=diff, pending=pending.get(code, 0))
+            result.append({**row, "codice": code, "prodotto_trovato": bool(product), "giacenza_vending": vend, "giacenza_negozio": shop, "gestionale_totale": shop + vend, "negozio_calcolato": inferred, "carichi_pendenti": pending.get(code, 0), "differenza": diff, "differenza_residua": diff + pending.get(code, 0), "stato": status})
         return result
 
     @router.post("/smart-venue/bulk/preview")
@@ -168,12 +184,12 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
 
     @router.get("/smart-venue")
     async def list_smart_venue():
-        db = get_database(); hidden, smart, products, vending = await asyncio.gather(db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000), db.smart_venue.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), db.prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), vending_stock_by_code()); hidden_ids = {str(r.get("product_id")) for r in hidden}; products = [{**p, "giacenza_vending": (vending or {}).get(str(p.get("codice") or ""), 0)} for p in products]; by_code = {str(p.get("codice") or ""): p for p in products}; rows = []
+        db = get_database(); hidden, smart, products, vending, pending, adjustments = await asyncio.gather(db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000), db.smart_venue.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), db.prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), vending_stock_by_code(), pending_by_code(), db.rettifiche_inventario.find({}, {"_id": 0, "codice": 1}).to_list(5000)); hidden_ids = {str(r.get("product_id")) for r in hidden}; adjustment_codes = {str(r.get("codice") or "") for r in adjustments}; products = [{**p, "giacenza_vending": (vending or {}).get(str(p.get("codice") or ""), 0)} for p in products]; by_code = {str(p.get("codice") or ""): p for p in products}; rows = []
         for s in resolve_rows(smart, products):
             rid = str(s.get("id") or f"smart-venue:{s.get('codice', '')}");
             if rid in hidden_ids: continue
-            p = by_code.get(str(s.get("codice") or ""), {}); shop = int(p.get("giacenza_negozio", 0) or 0); vend = int(p.get("giacenza_vending", 0) or 0); value = int(s.get("smart_venue", s.get("rimanenze_smart", 0)) or 0); diff = value - shop - vend; inferred = value - vend; status = "CODICE MANCANTE" if not p else "ANOMALIA VENDING" if inferred < 0 else "OK" if diff == 0 else "DIFFERENZA"
-            rows.append({"id": rid, "codice": s.get("codice", ""), "descrizione": str(s.get("descrizione") or p.get("descrizione") or ""), "acquistati": int(p.get("acquistati", 0) or 0), "rimanenze": shop + vend, "giacenza_negozio": shop, "giacenza_vending": vend, "gestionale_totale": shop + vend, "negozio_calcolato": inferred, "smart_venue": value, "barcode": str(s.get("barcode", s.get("codice_smart", "")) or ""), "barcodes": s.get("barcodes") or [], "differenza": diff, "stato": status})
+            p = by_code.get(str(s.get("codice") or ""), {}); code = str(s.get("codice") or ""); shop = int(p.get("giacenza_negozio", 0) or 0); vend = int(p.get("giacenza_vending", 0) or 0); value = int(s.get("smart_venue", s.get("rimanenze_smart", 0)) or 0); diff = value - shop - vend; inferred = value - vend; pending_quantity = pending.get(code, 0); status = reconciliation_status(has_product=bool(p), difference=diff, pending=pending_quantity, has_adjustment=code in adjustment_codes)
+            rows.append({"id": rid, "codice": code, "descrizione": str(s.get("descrizione") or p.get("descrizione") or ""), "acquistati": int(p.get("acquistati", 0) or 0), "rimanenze": shop + vend, "giacenza_negozio": shop, "giacenza_vending": vend, "gestionale_totale": shop + vend, "negozio_calcolato": inferred, "smart_venue": value, "barcode": str(s.get("barcode", s.get("codice_smart", "")) or ""), "barcodes": s.get("barcodes") or [], "carichi_pendenti": pending_quantity, "differenza": diff, "differenza_residua": diff + pending_quantity, "stato": status})
         return rows
 
     @router.post("/smart-venue")
@@ -207,12 +223,26 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
 
     @router.post("/smart-venue/{row_id}/conferma")
     async def confirm_smart_venue_difference(row_id: str, body: Optional[Dict[str, Any]] = None):
+        """Record an explicitly confirmed external outgoing movement."""
         db = get_database(); row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0});
         if not row: raise HTTPException(404, "Riga SMARTV VENUE non trovata")
         product = await db.prodotti.find_one({"codice": row.get("codice")}, {"_id": 0}) or {}; vending = await vending_stock_by_code() or {}; stock = int(product.get("giacenza_negozio", 0) or 0) + int(vending.get(str(product.get("codice") or ""), 0) or 0); current = int(row.get("smart_venue", row.get("rimanenze_smart", 0)) or 0); difference = current - stock; requested = (body or {}).get("inserimento_smart_venue"); quantity = difference if requested in (None, "") else parse_quantity(requested)
         if quantity < 0: raise HTTPException(422, "La differenza è negativa: inserisci una quantità manuale")
         if quantity > current: raise HTTPException(422, "Inserimento Smart Venue superiore alla quantità disponibile")
-        updated = current - quantity; await db.smart_venue.update_one({"id": row_id}, {"$set": {"smart_venue": updated, "ultimo_inserimento_smart_venue": quantity, "updated_at": datetime.now(timezone.utc).isoformat()}}); return {"ok": True, "id": row_id, "rimanenze": stock, "smart_venue": updated, "inserimento_smart_venue": quantity, "differenza": updated - stock}
+        key = str((body or {}).get("idempotency_key") or uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat(); updated = current - quantity
+        async def confirm(session):
+            kwargs = session_kwargs(session)
+            existing = await db.smart_venue_movimenti.find_one({"idempotency_key": key}, {"_id": 0}, **kwargs)
+            if existing: return existing, True
+            result = await db.smart_venue.update_one({"id": row_id, "smart_venue": current}, {"$set": {"smart_venue": updated, "ultimo_inserimento_smart_venue": quantity, "updated_at": now}}, **kwargs)
+            if result.matched_count != 1: raise HTTPException(409, "Saldo Smart Venue cambiato: ricarica e riprova")
+            movement = {"id": str(uuid.uuid4()), "idempotency_key": key, "codice": row["codice"], "tipo": "USCITA", "quantita": quantity, "stato": "CONFERMATO", "saldo_precedente": current, "saldo_successivo": updated, "origine": "SMART_VENUE_RICONCILIAZIONE", "motivazione": str((body or {}).get("motivazione") or "Uscita registrata in Smart Venue"), "operatore": request_operator(None), "created_at": now, "confirmed_at": now}
+            await db.smart_venue_movimenti.insert_one(movement, **kwargs)
+            return movement, False
+        movement, already = await run_transactionally(confirm)
+        if not already: await record_audit_event("CONFERMATO", "SMART_VENUE_USCITA", movement["id"], prima={"saldo": current}, dopo={"saldo": updated, "quantita": quantity}, operatore=movement["operatore"])
+        return {"ok": True, "gia_confermato": already, "id": row_id, "rimanenze": stock, "smart_venue": movement.get("saldo_successivo", updated), "inserimento_smart_venue": quantity, "saldo_precedente": current, "saldo_successivo": updated, "differenza": updated - stock}
 
     @router.delete("/smart-venue/{row_id}")
     async def delete_smart_venue_row(row_id: str):

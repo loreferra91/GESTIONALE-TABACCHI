@@ -11,6 +11,7 @@ export default function Ordini() {
   const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 10, prezzo: 0 });
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(null);
+  const [smartStatus, setSmartStatus] = useState("");
 
   const { rows, sortKey, sortDir, toggle, query, setQuery } = useSortSearch(allRows, {
     initial: "data", dir: "desc",
@@ -39,8 +40,9 @@ export default function Ordini() {
     finally { setDeleting(null); }
   };
 
-  const totQ = rows.reduce((s, r) => s + (r.quantita || 0), 0);
-  const totV = rows.reduce((s, r) => s + (r.quantita || 0) * (r.prezzo || 0), 0);
+  const filteredRows = smartStatus ? rows.filter(row => (smartStatus === "CONFERMATO" ? row.caricato_smart_venue === true : row.smart_venue_stato === smartStatus || (!row.smart_venue_stato && (smartStatus === "NON_APPLICABILE" ? !row.smart_venue_applicabile : false)))) : rows;
+  const totQ = filteredRows.reduce((s, r) => s + (r.quantita || 0), 0);
+  const totV = filteredRows.reduce((s, r) => s + (r.quantita || 0) * (r.prezzo || 0), 0);
 
   return (
     <Layout title="Storico ordini" subtitle={`${allRows.length} righe totali`}>
@@ -59,6 +61,7 @@ export default function Ordini() {
 
       <div className="flex items-center justify-between gap-3 mb-4">
         <SearchBar data-testid="ord-search" value={query} onChange={setQuery} placeholder="Cerca codice, descrizione o sorgente…" className="flex-1 max-w-md" />
+        <select data-testid="ord-smart-status" value={smartStatus} onChange={event => setSmartStatus(event.target.value)} className="rounded-md border px-2 py-2 text-sm"><option value="">Tutti gli stati Smart Venue</option><option value="NON_APPLICABILE">Non applicabile</option><option value="DA_INSERIRE">Da inserire in Smart Venue</option><option value="CONFERMATO">Confermato in Smart Venue</option><option value="ANNULLATO">Annullato</option></select>
         <div className="text-sm text-slate-600 whitespace-nowrap">Totale filtrato: <span className="font-heading font-black text-lg text-slate-900 ml-2">{formatEur(totV)}</span> · {formatNum(totQ)} pz</div>
       </div>
 
@@ -79,7 +82,7 @@ export default function Ordini() {
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => (
+              {filteredRows.map(r => (
                 <tr key={r.id} data-testid={`ord-row-${r.id}`}>
                   <td className="font-mono text-xs">{(r.data || "").slice(0, 10)}</td>
                   <td className="font-mono">{r.codice}</td>
@@ -88,7 +91,7 @@ export default function Ordini() {
                   <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
                   <td className="font-mono text-right font-semibold">{formatEur(r.quantita * r.prezzo)}</td>
                   <td className="text-xs text-slate-500">{r.file_sorgente}</td>
-                  <td>{r.smart_venue_applicabile ? <Badge tone={r.caricato_smart_venue ? "ok" : "warning"}>{r.caricato_smart_venue ? "Confermato" : "Da confermare"}</Badge> : <span className="text-xs text-slate-400">Non previsto</span>}</td>
+                  <td><Badge tone={r.caricato_smart_venue ? "ok" : r.smart_venue_applicabile ? "warning" : "default"}>{r.annullato ? "Annullato" : r.caricato_smart_venue ? "Confermato in Smart Venue" : r.smart_venue_applicabile ? "Da inserire in Smart Venue" : "Non applicabile"}</Badge></td>
                   <td className="text-right"><button onClick={() => del(r.id)} disabled={deleting === r.id} className="text-red-600 text-xs disabled:opacity-40">✕</button></td>
                 </tr>
               ))}

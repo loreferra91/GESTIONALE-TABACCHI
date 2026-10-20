@@ -26,6 +26,7 @@ export default function SmartVenue() {
   const [insertionDrafts, setInsertionDrafts] = useState({});
   const [barcodeDrafts, setBarcodeDrafts] = useState({});
   const [confirmingId, setConfirmingId] = useState(null);
+  const [outgoingTarget, setOutgoingTarget] = useState(null);
   const [savingBarcodeId, setSavingBarcodeId] = useState(null);
   const [productForm, setProductForm] = useState(EMPTY_PRODUCT);
   const [creating, setCreating] = useState(false);
@@ -45,6 +46,7 @@ export default function SmartVenue() {
 
   const purchased = allRows.reduce((total, row) => total + (row.acquistati || 0), 0);
   const stock = allRows.reduce((total, row) => total + (row.rimanenze || 0), 0);
+  const pending = allRows.reduce((total, row) => total + (row.carichi_pendenti || 0), 0);
 
   const applySmartVenueResult = result => {
     setAllRows(current => current.map(row => row.id === result.id ? {
@@ -78,7 +80,7 @@ export default function SmartVenue() {
         quantity === null ? {} : { inserimento_smart_venue: quantity },
       );
       applySmartVenueResult(response.data);
-      toast.success(`${response.data.inserimento_smart_venue} sottratti da Smart Venue per ${row.codice}`);
+      toast.success(`Uscita di ${response.data.inserimento_smart_venue} registrata in Smart Venue per ${row.codice}`);
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile confermare la differenza"));
     } finally {
@@ -179,7 +181,7 @@ export default function SmartVenue() {
   };
 
   return (
-    <Layout title="SMARTV VENUE" subtitle="dati Smart Venue da Excel e rimanenze correnti dei prodotti">
+    <Layout title="SMARTV VENUE" subtitle="saldo esterno confermato, fisico e operazioni in attesa">
       <Card className="mb-6 p-4">
         <form onSubmit={addProduct}>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -209,10 +211,11 @@ export default function SmartVenue() {
           </div>
         </form>
       </Card>
-      <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-3">
+      <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiCard label="Prodotti" value={allRows.length} />
         <KpiCard label="Acquistati" value={purchased} />
-        <KpiCard label="Rimanenze" value={stock} />
+        <KpiCard label="Fisico totale" value={stock} />
+        <KpiCard label="Carichi da inserire" value={pending} tone={pending ? "warning" : "default"} />
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -234,9 +237,12 @@ export default function SmartVenue() {
                 <Th sortKey="codice" currentKey={sortKey} dir={sortDir} onClick={toggle}>Codice</Th>
                 <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggle}>Descrizione</Th>
                 <Th sortKey="acquistati" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Acquistati</Th>
-                <Th sortKey="rimanenze" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Rimanenze</Th>
-                <Th sortKey="smart_venue" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Smart Venue</Th>
-                <th className="text-right">Inserimento Smart Venue</th>
+                <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Negozio</Th>
+                <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vending</Th>
+                <Th sortKey="rimanenze" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Fisico</Th>
+                <Th sortKey="smart_venue" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Saldo SV</Th>
+                <th className="text-right">Carichi pendenti</th>
+                <th className="text-right">Uscita da confermare</th>
                 <Th sortKey="barcode" currentKey={sortKey} dir={sortDir} onClick={toggle}>Barcode</Th>
                 <Th sortKey="differenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Differenza</Th>
                 <th aria-label="Azioni"></th>
@@ -248,8 +254,11 @@ export default function SmartVenue() {
                   <td className="font-mono font-semibold">{row.codice}</td>
                   <td className="max-w-lg truncate">{row.descrizione}</td>
                   <td className="text-right font-mono">{formatNum(row.acquistati)}</td>
+                  <td className="text-right font-mono">{formatNum(row.giacenza_negozio)}</td>
+                  <td className="text-right font-mono">{formatNum(row.giacenza_vending)}</td>
                   <td className="text-right font-mono font-bold">{formatNum(row.rimanenze)}</td>
                   <td className="text-right font-mono font-bold">{formatNum(row.smart_venue)}</td>
+                  <td className="text-right font-mono">{formatNum(row.carichi_pendenti)}</td>
                   <td className="text-right">
                     <input
                       data-testid={`smart-venue-insertion-${row.codice}`}
@@ -287,15 +296,16 @@ export default function SmartVenue() {
                   <td className={`text-right font-mono font-bold ${row.differenza > 0 ? "text-emerald-700" : row.differenza < 0 ? "text-red-700" : "text-slate-400"}`}>
                     {row.differenza > 0 ? "+" : ""}{formatNum(row.differenza)}
                   </td>
+                  <td><span className="text-xs font-semibold">{row.stato}</span></td>
                   <td className="whitespace-nowrap text-right">
                     <button
                       data-testid={`smart-venue-confirm-${row.codice}`}
-                      onClick={() => confirmDifference(row)}
+                      onClick={() => setOutgoingTarget(row)}
                       disabled={confirmingId === row.id || ((insertionDrafts[row.id] === undefined || insertionDrafts[row.id] === "") && row.differenza <= 0)}
                       className="mr-1 inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-default disabled:opacity-35"
-                      title={`Conferma differenza ${row.codice}`}
+                      title={`Conferma uscita registrata in Smart Venue per ${row.codice}`}
                     >
-                      <CheckCircle size={14} weight="bold" /> Conferma
+                      <CheckCircle size={14} weight="bold" /> Conferma uscita
                     </button>
                     <button
                       data-testid={`smart-venue-delete-${row.codice}`}
@@ -311,7 +321,7 @@ export default function SmartVenue() {
               ))}
               {!rows.length && (
                 <tr>
-                  <td colSpan="9" className="py-10 text-center text-slate-500">
+                  <td colSpan="13" className="py-10 text-center text-slate-500">
                     Nessun prodotto disponibile nel gestionale.
                   </td>
                 </tr>
@@ -320,6 +330,18 @@ export default function SmartVenue() {
           </table>
         </div>
       </Card>
+      <ConfirmDialog
+        open={Boolean(outgoingTarget)}
+        title="Confermare uscita registrata in Smart Venue?"
+        confirmLabel="Conferma uscita esterna"
+        loading={confirmingId === outgoingTarget?.id}
+        onCancel={() => setOutgoingTarget(null)}
+        onConfirm={async () => { await confirmDifference(outgoingTarget); setOutgoingTarget(null); }}
+      >
+        <p><b>{outgoingTarget?.codice}</b> — {outgoingTarget?.descrizione}</p>
+        <p className="mt-2 text-slate-600">Operazione: diminuzione del saldo esterno Smart Venue di <b>{formatNum(Number(insertionDrafts[outgoingTarget?.id] || Math.max(0, outgoingTarget?.differenza || 0)))}</b> pezzi.</p>
+        <p className="mt-2 text-slate-600">Saldo precedente: <b>{formatNum(outgoingTarget?.smart_venue || 0)}</b> · saldo successivo: <b>{formatNum(Math.max(0, (outgoingTarget?.smart_venue || 0) - Number(insertionDrafts[outgoingTarget?.id] || Math.max(0, outgoingTarget?.differenza || 0))))}</b>.</p>
+      </ConfirmDialog>
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="Eliminare questa riga?"

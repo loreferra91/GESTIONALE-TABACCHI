@@ -33,6 +33,7 @@ beforeEach(async () => {
   api.get.mockImplementation((path) => {
     if (path === "/prodotti") return Promise.resolve({ data: [product] });
     if (path === "/ordini") return Promise.resolve({ data: [] });
+    if (path === "/smart-venue") return Promise.resolve({ data: [] });
     return Promise.reject(new Error(`Unexpected GET ${path}`));
   });
   api.post.mockImplementation((path) => {

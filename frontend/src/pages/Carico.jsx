@@ -9,6 +9,7 @@ import { defaultLotForCategory } from "../lib/categories";
 
 export default function Carico() {
   const [prodotti, setProdotti] = useState([]);
+  const [smartVenueCodes, setSmartVenueCodes] = useState(new Set());
   const today = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(today);
   const [sorgente, setSorgente] = useState("carico manuale");
@@ -27,9 +28,11 @@ export default function Carico() {
     Promise.all([
       api.get("/prodotti", { params: { limit: 5000 } }),
       api.get("/ordini", { params: { limit: 100 } }),
-    ]).then(([productsResponse, receiptsResponse]) => {
+      api.get("/smart-venue"),
+    ]).then(([productsResponse, receiptsResponse, smartVenueResponse]) => {
       setProdotti(productsResponse.data || []);
       setRecentReceipts((receiptsResponse.data || []).filter(row => row.smart_venue_applicabile));
+      setSmartVenueCodes(new Set((smartVenueResponse.data || []).map(row => row.codice)));
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -182,8 +185,8 @@ export default function Carico() {
             <ul className="list-disc list-inside mt-1 space-y-0.5 text-slate-600">
               <li>ogni riga viene registrata in <b>Storico ordini</b> con la data indicata,</li>
               <li>la <b>giacenza negozio</b> e i totali <b>acquistati</b> vengono incrementati,</li>
-              <li>il saldo interno <b>Smart Venue</b> viene incrementato subito per i prodotti gestiti,</li>
-              <li>la conferma dell'inserimento nel software esterno resta separata e non modifica le quantità,</li>
+              <li>per i prodotti Smart Venue viene creato un <b>carico da inserire</b>, senza modificare subito il saldo esterno,</li>
+              <li>la conferma dell'inserimento nel software esterno aggiorna il saldo Smart Venue una sola volta,</li>
               <li>codici sconosciuti creano un nuovo prodotto automaticamente.</li>
             </ul>
           </div>
@@ -292,7 +295,7 @@ export default function Carico() {
                     <td className="text-right font-mono font-semibold">{formatEur((r.quantita || 0) * (r.prezzo || 0))}</td>
                     <td>
                       {r.codice ? (known
-                        ? <Badge tone="ok">OK</Badge>
+                        ? <Badge tone={smartVenueCodes.has(r.codice.trim()) ? "warning" : "ok"}>{smartVenueCodes.has(r.codice.trim()) ? "DA INSERIRE SV" : "NON APPLICABILE"}</Badge>
                         : <Badge tone="error">NUOVO</Badge>)
                        : <span className="text-xs text-slate-400">—</span>}
                     </td>
@@ -340,7 +343,7 @@ export default function Carico() {
       <Card className="mt-8 overflow-hidden">
         <div className="border-b border-slate-200 px-4 py-3">
           <h2 className="font-bold text-slate-900">Carichi da confermare su Smart Venue</h2>
-          <p className="mt-1 text-xs text-slate-500">La conferma attesta soltanto l'inserimento nel software esterno: la giacenza interna è già stata aggiornata al momento del carico.</p>
+          <p className="mt-1 text-xs text-slate-500">La conferma registra il carico nel saldo Smart Venue esterno; il fisico è già aggiornato al ricevimento.</p>
         </div>
         <div className="overflow-x-auto max-h-[50vh]">
           <table className="data-table w-full min-w-[760px]">
