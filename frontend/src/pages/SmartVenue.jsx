@@ -27,6 +27,9 @@ export default function SmartVenue() {
   const [barcodeDrafts, setBarcodeDrafts] = useState({});
   const [confirmingId, setConfirmingId] = useState(null);
   const [outgoingTarget, setOutgoingTarget] = useState(null);
+  const [entryTarget, setEntryTarget] = useState(null);
+  const [entryDrafts, setEntryDrafts] = useState({});
+  const [savingEntryId, setSavingEntryId] = useState(null);
   const [savingBarcodeId, setSavingBarcodeId] = useState(null);
   const [productForm, setProductForm] = useState(EMPTY_PRODUCT);
   const [creating, setCreating] = useState(false);
@@ -85,6 +88,37 @@ export default function SmartVenue() {
       toast.error(apiErrorMessage(err, "Impossibile confermare la differenza"));
     } finally {
       setConfirmingId(null);
+    }
+  };
+
+  const confirmEntry = async row => {
+    const draft = entryDrafts[row.id] || {};
+    const quantity = Number(draft.quantita);
+    if (!Number.isInteger(quantity) || quantity <= 0 || quantity > Math.abs(row.differenza)) {
+      toast.error("La quantità di entrata deve essere intera e non superiore alla differenza negativa");
+      return;
+    }
+    if (!String(draft.motivazione || "").trim()) {
+      toast.error("La motivazione è obbligatoria");
+      return;
+    }
+    setSavingEntryId(row.id);
+    try {
+      const response = await api.post(`/smart-venue/${encodeURIComponent(row.id)}/conferma-entrata`, {
+        quantita: quantity,
+        motivazione: draft.motivazione.trim(),
+        idempotency_key: draft.idempotency_key || `${row.id}-entry-${Date.now()}`,
+        saldo_atteso: row.smart_venue,
+        differenza_attesa: row.differenza,
+        rettifica_id: row.rettifica_id || null,
+      });
+      applySmartVenueResult(response.data);
+      setEntryTarget(null);
+      toast.success(`Entrata di ${quantity} registrata per ${row.codice}`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile confermare l'entrata"));
+    } finally {
+      setSavingEntryId(null);
     }
   };
 
@@ -242,8 +276,9 @@ export default function SmartVenue() {
                 <Th sortKey="rimanenze" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Fisico</Th>
                 <Th sortKey="smart_venue" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Saldo SV</Th>
                 <th className="text-right">Carichi pendenti</th>
-                <th className="text-right">Uscita da confermare</th>
+                <th className="text-right">Quantità uscita</th>
                 <Th sortKey="barcode" currentKey={sortKey} dir={sortDir} onClick={toggle}>Barcode</Th>
+                <th>Stato</th>
                 <Th sortKey="differenza" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Differenza</Th>
                 <th aria-label="Azioni"></th>
               </tr>
@@ -271,7 +306,7 @@ export default function SmartVenue() {
                       placeholder={String(Math.max(0, row.differenza))}
                       value={insertionDrafts[row.id] ?? ""}
                       onChange={event => setInsertionDrafts(current => ({ ...current, [row.id]: event.target.value }))}
-                      disabled={confirmingId === row.id}
+                      disabled={confirmingId === row.id || row.differenza <= 0}
                       className="w-24 rounded-md border border-slate-300 px-2 py-1 text-right font-mono text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 disabled:bg-slate-100"
                     />
                   </td>
@@ -296,17 +331,25 @@ export default function SmartVenue() {
                   <td className={`text-right font-mono font-bold ${row.differenza > 0 ? "text-emerald-700" : row.differenza < 0 ? "text-red-700" : "text-slate-400"}`}>
                     {row.differenza > 0 ? "+" : ""}{formatNum(row.differenza)}
                   </td>
-                  <td><span className="text-xs font-semibold">{row.stato}</span></td>
+                  <td><span className={`text-xs font-semibold ${row.stato === "ANOMALIA VENDING" ? "text-red-700" : row.stato === "ALLINEATO" ? "text-slate-500" : "text-amber-700"}`}>{row.stato}</span></td>
                   <td className="whitespace-nowrap text-right">
-                    <button
+                    {row.stato === "USCITA DA CONFERMARE" && <button
                       data-testid={`smart-venue-confirm-${row.codice}`}
                       onClick={() => setOutgoingTarget(row)}
-                      disabled={confirmingId === row.id || ((insertionDrafts[row.id] === undefined || insertionDrafts[row.id] === "") && row.differenza <= 0)}
+                      disabled={confirmingId === row.id || row.differenza <= 0}
                       className="mr-1 inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-default disabled:opacity-35"
                       title={`Conferma uscita registrata in Smart Venue per ${row.codice}`}
                     >
                       <CheckCircle size={14} weight="bold" /> Conferma uscita
-                    </button>
+                    </button>}
+                    {row.differenza < 0 && (row.stato === "ENTRATA DA VERIFICARE" || row.stato === "RETTIFICA DA VERIFICARE") && (
+                      <button
+                        data-testid={`smart-venue-entry-${row.codice}`}
+                        onClick={() => setEntryTarget(row)}
+                        disabled={savingEntryId === row.id}
+                        className="mr-1 rounded-md bg-blue-600 px-2 py-1.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-40"
+                      >Conferma entrata</button>
+                    )}
                     <button
                       data-testid={`smart-venue-delete-${row.codice}`}
                       onClick={() => setDeleteTarget(row)}
@@ -341,6 +384,25 @@ export default function SmartVenue() {
         <p><b>{outgoingTarget?.codice}</b> — {outgoingTarget?.descrizione}</p>
         <p className="mt-2 text-slate-600">Operazione: diminuzione del saldo esterno Smart Venue di <b>{formatNum(Number(insertionDrafts[outgoingTarget?.id] || Math.max(0, outgoingTarget?.differenza || 0)))}</b> pezzi.</p>
         <p className="mt-2 text-slate-600">Saldo precedente: <b>{formatNum(outgoingTarget?.smart_venue || 0)}</b> · saldo successivo: <b>{formatNum(Math.max(0, (outgoingTarget?.smart_venue || 0) - Number(insertionDrafts[outgoingTarget?.id] || Math.max(0, outgoingTarget?.differenza || 0))))}</b>.</p>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={Boolean(entryTarget)}
+        title="Confermare entrata/rettifica Smart Venue?"
+        confirmLabel="Conferma entrata"
+        loading={savingEntryId === entryTarget?.id}
+        onCancel={() => setEntryTarget(null)}
+        onConfirm={() => confirmEntry(entryTarget)}
+      >
+        <p><b>{entryTarget?.codice}</b> — {entryTarget?.descrizione}</p>
+        <div className="mt-3 grid gap-2">
+          <label className="text-sm font-semibold">Quantità
+            <input type="number" min="1" max={Math.abs(entryTarget?.differenza || 0)} step="1" className="mt-1 w-full rounded-md border p-2" value={entryDrafts[entryTarget?.id]?.quantita || ""} onChange={event => setEntryDrafts(current => ({ ...current, [entryTarget.id]: { ...current[entryTarget.id], quantita: event.target.value } }))} />
+          </label>
+          <label className="text-sm font-semibold">Motivazione
+            <textarea className="mt-1 w-full rounded-md border p-2" value={entryDrafts[entryTarget?.id]?.motivazione || ""} onChange={event => setEntryDrafts(current => ({ ...current, [entryTarget.id]: { ...current[entryTarget.id], motivazione: event.target.value } }))} />
+          </label>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">Differenza attesa: {formatNum(entryTarget?.differenza || 0)}. Le giacenze fisiche non vengono modificate.</p>
       </ConfirmDialog>
       <ConfirmDialog
         open={Boolean(deleteTarget)}
