@@ -79,7 +79,9 @@ afterEach(async () => {
 });
 
 test("mostra solo le azioni compatibili con lo stato di riconciliazione", () => {
-  expect(container.querySelector('[data-testid="smart-venue-entry-NEG"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="smart-venue-entry-NEG"]')).toBeNull();
+  expect(container.querySelector('[data-testid="smart-venue-monitor-NEG"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="smart-venue-monitor-NEG"]').textContent).toContain("DA MONITORARE");
   expect(container.querySelector('[data-testid="smart-venue-confirm-POS"]')).not.toBeNull();
   expect(container.querySelector('[data-testid="smart-venue-insertion-NEG"]')).toBeNull();
   expect(container.querySelector('[data-testid="smart-venue-entry-PEND"]')).toBeNull();
@@ -95,38 +97,10 @@ test("mostra solo le azioni compatibili con lo stato di riconciliazione", () => 
   expect(stateIndex).toBeLessThan(differenceIndex);
 });
 
-test("riusa la stessa chiave nel retry dell'entrata e mostra i saldi futuri", async () => {
-  api.post
-    .mockRejectedValueOnce({ response: { data: { detail: "errore temporaneo" } } })
-    .mockResolvedValueOnce({ data: { quantita: 3 } });
-
-  await act(async () => container.querySelector('[data-testid="smart-venue-entry-NEG"]').click());
-
-  expect(container.querySelector('[data-testid="smart-venue-entry-quantity"]').value).toBe("3");
-  expect(container.querySelector('[data-testid="smart-venue-entry-reason"]').value).toBe(
-    "Riconciliazione saldo Smart Venue",
-  );
-  expect(container.querySelector('[data-testid="smart-venue-entry-next-balance"]').textContent).toBe("10");
-  expect(container.querySelector('[data-testid="smart-venue-entry-next-difference"]').textContent).toBe("0");
-
-  await act(async () => buttonWithText("Conferma entrata").click());
-  expect(container.querySelector('[data-testid="smart-venue-entry-quantity"]')).not.toBeNull();
-
-  await act(async () => buttonWithText("Conferma entrata").click());
-
-  const entryCalls = api.post.mock.calls.filter(([path]) => path.includes("conferma-entrata"));
-  expect(entryCalls).toHaveLength(2);
-  expect(entryCalls[0][0]).toBe("/smart-venue/sv-negative/conferma-entrata");
-  expect(entryCalls[0][1]).toEqual(expect.objectContaining({
-    codice: "NEG",
-    quantita: 3,
-    saldo_atteso: 7,
-    differenza_attesa: -3,
-    idempotency_key: expect.any(String),
-  }));
-  expect(entryCalls[1][1].idempotency_key).toBe(entryCalls[0][1].idempotency_key);
-  expect(api.get).toHaveBeenCalledTimes(2);
-  expect(container.querySelector('[data-testid="smart-venue-entry-quantity"]')).toBeNull();
+test("la differenza negativa è solo monitorata e non può registrare entrate", () => {
+  expect(container.querySelector('[data-testid="smart-venue-monitor-NEG"]')).not.toBeNull();
+  expect(container.textContent).not.toContain("Conferma entrata");
+  expect(api.post.mock.calls.some(([path]) => path.includes("conferma-entrata"))).toBe(false);
 });
 
 test("conferma l'uscita sul nuovo endpoint idempotente con riepilogo", async () => {

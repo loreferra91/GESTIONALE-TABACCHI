@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle, FloppyDisk, MagnifyingGlass } from "@phosphor-icons/react";
+import { CheckCircle, FloppyDisk, MagnifyingGlass, Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import Layout from "../components/Layout";
 import { Badge, Card, KpiCard, formatNum } from "../components/UI";
@@ -12,6 +12,9 @@ const statusTone = status => ({
   "CODICE MANCANTE": "error",
   "ANOMALIA VENDING": "error",
 }[status] || "info");
+
+const isNegativeDifferenceToMonitor = row => row.differenza < 0
+  && (row.stato === "ENTRATA DA VERIFICARE" || row.stato === "RETTIFICA DA VERIFICARE");
 
 export default function SmartVenueControllo() {
   const [text, setText] = useState("");
@@ -186,7 +189,17 @@ export default function SmartVenueControllo() {
                   <td className={`text-right font-mono font-bold ${row.differenza > 0 ? "text-emerald-700" : row.differenza < 0 ? "text-red-700" : "text-slate-400"}`}>
                     {row.differenza > 0 ? "+" : ""}{formatNum(row.differenza)}
                   </td>
-                  <td><Badge tone={statusTone(row.stato)}>{row.stato || (row.differenza ? "DIFFERENZA" : "OK")}</Badge></td>
+                  <td>
+                    {isNegativeDifferenceToMonitor(row) ? (
+                      <Badge tone="warning">
+                        <span className="inline-flex items-center gap-1" title="Differenza negativa da controllare">
+                          <Warning size={15} weight="fill" aria-hidden="true" /> DA MONITORARE
+                        </span>
+                      </Badge>
+                    ) : (
+                      <Badge tone={statusTone(row.stato)}>{row.stato || (row.differenza ? "DIFFERENZA" : "OK")}</Badge>
+                    )}
+                  </td>
                 </tr>
               ))}
               {!visibleRows.length && (
