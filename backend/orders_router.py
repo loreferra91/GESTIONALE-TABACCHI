@@ -443,6 +443,11 @@ def create_orders_router(
         batch_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         operator = request_operator(request)
+        backup = await create_backup_snapshot(
+            "Prima del carico merce",
+            "pre-carico-merce",
+            ["prodotti", "storico_ordini", "smart_venue", "ricezioni_merce"],
+        )
 
         async def persist_receipt(session):
             kwargs = session_kwargs(session)
@@ -548,6 +553,7 @@ def create_orders_router(
                     "idempotency_key": idempotency_key,
                     "movimenti": movements,
                     "gia_registrato": False,
+                    "backup_id": backup["id"],
                 }
                 completed = await database.ricezioni_merce.update_one(
                     {"id": batch_id, "status": "processing"},

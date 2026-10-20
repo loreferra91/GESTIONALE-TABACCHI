@@ -29,7 +29,8 @@ if __package__:
     )
     from .backup_router import (
         BACKUP_COLLECTIONS, BACKUP_FILE_FORMAT, BACKUP_FILE_VERSION,
-        BACKUP_RETENTION_LIMIT, BACKUP_RETENTION_POLICY_ID,
+        BACKUP_PARTIAL_RETENTION_LIMIT, BACKUP_RETENTION_LIMIT,
+        BACKUP_RETENTION_POLICY_ID, DAILY_BACKUP_REASON,
         EXCEL_IMPORT_BACKUP_COLLECTIONS, OPTIONAL_BACKUP_COLLECTIONS,
         create_backup_router,
     )
@@ -114,7 +115,8 @@ else:
     )
     from backup_router import (
         BACKUP_COLLECTIONS, BACKUP_FILE_FORMAT, BACKUP_FILE_VERSION,
-        BACKUP_RETENTION_LIMIT, BACKUP_RETENTION_POLICY_ID,
+        BACKUP_PARTIAL_RETENTION_LIMIT, BACKUP_RETENTION_LIMIT,
+        BACKUP_RETENTION_POLICY_ID, DAILY_BACKUP_REASON,
         EXCEL_IMPORT_BACKUP_COLLECTIONS, OPTIONAL_BACKUP_COLLECTIONS,
         create_backup_router,
     )
@@ -961,6 +963,7 @@ sales = create_sales_router(
     normalize_money=money,
     request_operator=_request_operator,
     cash_movement_model=MovimentoCassa,
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
 )
 sales_router = sales["router"]
 list_vendite = sales["list_vendite"]
@@ -1003,6 +1006,7 @@ backup_router = backup["router"]
 create_backup_snapshot = backup["create_backup_snapshot"]
 backup_retention_preview = backup["backup_retention_preview"]
 prune_backup_snapshots = backup["prune_backup_snapshots"]
+ensure_daily_backup = backup["ensure_daily_backup"]
 _backup_documents = backup["backup_documents"]
 _validate_backup_file = backup["validate_backup_file"]
 _restore_collections = backup["restore_collections"]
@@ -1081,6 +1085,7 @@ operations = create_operations_router(
     get_current_anomalies=lambda: anomalie(),
     get_dashboard=lambda: dashboard(),
     get_auto_order=lambda: auto_order(),
+    ensure_daily_backup=lambda: ensure_daily_backup(),
 )
 operations_router = operations["router"]
 data_status_payload = operations["data_status_payload"]
@@ -1139,6 +1144,7 @@ csv_vending_sales = create_csv_vending_sales_router(
     adjust_vending_cash_balance=lambda *args, **kwargs: _adjust_vending_cash_balance(*args, **kwargs),
     get_store_vending_accounting_snapshot=lambda *args, **kwargs: _store_vending_accounting_snapshot(*args, **kwargs),
     accounting_state_id=VENDING_ACCOUNTING_STATE_ID,
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
 )
 csv_vending_sales_router = csv_vending_sales["router"]
 preview_csv_vending = csv_vending_sales["preview_csv_vending"]

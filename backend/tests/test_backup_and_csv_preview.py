@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -113,6 +114,77 @@ def test_backup_retention_keeps_three_recent_snapshots_and_frees_old_items(monke
     assert result["documenti_eliminati"] == 4
     assert remaining == 6
     assert pruned == 2
+
+
+def test_backup_retention_keeps_complete_and_sector_snapshots_separately(monkeypatch):
+    database = AsyncMongoMockClient()["backup_retention_by_type"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        for partial in (False, True):
+            for index in range(4):
+                snapshot_id = f"{'sector' if partial else 'full'}-{index}"
+                await database.backup_snapshots.insert_one({
+                    "id": snapshot_id,
+                    "status": "READY",
+                    "partial": partial,
+                    "created_at": f"2026-10-{index + 1:02d}T10:00:00+00:00",
+                    "label": snapshot_id,
+                    "reason": "test",
+                    "total_docs": 1,
+                })
+                await database.backup_snapshot_items.insert_one({
+                    "snapshot_id": snapshot_id,
+                    "collection": "prodotti",
+                    "doc": {"id": snapshot_id},
+                })
+        preview = await server.backup_retention_preview(2, 3)
+        result = await server.prune_backup_snapshots(2, 3)
+        remaining = await database.backup_snapshots.find(
+            {"status": "READY"}, {"_id": 0, "partial": 1}
+        ).to_list(None)
+        return preview, result, remaining
+
+    preview, result, remaining = asyncio.run(scenario())
+
+    assert preview["snapshot_da_svuotare"] == 3
+    assert result["documenti_eliminati"] == 3
+    assert sum(not row["partial"] for row in remaining) == 2
+    assert sum(row["partial"] for row in remaining) == 3
+
+
+def test_daily_backup_is_created_once_per_business_day(monkeypatch):
+    database = AsyncMongoMockClient()["daily_backup"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.operation_locks.insert_one({
+            "_id": "daily-backup:2026-10-20",
+            "token": "stale",
+            "expires_at": datetime(2026, 10, 20, 4, 0, tzinfo=timezone.utc),
+        })
+        first = await server.ensure_daily_backup(
+            datetime(2026, 10, 20, 5, 30, tzinfo=timezone.utc)
+        )
+        second = await server.ensure_daily_backup(
+            datetime(2026, 10, 20, 20, 30, tzinfo=timezone.utc)
+        )
+        following_day = await server.ensure_daily_backup(
+            datetime(2026, 10, 21, 5, 30, tzinfo=timezone.utc)
+        )
+        count = await database.backup_snapshots.count_documents({
+            "reason": server.DAILY_BACKUP_REASON,
+            "status": "READY",
+        })
+        return first, second, following_day, count
+
+    first, second, following_day, count = asyncio.run(scenario())
+
+    assert first["created_now"] is True
+    assert second["created_now"] is False
+    assert second["id"] == first["id"]
+    assert following_day["created_now"] is True
+    assert count == 2
 
 
 def test_backup_file_validation_requires_every_operational_collection():

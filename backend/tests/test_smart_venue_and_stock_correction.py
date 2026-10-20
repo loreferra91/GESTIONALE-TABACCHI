@@ -247,6 +247,9 @@ def isolated_db(monkeypatch):
         rettifiche_inventario=FakeCollection(),
     )
     monkeypatch.setattr(server, "db", database)
+    async def fake_backup(*_args, **_kwargs):
+        return {"id": "backup-test"}
+    monkeypatch.setattr(server, "create_backup_snapshot", fake_backup)
     return database
 
 

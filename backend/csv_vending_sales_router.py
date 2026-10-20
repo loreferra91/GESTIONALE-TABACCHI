@@ -26,6 +26,7 @@ def create_csv_vending_sales_router(
     adjust_vending_cash_balance: Callable[..., Any],
     get_store_vending_accounting_snapshot: Callable[..., Any],
     accounting_state_id: str,
+    create_backup_snapshot: Callable[..., Any],
 ) -> Dict[str, Any]:
     router = APIRouter()
 
@@ -164,6 +165,16 @@ def create_csv_vending_sales_router(
             if stock_summary["errori_giacenza"]:
                 details.append("vendite superiori alla giacenza disponibile")
             raise HTTPException(409, "Import CSV bloccato: " + "; ".join(details))
+
+        backup = await create_backup_snapshot(
+            "Prima dell'import vendite vending",
+            "pre-import-vendite-vending",
+            [
+                "prodotti", "vending", "vendite", "vendite_bulk_imports",
+                "cassa_vending_stato", "vending_accounting_snapshots",
+                "vending_accounting_state", "vending_accounting_events",
+            ],
+        )
 
         batch_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
@@ -403,6 +414,7 @@ def create_csv_vending_sales_router(
                 "importi_pagamenti", {}
             ),
             "contabilita_totale": accounting_snapshot.get("totale", 0),
+            "backup_id": backup["id"],
         }
 
     @router.get("/vendite/csv/ultimo")

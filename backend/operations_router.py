@@ -2,6 +2,7 @@
 import asyncio
 from datetime import datetime, timezone
 import hashlib
+import logging
 
 from fastapi import APIRouter, HTTPException
 
@@ -18,6 +19,7 @@ def create_operations_router(
     get_current_anomalies,
     get_dashboard,
     get_auto_order,
+    ensure_daily_backup,
 ):
     router = APIRouter()
 
@@ -74,7 +76,18 @@ def create_operations_router(
 
     @router.get("/data-status")
     async def data_status():
-        return await data_status_payload()
+        daily_backup = None
+        daily_backup_error = None
+        try:
+            daily_backup = await ensure_daily_backup()
+        except Exception:
+            logging.exception("Creazione del backup giornaliero non riuscita")
+            daily_backup_error = "Backup giornaliero non riuscito"
+        return {
+            **(await data_status_payload()),
+            "daily_backup": daily_backup,
+            "daily_backup_error": daily_backup_error,
+        }
 
     @router.get("/global-search")
     async def global_search(q: str, limit: int = 8):

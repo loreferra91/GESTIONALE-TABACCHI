@@ -87,6 +87,7 @@ def create_sales_router(
     normalize_money: Callable[[Any], float],
     request_operator: Callable[[Optional[Request]], str],
     cash_movement_model: Any,
+    create_backup_snapshot: Callable[..., Any],
 ) -> Dict[str, Any]:
     router = APIRouter()
 
@@ -385,6 +386,12 @@ def create_sales_router(
                 },
             )
 
+        backup = await create_backup_snapshot(
+            "Prima del caricamento vendite negozio",
+            "pre-import-vendite-negozio",
+            ["prodotti", "vendite", "vendite_bulk_imports"],
+        )
+
         async def operation(session):
             kwargs = session_kwargs(session)
             changed: List[Dict[str, Any]] = []
@@ -446,6 +453,7 @@ def create_sales_router(
             "created_at": created_at if inserted else None,
             "canale": body.canale,
             "pagamento": body.pagamento,
+            "backup_id": backup["id"],
         }
 
     @router.post("/vendite/cassa-rapida")

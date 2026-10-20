@@ -8,6 +8,7 @@ import logging
 import secrets
 import uuid
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -36,7 +37,10 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "audit_events",
 }
 BACKUP_RETENTION_LIMIT = 3
+BACKUP_PARTIAL_RETENTION_LIMIT = 6
 BACKUP_RETENTION_POLICY_ID = "backup-retention-v1"
+DAILY_BACKUP_REASON = "automatico-giornaliero"
+BUSINESS_TIMEZONE = ZoneInfo("Europe/Rome")
 EXCEL_IMPORT_BACKUP_COLLECTIONS = [
     "prodotti", "listino_adm", "vending", "storico_ordini", "parametri",
     "db_storico_vend", "db_storico_vending_ext", "smart_venue",
@@ -53,6 +57,7 @@ def create_backup_router(
         label: str,
         reason: str = "manuale",
         collection_names: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         database = get_database()
         snapshot_id = str(uuid.uuid4())
@@ -63,40 +68,44 @@ def create_backup_router(
         ]
         checksums: Dict[str, str] = {}
         await database.backup_snapshot_items.delete_many({"snapshot_id": snapshot_id})
-        for collection_name in names:
-            cursor = database[collection_name].find({}, {"_id": 0})
-            digest = hashlib.sha256()
-            count = 0
-            pending = []
+        try:
+            for collection_name in names:
+                cursor = database[collection_name].find({}, {"_id": 0})
+                digest = hashlib.sha256()
+                count = 0
+                pending = []
 
-            async def store_document(document):
-                nonlocal count, pending
-                digest.update(json.dumps(
-                    document, ensure_ascii=False, sort_keys=True,
-                    separators=(",", ":"), default=str,
-                ).encode("utf-8"))
-                digest.update(b"\n")
-                pending.append({
-                    "snapshot_id": snapshot_id,
-                    "collection": collection_name,
-                    "position": count,
-                    "doc": document,
-                })
-                count += 1
-                if len(pending) >= 1000:
+                async def store_document(document):
+                    nonlocal count, pending
+                    digest.update(json.dumps(
+                        document, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), default=str,
+                    ).encode("utf-8"))
+                    digest.update(b"\n")
+                    pending.append({
+                        "snapshot_id": snapshot_id,
+                        "collection": collection_name,
+                        "position": count,
+                        "doc": document,
+                    })
+                    count += 1
+                    if len(pending) >= 1000:
+                        await database.backup_snapshot_items.insert_many(pending)
+                        pending = []
+
+                try:
+                    async for document in cursor:
+                        await store_document(document)
+                except TypeError:
+                    for document in await cursor.to_list(None):
+                        await store_document(document)
+                if pending:
                     await database.backup_snapshot_items.insert_many(pending)
-                    pending = []
-
-            try:
-                async for document in cursor:
-                    await store_document(document)
-            except TypeError:
-                for document in await cursor.to_list(None):
-                    await store_document(document)
-            if pending:
-                await database.backup_snapshot_items.insert_many(pending)
-            counts[collection_name] = count
-            checksums[collection_name] = digest.hexdigest()
+                counts[collection_name] = count
+                checksums[collection_name] = digest.hexdigest()
+        except Exception:
+            await database.backup_snapshot_items.delete_many({"snapshot_id": snapshot_id})
+            raise
 
         meta = {
             "id": snapshot_id,
@@ -109,6 +118,11 @@ def create_backup_router(
             "partial": collection_names is not None,
             "status": "READY",
         }
+        if metadata:
+            meta.update({
+                key: value for key, value in metadata.items()
+                if key not in {"_id", "id", "counts", "checksums", "status"}
+            })
         await database.backup_snapshots.insert_one(meta.copy())
         migration_collection = getattr(database, "app_migrations", None)
         retention_enabled = await migration_collection.find_one(
@@ -116,23 +130,35 @@ def create_backup_router(
         ) if migration_collection is not None else None
         if retention_enabled:
             try:
-                await prune_backup_snapshots(BACKUP_RETENTION_LIMIT)
+                await prune_backup_snapshots(
+                    BACKUP_RETENTION_LIMIT, BACKUP_PARTIAL_RETENTION_LIMIT
+                )
             except Exception:
                 logging.exception("Impossibile applicare la retention dei backup MongoDB")
         return meta
 
     async def backup_retention_preview(
         keep: int = BACKUP_RETENTION_LIMIT,
+        partial_keep: int = BACKUP_PARTIAL_RETENTION_LIMIT,
     ) -> Dict[str, Any]:
         keep = max(1, min(int(keep or BACKUP_RETENTION_LIMIT), 20))
+        partial_keep = max(
+            1, min(int(partial_keep or BACKUP_PARTIAL_RETENTION_LIMIT), 50)
+        )
         snapshots = await get_database().backup_snapshots.find(
             {"status": {"$ne": "PRUNED"}}, {"_id": 0}
         ).sort("created_at", -1).to_list(None)
-        candidates = snapshots[keep:]
+        complete = [row for row in snapshots if not row.get("partial")]
+        partial = [row for row in snapshots if row.get("partial")]
+        candidates = [*complete[keep:], *partial[partial_keep:]]
+        candidates.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         return {
             "keep": keep,
+            "partial_keep": partial_keep,
             "snapshot_totali": len(snapshots),
-            "snapshot_conservati": len(snapshots[:keep]),
+            "snapshot_completi": len(complete),
+            "snapshot_settoriali": len(partial),
+            "snapshot_conservati": len(complete[:keep]) + len(partial[:partial_keep]),
             "snapshot_da_svuotare": len(candidates),
             "documenti_da_eliminare_stimati": sum(
                 int(row.get("total_docs") or 0) for row in candidates
@@ -146,8 +172,9 @@ def create_backup_router(
 
     async def prune_backup_snapshots(
         keep: int = BACKUP_RETENTION_LIMIT,
+        partial_keep: int = BACKUP_PARTIAL_RETENTION_LIMIT,
     ) -> Dict[str, Any]:
-        preview = await backup_retention_preview(keep)
+        preview = await backup_retention_preview(keep, partial_keep)
         pruned_at = datetime.now(timezone.utc).isoformat()
         deleted_items = 0
         database = get_database()
@@ -172,6 +199,76 @@ def create_backup_router(
             "documenti_eliminati": deleted_items,
             "pruned_at": pruned_at,
         }
+
+    async def ensure_daily_backup(now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Create one complete backup per Italian business day.
+
+        Render Free does not guarantee a continuously running process, so the
+        snapshot is triggered by the first application activity of the day.
+        A Mongo lock prevents two simultaneous page loads from duplicating it.
+        """
+        database = get_database()
+        instant = now or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+        business_day = instant.astimezone(BUSINESS_TIMEZONE).date().isoformat()
+        query = {
+            "reason": DAILY_BACKUP_REASON,
+            "backup_day": business_day,
+            "status": {"$ne": "PRUNED"},
+        }
+        existing = await database.backup_snapshots.find_one(query, {"_id": 0})
+        if existing:
+            return {**existing, "created_now": False}
+
+        lock_id = f"daily-backup:{business_day}"
+        token = str(uuid.uuid4())
+        lock_acquired = False
+        await database.operation_locks.delete_many({
+            "_id": lock_id,
+            "expires_at": {"$lte": instant},
+        })
+        try:
+            await database.operation_locks.insert_one({
+                "_id": lock_id,
+                "token": token,
+                "created_at": instant,
+                "expires_at": instant + timedelta(hours=2),
+            })
+            lock_acquired = True
+        except DuplicateKeyError:
+            existing = await database.backup_snapshots.find_one(query, {"_id": 0})
+            return {
+                **(existing or {"backup_day": business_day}),
+                "created_now": False,
+                "in_progress": existing is None,
+            }
+
+        try:
+            existing = await database.backup_snapshots.find_one(query, {"_id": 0})
+            if existing:
+                return {**existing, "created_now": False}
+            await database.app_migrations.update_one(
+                {"id": BACKUP_RETENTION_POLICY_ID},
+                {"$set": {
+                    "id": BACKUP_RETENTION_POLICY_ID,
+                    "enabled_at": instant.isoformat(),
+                    "keep": BACKUP_RETENTION_LIMIT,
+                    "partial_keep": BACKUP_PARTIAL_RETENTION_LIMIT,
+                }},
+                upsert=True,
+            )
+            snapshot = await create_backup_snapshot(
+                f"Backup giornaliero {business_day}",
+                DAILY_BACKUP_REASON,
+                metadata={"backup_day": business_day, "automatic": True},
+            )
+            return {**snapshot, "created_now": True}
+        finally:
+            if lock_acquired:
+                await database.operation_locks.delete_one(
+                    {"_id": lock_id, "token": token}
+                )
 
     async def backup_documents(
         snapshot_id: str,
@@ -295,18 +392,25 @@ def create_backup_router(
         return await create_backup_snapshot(label, reason)
 
     @router.get("/backup/retention-preview")
-    async def backup_cleanup_preview(keep: int = BACKUP_RETENTION_LIMIT):
-        return await backup_retention_preview(keep)
+    async def backup_cleanup_preview(
+        keep: int = BACKUP_RETENTION_LIMIT,
+        partial_keep: int = BACKUP_PARTIAL_RETENTION_LIMIT,
+    ):
+        return await backup_retention_preview(keep, partial_keep)
 
     @router.post("/backup/prune")
-    async def backup_cleanup(keep: int = BACKUP_RETENTION_LIMIT):
-        result = await prune_backup_snapshots(keep)
+    async def backup_cleanup(
+        keep: int = BACKUP_RETENTION_LIMIT,
+        partial_keep: int = BACKUP_PARTIAL_RETENTION_LIMIT,
+    ):
+        result = await prune_backup_snapshots(keep, partial_keep)
         await get_database().app_migrations.update_one(
             {"id": BACKUP_RETENTION_POLICY_ID},
             {"$set": {
                 "id": BACKUP_RETENTION_POLICY_ID,
                 "enabled_at": datetime.now(timezone.utc).isoformat(),
                 "keep": result["keep"],
+                "partial_keep": result["partial_keep"],
             }},
             upsert=True,
         )
@@ -405,6 +509,7 @@ def create_backup_router(
         "create_backup_snapshot": create_backup_snapshot,
         "backup_retention_preview": backup_retention_preview,
         "prune_backup_snapshots": prune_backup_snapshots,
+        "ensure_daily_backup": ensure_daily_backup,
         "backup_documents": backup_documents,
         "validate_backup_file": validate_backup_file,
         "restore_collections": restore_collections,

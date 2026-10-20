@@ -186,6 +186,17 @@ La riconciliazione supporta anche la presa in carico operativa: stato, nota,
 operatore e data sono conservati separatamente dai documenti contabili originali
 e ogni variazione entra nell'audit log.
 
+### Strategia backup
+
+- Il primo utilizzo dell'app nella giornata crea un backup completo automatico,
+  senza dipendere da un processo pianificato sempre acceso su Render Free.
+- Prima di import vendite negozio, import vendite vending e carichi merce vengono
+  creati checkpoint limitati alle sole collezioni coinvolte.
+- La retention interna conserva 3 backup completi e 6 checkpoint settoriali.
+- I backup interni proteggono dagli errori operativi, ma risiedono nello stesso
+  database MongoDB. Per una copia esterna usare periodicamente **Backup e
+  scarica** nella pagina Parametri e conservare il file sul Mac.
+
 Prossimi passi tecnici:
 
 1. La suddivisione dei macro-blocchi di `backend/server.py` è completata: i router di

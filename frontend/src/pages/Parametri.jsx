@@ -399,7 +399,7 @@ export default function Parametri() {
           <div className="flex items-start justify-between gap-3 mb-4">
             <div>
               <h2 className="font-heading font-black text-lg">Backup e ripristino</h2>
-              <p className="text-sm text-slate-600">Crea un file completo da conservare sul Mac. Per tornare indietro basta ricaricarlo qui.</p>
+              <p className="text-sm text-slate-600">Il primo utilizzo della giornata crea automaticamente un backup completo. Puoi anche scaricarne una copia sul Mac.</p>
             </div>
             <button data-testid="backup-create-download" onClick={createBackup} disabled={workingBackup} className="flex items-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40">
               <DownloadSimple size={16} /> Backup e scarica
@@ -423,7 +423,7 @@ export default function Parametri() {
               <div>
                 <div className="text-xs font-bold uppercase tracking-wider text-amber-900">Spazio MongoDB</div>
                 <p className="mt-1 text-xs text-amber-800">
-                  Il gestionale conserva al massimo 3 backup interni. I file scaricati sul Mac non vengono toccati.
+                  Il gestionale conserva 3 backup completi e 6 checkpoint settoriali recenti. I file scaricati sul Mac non vengono toccati.
                 </p>
                 {backupRetention?.snapshot_da_svuotare > 0 ? (
                   <p className="mt-1 text-xs font-semibold text-amber-900">
@@ -446,11 +446,14 @@ export default function Parametri() {
             {backups.slice(0, 6).map(b => (
               <div key={b.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2 text-sm">
                 <div className="min-w-0">
-                  <div className="font-semibold truncate">{b.label}</div>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="font-semibold truncate">{b.label}</div>
+                    <Badge tone={b.partial ? "neutral" : "ok"}>{b.partial ? "Settoriale" : "Completo"}</Badge>
+                  </div>
                   <div className="text-xs text-slate-500">{new Date(b.created_at).toLocaleString("it-IT")} · {formatNum(b.total_docs)} documenti · {b.reason}</div>
                 </div>
                 <div className="flex shrink-0 gap-2">
-                  <button onClick={() => downloadBackup(b).catch(err => toast.error(apiErrorMessage(err, "Download backup non riuscito")))} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50">Scarica</button>
+                  {!b.partial && <button onClick={() => downloadBackup(b).catch(err => toast.error(apiErrorMessage(err, "Download backup non riuscito")))} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50">Scarica</button>}
                   <button onClick={() => setRestoreTarget(b)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-50">Ripristina</button>
                 </div>
               </div>
