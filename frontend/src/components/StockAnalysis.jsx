@@ -22,13 +22,13 @@ function SummaryCard({ icon: Icon, label, value, tone = "default" }) {
   };
   const [valueClass, iconClass, iconColor] = tones[tone].split(" ");
   return (
-    <Card className="flex min-w-0 items-center gap-3 p-4 lg:p-5">
-      <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${iconClass} ${iconColor}`}>
-        <Icon size={23} weight="duotone" />
+    <Card className="flex min-h-[104px] min-w-0 items-center gap-4 border-amber-100 p-4 lg:px-5">
+      <div className={`flex h-[68px] w-[68px] shrink-0 items-center justify-center rounded-lg ${iconClass} ${iconColor}`}>
+        <Icon size={30} weight="duotone" />
       </div>
       <div className="min-w-0">
-        <div className="text-sm font-semibold text-slate-600">{label}</div>
-        <div className={`mt-1 whitespace-nowrap font-heading text-xl font-black tabular-nums 2xl:text-2xl ${valueClass}`} title={String(value)}>{value}</div>
+        <div className="text-[16px] font-semibold text-slate-600">{label}</div>
+        <div className={`mt-1 whitespace-nowrap font-heading text-[clamp(20px,1.7vw,30px)] font-black leading-none tabular-nums ${valueClass}`} title={String(value)}>{value}</div>
       </div>
     </Card>
   );
@@ -93,17 +93,16 @@ export default function StockAnalysis() {
     <section aria-labelledby="stock-analysis-title">
       <h2 id="stock-analysis-title" className="sr-only">Analisi scorte</h2>
 
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-5">
+      <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <SummaryCard icon={Coins} label="Valore scorte" value={formatEur(value)} />
         <SummaryCard icon={ShoppingCart} label="Da riordinare" value={formatNum(reorderCount)} tone={reorderCount ? "danger" : "default"} />
-        <SummaryCard icon={WarningCircle} label="Anomalie" value={formatNum(anomalyCount)} tone={anomalyCount ? "danger" : "default"} />
         <SummaryCard icon={PauseCircle} label="Prodotti fermi" value={formatNum(stationaryCount)} tone="warning" />
         <SummaryCard icon={Clock} label="Prodotti lenti" value={formatNum(slowCount)} tone="warning" />
       </div>
 
       <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center">
-        <SearchBar value={query} onChange={setQuery} placeholder="Cerca prodotto…" className="min-w-0 flex-1 lg:max-w-md" data-testid="stock-analysis-search" />
-        <select value={status} onChange={event => setStatus(event.target.value)} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700" data-testid="stock-analysis-status">
+        <SearchBar value={query} onChange={setQuery} placeholder="Cerca prodotto…" className="h-11 min-w-0 flex-1 lg:max-w-md" data-testid="stock-analysis-search" />
+        <select value={status} onChange={event => setStatus(event.target.value)} className="h-11 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700" data-testid="stock-analysis-status">
           <option value="">Tutti gli stati</option>
           <option value="ANOMALIA">Anomalie</option>
           <option value="ESAURITO">Esauriti</option>
@@ -113,11 +112,11 @@ export default function StockAnalysis() {
           <option value="LENTO">Lenti</option>
           <option value="OK">OK</option>
         </select>
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
-          Vendite ultimi <b>{period} giorni</b>
+        <div className="flex h-11 items-center rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-600">
+          Vendite ultimi <b className="ml-1">{period} giorni</b>
         </div>
-        <span className="text-sm text-slate-500 lg:ml-auto">{formatNum(visibleRows.length)} prodotti</span>
-        <Link to="/auto-order" className="inline-flex items-center justify-center gap-2 rounded-md bg-amber-500 px-4 py-2 text-sm font-bold text-slate-950 transition-colors hover:bg-amber-400">
+        <span className="flex items-center gap-2 text-sm text-slate-500 lg:ml-auto">{formatNum(visibleRows.length)} prodotti {anomalyCount ? <Badge tone="error">{formatNum(anomalyCount)} anomalie</Badge> : null}</span>
+        <Link to="/auto-order" className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-amber-500 px-4 text-sm font-bold text-slate-950 transition-colors hover:bg-amber-400">
           Apri Auto-Order <ArrowRight size={16} weight="bold" />
         </Link>
       </div>
@@ -129,7 +128,7 @@ export default function StockAnalysis() {
 
       <Card className="overflow-hidden">
         <div className="max-h-[62vh] overflow-auto">
-          <table className="data-table w-full min-w-[1100px]" data-testid="stock-analysis-table">
+          <table className="data-table stock-workspace-table w-full min-w-[1100px]" data-testid="stock-analysis-table">
             <thead>
               <tr>
                 <th>Prodotto</th>

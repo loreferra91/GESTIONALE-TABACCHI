@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Archive, FloppyDisk, Printer, WarningCircle, FunnelSimple, X, ArrowsDownUp, Package, Storefront } from "@phosphor-icons/react";
+import { Archive, CaretDown, ClockCounterClockwise, FloppyDisk, Printer, WarningCircle, FunnelSimple, X, ArrowsDownUp, Package, Storefront } from "@phosphor-icons/react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import Layout from "../components/Layout";
@@ -36,13 +36,13 @@ function InventoryMetricCard({ icon: Icon, label, value, tone }) {
     slate: "bg-slate-100 text-slate-700",
   };
   return (
-    <Card className="flex min-w-0 items-center gap-3 p-4 lg:p-5">
-      <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${toneClasses[tone]}`}>
-        <Icon size={23} weight="duotone" />
+    <Card className="flex min-h-[104px] min-w-0 items-center gap-4 border-amber-100 p-4 lg:px-5">
+      <div className={`flex h-[68px] w-[68px] shrink-0 items-center justify-center rounded-lg ${toneClasses[tone]}`}>
+        <Icon size={30} weight="duotone" />
       </div>
       <div className="min-w-0">
-        <div className="text-sm font-semibold text-slate-600">{label}</div>
-        <div className="mt-1 truncate font-heading text-2xl font-black tabular-nums text-slate-950">{value}</div>
+        <div className="text-[17px] font-semibold text-slate-600">{label}</div>
+        <div className="mt-1 truncate font-heading text-[30px] font-black leading-none tabular-nums text-slate-950">{value} <span className="text-base font-bold text-slate-400">pz</span></div>
       </div>
     </Card>
   );
@@ -312,16 +312,21 @@ export default function GiacenzeReali() {
   };
 
   return (
-    <Layout title="Giacenze reali" subtitle="inventario fisico e analisi delle scorte" statusMode="compact">
+    <Layout title="Giacenze reali" subtitle="inventario fisico e analisi delle scorte" statusMode="hidden" workspace>
+      <div className="mb-5">
+        <h1 className="font-heading text-[32px] font-black leading-none tracking-[-0.035em] text-slate-950 lg:text-[40px]" data-testid="page-title">Giacenze reali</h1>
+        <p className="mt-2 text-base font-medium text-[#526A9D] lg:text-[19px]">Inventario fisico e analisi delle scorte</p>
+      </div>
+
       <div className="mb-5 border-b border-slate-200" role="tablist" aria-label="Viste giacenze reali">
-        <div className="flex gap-7">
+        <div className="flex gap-8">
           <button
             type="button"
             role="tab"
             aria-selected={activeTab === "inventario"}
             data-testid="real-stock-tab-inventory"
             onClick={() => selectTab("inventario")}
-            className={`relative px-1 pb-3 text-sm font-bold transition-colors ${activeTab === "inventario" ? "text-slate-950" : "text-slate-500 hover:text-slate-800"}`}
+            className={`relative px-1 pb-3 text-[15px] font-bold transition-colors ${activeTab === "inventario" ? "text-slate-950" : "text-slate-500 hover:text-slate-800"}`}
           >
             Inventario
             {activeTab === "inventario" ? <span className="absolute inset-x-0 bottom-[-1px] h-0.5 bg-amber-500" /> : null}
@@ -332,7 +337,7 @@ export default function GiacenzeReali() {
             aria-selected={activeTab === "analisi"}
             data-testid="real-stock-tab-analysis"
             onClick={() => selectTab("analisi")}
-            className={`relative px-1 pb-3 text-sm font-bold transition-colors ${activeTab === "analisi" ? "text-slate-950" : "text-slate-500 hover:text-slate-800"}`}
+            className={`relative px-1 pb-3 text-[15px] font-bold transition-colors ${activeTab === "analisi" ? "text-slate-950" : "text-slate-500 hover:text-slate-800"}`}
           >
             Analisi scorte
             {activeTab === "analisi" ? <span className="absolute inset-x-0 bottom-[-1px] h-0.5 bg-amber-500" /> : null}
@@ -341,42 +346,49 @@ export default function GiacenzeReali() {
       </div>
 
       {activeTab === "analisi" ? <StockAnalysis /> : <>
-      <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <InventoryMetricCard icon={Storefront} label="Giacenza negozio" value={formatNum(totalShop)} tone="amber" />
-        <InventoryMetricCard icon={Package} label="Giacenza vending" value={formatNum(totalVending)} tone="blue" />
-        <InventoryMetricCard icon={Archive} label="Giacenza totale" value={formatNum(totalShop + totalVending)} tone="slate" />
+      <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <InventoryMetricCard icon={Storefront} label="Negozio" value={formatNum(totalShop)} tone="amber" />
+        <InventoryMetricCard icon={Package} label="Vending" value={formatNum(totalVending)} tone="blue" />
+        <InventoryMetricCard icon={Archive} label="Totale" value={formatNum(totalShop + totalVending)} tone="slate" />
       </div>
 
       {/* Search + filter toggle + sort + actions */}
-      <div className="mb-2 flex flex-wrap items-center gap-3">
-        <SearchBar value={query} onChange={setQuery} placeholder="Cerca prodotto…" className="min-w-64 flex-1" data-testid="real-stock-search" />
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <SearchBar value={query} onChange={setQuery} placeholder="Cerca prodotto…" className="h-11 min-w-64 flex-1" data-testid="real-stock-search" />
 
-        <button type="button" onClick={() => setShowFilterPanel(p => !p)} className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm font-bold transition ${showFilterPanel || selectedCats.size > 0 ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`} data-testid="toggle-filter-panel">
+        <button type="button" onClick={() => setShowFilterPanel(p => !p)} className={`inline-flex h-11 items-center gap-1.5 rounded-md border px-3 text-sm font-bold transition ${showFilterPanel || selectedCats.size > 0 ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`} data-testid="toggle-filter-panel">
           <FunnelSimple size={17} /> Filtri{selectedCats.size > 0 ? ` (${selectedCats.size})` : ""}
         </button>
 
         <div className="inline-flex items-center gap-1.5">
           <ArrowsDownUp size={17} className="text-slate-500" />
-          <select value={sortValue} onChange={e => setSortValue(e.target.value)} className="rounded-md border border-slate-300 bg-white px-2 py-2 text-sm font-medium" data-testid="sort-select">
+          <select value={sortValue} onChange={e => setSortValue(e.target.value)} className="h-11 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium" data-testid="sort-select">
             {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
 
         {hasActiveFilters && (
-          <button type="button" onClick={resetFilters} className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-bold text-red-700 hover:bg-red-100" data-testid="reset-filters">
+          <button type="button" onClick={resetFilters} className="inline-flex h-11 items-center gap-1 rounded-md border border-red-300 bg-red-50 px-3 text-sm font-bold text-red-700 hover:bg-red-100" data-testid="reset-filters">
             <X size={15} /> Azzera filtri
           </button>
         )}
-      </div>
-
-      {/* Result count */}
-      <div className="mb-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
-        <span data-testid="result-count">
-          {visibleRows.length === rows.length
-            ? <>{rows.length} prodotti</>
-            : <><strong>{visibleRows.length}</strong> di {rows.length} prodotti</>}
-        </span>
-        {hasUnsavedChanges && <Badge tone="warning">{dirtyCodes.length} modifiche non salvate</Badge>}
+        <details className="relative z-20 ml-auto">
+          <summary className="inline-flex h-11 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 hover:bg-slate-50">
+            <Printer size={18} /> Stampa inventario <CaretDown size={14} weight="bold" />
+          </summary>
+          <div className="absolute right-0 mt-2 w-64 overflow-hidden rounded-md border border-slate-200 bg-white p-1.5 shadow-xl">
+            <button type="button" onClick={() => startPrint("blank", "filtered")} className="block w-full rounded px-3 py-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50">Foglio inventario in bianco</button>
+            <button type="button" onClick={() => startPrint("current", "filtered")} className="block w-full rounded px-3 py-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50">Giacenze attuali</button>
+            {hasActiveFilters ? <>
+              <div className="my-1 border-t border-slate-100" />
+              <button type="button" onClick={() => startPrint("blank", "all")} className="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-blue-700 hover:bg-blue-50">Foglio completo · {rows.length} prodotti</button>
+              <button type="button" onClick={() => startPrint("current", "all")} className="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-blue-700 hover:bg-blue-50">Giacenze complete · {rows.length} prodotti</button>
+            </> : null}
+          </div>
+        </details>
+        <button type="button" onClick={saveAll} disabled={!hasUnsavedChanges || Boolean(saving)} className="inline-flex h-11 items-center gap-2 rounded-md bg-amber-500 px-5 text-sm font-bold text-slate-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500">
+          <FloppyDisk size={17} /> Salva modifiche
+        </button>
       </div>
 
       {/* Category filter panel */}
@@ -408,39 +420,10 @@ export default function GiacenzeReali() {
         </Card>
       )}
 
-      {/* Print buttons */}
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="relative group">
-          <button type="button" onClick={() => startPrint("blank", "filtered")} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold hover:bg-slate-50">
-            <Printer size={17} /> STAMPA INVENTARIO IN BIANCO
-          </button>
-          {hasActiveFilters && (
-            <div className="mt-1 flex flex-col gap-1">
-              <span className="text-xs text-slate-500">{visibleRows.length} prodotti filtrati</span>
-              <button type="button" onClick={() => startPrint("blank", "all")} className="text-xs font-medium text-blue-600 hover:underline">Stampa tutti i {rows.length} prodotti</button>
-            </div>
-          )}
-        </div>
-        <div className="relative group">
-          <button type="button" onClick={() => startPrint("current", "filtered")} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold hover:bg-slate-50">
-            <Printer size={17} /> STAMPA GIACENZE ATTUALI
-          </button>
-          {hasActiveFilters && (
-            <div className="mt-1 flex flex-col gap-1">
-              <span className="text-xs text-slate-500">{visibleRows.length} prodotti filtrati</span>
-              <button type="button" onClick={() => startPrint("current", "all")} className="text-xs font-medium text-blue-600 hover:underline">Stampa tutti i {rows.length} prodotti</button>
-            </div>
-          )}
-        </div>
-        <button type="button" onClick={saveAll} disabled={!hasUnsavedChanges || Boolean(saving)} className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-40">
-          <FloppyDisk size={17} /> Salva modifiche
-        </button>
-      </div>
-
       <Card className="overflow-hidden">
         <div className="overflow-x-auto max-h-[68vh]">
-          <table className="data-table w-full min-w-[760px]">
-            <thead><tr><th>Descrizione prodotto</th><th className="text-right">Giacenza negozio</th><th className="text-right">Giacenza vending</th><th className="text-right">Giacenza totale</th></tr></thead>
+          <table className="data-table stock-workspace-table w-full min-w-[900px]">
+            <thead><tr><th>Descrizione prodotto</th><th className="text-right">Giacenza negozio</th><th className="text-right">Giacenza vending</th><th className="text-right">Giacenza totale</th><th>Stato</th></tr></thead>
             <tbody>
               {visibleRows.map(row => {
                 const shop = integerDraft(displayedValue(row, "giacenza_negozio"));
@@ -462,10 +445,11 @@ export default function GiacenzeReali() {
                       <div className="font-mono text-base font-black">{shop === null || vending === null ? "—" : formatNum(shop + vending)}</div>
                       {dirty && <button type="button" onClick={() => saveRow(row)} disabled={saving === row.codice} className="mt-2 text-xs font-bold text-emerald-700 hover:text-emerald-900">{saving === row.codice ? "Salvataggio…" : "Salva riga"}</button>}
                     </td>
+                    <td>{shop === null || vending === null ? <Badge tone="error">DA VERIFICARE</Badge> : shop + vending === 0 ? <Badge tone="error">ESAURITO</Badge> : <Badge tone="ok">OK</Badge>}</td>
                   </tr>
                 );
               })}
-              {!visibleRows.length && <tr><td colSpan="4" className="py-10 text-center text-slate-500">Nessun prodotto trovato.</td></tr>}
+              {!visibleRows.length && <tr><td colSpan="5" className="py-10 text-center text-slate-500">Nessun prodotto trovato.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -473,7 +457,7 @@ export default function GiacenzeReali() {
 
       <details className="group mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
         <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 font-bold text-slate-800 hover:bg-slate-50">
-          <span>Ultime rettifiche inventariali</span>
+          <span className="flex items-center gap-2"><ClockCounterClockwise size={19} /> Ultime rettifiche</span>
           <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{formatNum(history.length)}</span>
         </summary>
         <div className="overflow-x-auto border-t border-slate-200">

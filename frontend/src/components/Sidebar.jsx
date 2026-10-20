@@ -76,7 +76,7 @@ function NavItem({ item, closeMenu }) {
       end={item.end}
       data-testid={item.testid}
       onClick={closeMenu}
-      className={({ isActive }) => `group relative mx-3 flex items-center gap-3 rounded-md px-3 py-2 text-[13px] transition-colors ${
+      className={({ isActive }) => `group relative mx-3 flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm transition-colors ${
         isActive
           ? "bg-white/10 text-white before:absolute before:-left-3 before:top-1.5 before:bottom-1.5 before:w-1 before:rounded-r before:bg-amber-400"
           : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -84,7 +84,7 @@ function NavItem({ item, closeMenu }) {
     >
       {({ isActive }) => (
         <>
-          <Icon size={18} weight={isActive ? "fill" : "bold"} className={isActive ? "text-amber-400" : ""} />
+          <Icon size={19} weight={isActive ? "fill" : "bold"} className={isActive ? "text-amber-400" : ""} />
           <span className="min-w-0 truncate font-medium">{item.label}</span>
         </>
       )}
@@ -94,12 +94,12 @@ function NavItem({ item, closeMenu }) {
 
 function Group({ group, expanded, toggle, closeMenu }) {
   return (
-    <div className="border-t border-white/10 py-2">
+    <div className="border-t border-white/10 py-2.5">
       <button
         type="button"
         onClick={toggle}
         aria-expanded={expanded}
-        className="flex w-full items-center justify-between px-5 py-1.5 text-left text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400 hover:text-slate-200"
+        className="flex w-full items-center justify-between px-5 py-2 text-left text-xs font-bold uppercase tracking-[0.14em] text-slate-400 hover:text-slate-200"
       >
         <span>{group.label}</span>
         <CaretDown size={13} weight="bold" className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
@@ -124,8 +124,8 @@ export default function Sidebar() {
 
   const content = (
     <>
-      <div className="border-b border-white/10 px-5 py-5">
-        <img src="/terrybell-palace.png" alt="Terrybell Palace" className="h-10 w-auto max-w-full object-contain object-left" />
+      <div className="flex h-[84px] items-center overflow-hidden border-b border-white/10 px-5">
+        <img src="/terrybell-palace.png" alt="Terrybell Palace" className="h-auto w-[230px] max-w-none object-contain object-left" />
       </div>
       <nav className="flex-1 overflow-y-auto py-3" aria-label="Navigazione principale">
         <NavItem item={DIRECT_ITEMS.dashboard} closeMenu={closeMenu} />
@@ -149,7 +149,7 @@ export default function Sidebar() {
       >
         <List size={20} />
       </button>
-      <aside className="fixed left-0 top-0 z-40 hidden h-screen w-64 flex-col border-r border-black/30 bg-[#181818] text-slate-100 md:flex">
+      <aside className="fixed left-0 top-0 z-40 hidden h-screen w-[272px] flex-col border-r border-black/30 bg-[#181818] text-slate-100 md:flex">
         {content}
       </aside>
       {open ? (

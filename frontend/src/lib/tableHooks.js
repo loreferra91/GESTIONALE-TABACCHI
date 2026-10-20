@@ -83,7 +83,7 @@ export function SearchBar({ value, onChange, placeholder = "Cerca…", className
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="border border-slate-300 rounded-md pl-8 pr-3 py-2 text-sm w-full bg-white focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+        className="h-full min-h-10 w-full rounded-md border border-slate-300 bg-white py-2 pl-8 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10"
       />
     </div>
   );
