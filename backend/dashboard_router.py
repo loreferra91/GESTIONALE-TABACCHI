@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 
 def parse_sale_date(value: Any):
@@ -371,6 +371,202 @@ def create_dashboard_router(
             "serie": series,
         }
 
+    async def sales_period_report(days: int = 30) -> Dict[str, Any]:
+        """Aggregate the latest complete sales period for the printable report."""
+        if days not in {7, 30}:
+            raise HTTPException(422, "Il periodo deve essere di 7 o 30 giorni")
+
+        db = get_database()
+        app_sales, imported_sales, latest_import = await asyncio.gather(
+            db.vendite.find(
+                {},
+                {
+                    "_id": 0,
+                    "data": 1,
+                    "codice": 1,
+                    "descrizione": 1,
+                    "quantita": 1,
+                    "importo": 1,
+                    "canale": 1,
+                    "pagamento": 1,
+                    "created_at": 1,
+                },
+            ).to_list(None),
+            db.db_storico_vend.find(
+                {},
+                {
+                    "_id": 0,
+                    "data": 1,
+                    "codice": 1,
+                    "descrizione": 1,
+                    "quantita": 1,
+                    "importo": 1,
+                },
+            ).to_list(None),
+            get_latest_accounting_import(),
+        )
+        latest_imported_sale = latest_sale_date(imported_sales)
+        if imported_sales:
+            app_sales = [
+                sale
+                for sale in app_sales
+                if is_sale_after_excel_import(
+                    sale,
+                    latest_imported_sale,
+                    (latest_import or {}).get("created_at"),
+                )
+            ]
+        parsed_sales = []
+        for source, documents in (("APP", app_sales), ("STORICO", imported_sales)):
+            for sale in documents:
+                parsed_day = parse_sale_date(sale.get("data"))
+                if parsed_day is None:
+                    continue
+                try:
+                    amount = decimal_money(sale.get("importo") or 0)
+                    quantity = int(sale.get("quantita") or 0)
+                except (TypeError, ValueError):
+                    continue
+                channel = str(sale.get("canale") or "NEGOZIO").strip().upper()
+                if channel not in {"NEGOZIO", "VENDING"}:
+                    channel = "ALTRO"
+                payment = str(sale.get("pagamento") or "NON DISPONIBILE").strip().upper()
+                parsed_sales.append({
+                    "data": parsed_day,
+                    "codice": str(sale.get("codice") or "").strip(),
+                    "descrizione": str(sale.get("descrizione") or "").strip(),
+                    "quantita": quantity,
+                    "importo": amount,
+                    "canale": channel,
+                    "pagamento": payment,
+                    "fonte": source,
+                })
+
+        if not parsed_sales:
+            return {
+                "giorni": days,
+                "data_da": None,
+                "data_a": None,
+                "totale": 0,
+                "totale_precedente": 0,
+                "variazione_pct": None,
+                "pezzi": 0,
+                "media_giornaliera": 0,
+                "giorni_con_vendite": 0,
+                "serie": [],
+                "canali": [],
+                "pagamenti": [],
+                "prodotti": [],
+            }
+
+        end_date = max(sale["data"] for sale in parsed_sales)
+        start_date = end_date - timedelta(days=days - 1)
+        previous_start = start_date - timedelta(days=days)
+        previous_end = start_date - timedelta(days=1)
+        current_sales = [sale for sale in parsed_sales if start_date <= sale["data"] <= end_date]
+        previous_sales = [
+            sale for sale in parsed_sales if previous_start <= sale["data"] <= previous_end
+        ]
+
+        def summarize(field: str) -> List[Dict[str, Any]]:
+            totals: Dict[str, Dict[str, Any]] = {}
+            for sale in current_sales:
+                key = sale[field] or "NON DISPONIBILE"
+                item = totals.setdefault(key, {"nome": key, "importo": Decimal(0), "pezzi": 0})
+                item["importo"] += sale["importo"]
+                item["pezzi"] += sale["quantita"]
+            return sorted(
+                (
+                    {
+                        "nome": item["nome"],
+                        "importo": normalize_money(item["importo"]),
+                        "pezzi": item["pezzi"],
+                    }
+                    for item in totals.values()
+                ),
+                key=lambda item: (-item["importo"], item["nome"]),
+            )
+
+        daily: Dict[Any, Dict[str, Decimal]] = {}
+        products: Dict[str, Dict[str, Any]] = {}
+        for sale in current_sales:
+            day = daily.setdefault(
+                sale["data"],
+                {"totale": Decimal(0), "negozio": Decimal(0), "vending": Decimal(0)},
+            )
+            day["totale"] += sale["importo"]
+            if sale["canale"] in {"NEGOZIO", "VENDING"}:
+                day[sale["canale"].lower()] += sale["importo"]
+            code = sale["codice"] or "SENZA CODICE"
+            product = products.setdefault(
+                code,
+                {
+                    "codice": code,
+                    "descrizione": sale["descrizione"] or code,
+                    "importo": Decimal(0),
+                    "pezzi": 0,
+                },
+            )
+            if sale["descrizione"] and product["descrizione"] == code:
+                product["descrizione"] = sale["descrizione"]
+            product["importo"] += sale["importo"]
+            product["pezzi"] += sale["quantita"]
+
+        series = []
+        for offset in range(days):
+            day_value = start_date + timedelta(days=offset)
+            values = daily.get(
+                day_value,
+                {"totale": Decimal(0), "negozio": Decimal(0), "vending": Decimal(0)},
+            )
+            series.append({
+                "data": day_value.isoformat(),
+                "totale": normalize_money(values["totale"]),
+                "negozio": normalize_money(values["negozio"]),
+                "vending": normalize_money(values["vending"]),
+            })
+
+        total = sum((sale["importo"] for sale in current_sales), Decimal(0))
+        previous_total = sum((sale["importo"] for sale in previous_sales), Decimal(0))
+        total_value = normalize_money(total)
+        previous_value = normalize_money(previous_total)
+        variation = (
+            float(round(((total - previous_total) / previous_total) * 100, 1))
+            if previous_total
+            else None
+        )
+        top_products = sorted(
+            (
+                {
+                    "codice": item["codice"],
+                    "descrizione": item["descrizione"],
+                    "importo": normalize_money(item["importo"]),
+                    "pezzi": item["pezzi"],
+                }
+                for item in products.values()
+            ),
+            key=lambda item: (-item["importo"], item["codice"]),
+        )[:10]
+        return {
+            "giorni": days,
+            "data_da": start_date.isoformat(),
+            "data_a": end_date.isoformat(),
+            "totale": total_value,
+            "totale_precedente": previous_value,
+            "variazione_pct": variation,
+            "pezzi": sum(sale["quantita"] for sale in current_sales),
+            "media_giornaliera": normalize_money(total / days),
+            "giorni_con_vendite": len(daily),
+            "serie": series,
+            "canali": summarize("canale"),
+            "pagamenti": summarize("pagamento"),
+            "prodotti": top_products,
+        }
+
+    @router.get("/report/vendite")
+    async def report_vendite(giorni: int = 30):
+        return await sales_period_report(giorni)
+
     @router.get("/dashboard")
     async def dashboard():
         db = get_database()
@@ -470,5 +666,7 @@ def create_dashboard_router(
         "supplemental_store_cash_sales": supplemental_store_cash_sales,
         "shop_sold_accounting_corrections": shop_sold_accounting_corrections,
         "dashboard_sales_trend": dashboard_sales_trend,
+        "sales_period_report": sales_period_report,
+        "report_vendite": report_vendite,
         "dashboard": dashboard,
     }

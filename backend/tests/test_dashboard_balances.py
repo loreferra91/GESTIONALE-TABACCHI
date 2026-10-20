@@ -542,3 +542,137 @@ def test_dashboard_sales_trend_handles_empty_sources(monkeypatch):
         "totale_periodo": 0,
         "serie": [],
     }
+
+
+def test_sales_period_report_splits_channels_payments_and_compares_periods(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            vendite=SalesCollection([
+                {
+                    "data": "2026-10-19T10:00:00",
+                    "codice": "A1",
+                    "descrizione": "Prodotto A",
+                    "quantita": 2,
+                    "importo": 12.5,
+                    "canale": "NEGOZIO",
+                    "pagamento": "POS",
+                },
+                {
+                    "data": "2026-10-18",
+                    "codice": "B2",
+                    "descrizione": "Prodotto B",
+                    "quantita": 1,
+                    "importo": 5,
+                    "canale": "VENDING",
+                    "pagamento": "CONTANTI",
+                },
+            ]),
+            db_storico_vend=SalesCollection([
+                {
+                    "data": "2026-10-17",
+                    "codice": "A1",
+                    "descrizione": "Prodotto A",
+                    "quantita": 1,
+                    "importo": 6.25,
+                },
+                {
+                    "data": "2026-10-12",
+                    "codice": "C3",
+                    "descrizione": "Periodo precedente",
+                    "quantita": 2,
+                    "importo": 10,
+                },
+            ]),
+            import_history=SnapshotCollection(None),
+        ),
+    )
+
+    result = asyncio.run(server._sales_period_report(7))
+
+    assert result["data_da"] == "2026-10-13"
+    assert result["data_a"] == "2026-10-19"
+    assert result["totale"] == 23.75
+    assert result["totale_precedente"] == 10
+    assert result["variazione_pct"] == 137.5
+    assert result["pezzi"] == 4
+    assert result["giorni_con_vendite"] == 3
+    assert len(result["serie"]) == 7
+    assert result["serie"][-1] == {
+        "data": "2026-10-19",
+        "totale": 12.5,
+        "negozio": 12.5,
+        "vending": 0.0,
+    }
+    assert result["canali"] == [
+        {"nome": "NEGOZIO", "importo": 18.75, "pezzi": 3},
+        {"nome": "VENDING", "importo": 5.0, "pezzi": 1},
+    ]
+    assert result["pagamenti"][0]["nome"] == "POS"
+    assert result["prodotti"][0] == {
+        "codice": "A1",
+        "descrizione": "Prodotto A",
+        "importo": 18.75,
+        "pezzi": 3,
+    }
+
+
+def test_sales_period_report_empty_sources(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            vendite=SalesCollection([]),
+            db_storico_vend=SalesCollection([]),
+            import_history=SnapshotCollection(None),
+        ),
+    )
+
+    result = asyncio.run(server._sales_period_report(30))
+
+    assert result["giorni"] == 30
+    assert result["totale"] == 0
+    assert result["serie"] == []
+    assert result["prodotti"] == []
+
+
+def test_sales_period_report_excludes_app_sales_already_captured_by_latest_import(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            vendite=SalesCollection([
+                {
+                    "data": "2026-10-19T09:00:00",
+                    "created_at": "2026-10-19T09:00:00+00:00",
+                    "codice": "A1",
+                    "quantita": 1,
+                    "importo": 99,
+                },
+                {
+                    "data": "2026-10-19T11:00:00",
+                    "created_at": "2026-10-19T11:00:00+00:00",
+                    "codice": "B2",
+                    "quantita": 1,
+                    "importo": 5,
+                },
+            ]),
+            db_storico_vend=SalesCollection([
+                {
+                    "data": "2026-10-19T00:00:00",
+                    "codice": "A1",
+                    "quantita": 1,
+                    "importo": 10,
+                },
+            ]),
+            import_history=SnapshotCollection({
+                "created_at": "2026-10-19T10:00:00+00:00",
+            }),
+        ),
+    )
+
+    result = asyncio.run(server._sales_period_report(7))
+
+    assert result["totale"] == 15
+    assert [product["codice"] for product in result["prodotti"]] == ["A1", "B2"]

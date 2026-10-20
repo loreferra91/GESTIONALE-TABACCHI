@@ -21,7 +21,7 @@ const NAV = [
   { to: "/anomalie", label: "Anomalie", icon: WarningCircle, testid: "nav-anomalie" },
   { to: "/carico", label: "Carico Merce", icon: Truck, testid: "nav-carico" },
   { to: "/ordini", label: "Storico ordini", icon: ClockCounterClockwise, testid: "nav-ordini" },
-  { to: "/report", label: "Report giornaliero", icon: FileText, testid: "nav-report" },
+  { to: "/report", label: "Report vendite", icon: FileText, testid: "nav-report" },
   { to: "/contabilita", label: "Contabilità", icon: Calculator, testid: "nav-contabilita" },
   { to: "/parametri", label: "Parametri", icon: Gear, testid: "nav-parametri" },
 ];
