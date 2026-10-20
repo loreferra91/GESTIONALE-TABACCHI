@@ -1249,6 +1249,7 @@ list_smart_venue = smart_venue["list_smart_venue"]
 create_smart_venue_product = smart_venue["create_smart_venue_product"]
 update_smart_venue_barcode = smart_venue["update_smart_venue_barcode"]
 confirm_smart_venue_difference = smart_venue["confirm_smart_venue_difference"]
+confirm_smart_venue_entry = smart_venue["confirm_smart_venue_entry"]
 delete_smart_venue_row = smart_venue["delete_smart_venue_row"]
 api.include_router(reconciliation_router)
 api.include_router(audit_router)

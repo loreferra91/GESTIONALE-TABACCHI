@@ -89,3 +89,10 @@ frontend/.env
 # Emergent / test runtime artifacts
 .emergent/markers/.restore-complete
 test_reports/pytest/
+
+# Local Smart Venue audit notes, one-off maintenance scripts and captures
+/.openclaw-phase6-request.md
+/backend/aggiusta_backup.py
+/backend/aggiusta_solo_venduti.py
+/backend/correggi_giacenze.py
+/media/ui-audit-2026-10-19/*.png

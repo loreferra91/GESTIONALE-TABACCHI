@@ -39,6 +39,7 @@ class SmartVenueBulkIn(BaseModel):
     testo: str
 
 class SmartVenueEntryIn(BaseModel):
+    codice: str
     quantita: int
     motivazione: str
     idempotency_key: str
@@ -147,6 +148,38 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         for row in rows: totals[row["codice"]] = totals.get(row["codice"], 0) + int(row.get("quantita") or 0)
         return totals
 
+    def applicable_adjustments_by_code(adjustments, movements, smart_rows):
+        """Return the newest unreconciled inventory adjustment after each SV baseline.
+
+        A Smart Venue import (or confirmed reconciliation) establishes a new
+        baseline.  Older physical-inventory adjustments cannot explain a later
+        Smart Venue snapshot.  An adjustment linked to a confirmed entry is
+        consumed and therefore cannot keep the row in a pending state.
+        """
+        baseline_by_code = {
+            str(row.get("codice") or ""): str(row.get("updated_at") or "")
+            for row in smart_rows
+        }
+        reconciled = {
+            str(movement.get("rettifica_id"))
+            for movement in movements
+            if movement.get("stato") == "CONFERMATO" and movement.get("rettifica_id")
+        }
+        result = {}
+        for adjustment in sorted(
+            adjustments,
+            key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")),
+            reverse=True,
+        ):
+            code = str(adjustment.get("codice") or "")
+            adjustment_id = str(adjustment.get("id") or "")
+            if (not code or not adjustment_id or adjustment_id in reconciled
+                    or code in result
+                    or str(adjustment.get("created_at") or "") <= baseline_by_code.get(code, "")):
+                continue
+            result[code] = adjustment
+        return result
+
     def reconciliation_status(*, has_product, difference, pending, has_adjustment=False, smart_venue=0, vending=0):
         if not has_product: return "CODICE MANCANTE"
         if pending: return "CARICO DA INSERIRE"
@@ -194,7 +227,7 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
 
     @router.get("/smart-venue")
     async def list_smart_venue():
-        db = get_database(); hidden, smart, products, vending, pending, adjustments = await asyncio.gather(db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000), db.smart_venue.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), db.prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), vending_stock_by_code(), pending_by_code(), db.rettifiche_inventario.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)); hidden_ids = {str(r.get("product_id")) for r in hidden}; adjustment_by_code = {}; [adjustment_by_code.setdefault(str(r.get("codice") or ""), r) for r in adjustments]; products = [{**p, "giacenza_vending": (vending or {}).get(str(p.get("codice") or ""), 0)} for p in products]; by_code = {str(p.get("codice") or ""): p for p in products}; rows = []
+        db = get_database(); hidden, smart, products, vending, pending, adjustments, movements = await asyncio.gather(db.smart_venue_hidden.find({}, {"_id": 0, "product_id": 1}).to_list(5000), db.smart_venue.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), db.prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(5000), vending_stock_by_code(), pending_by_code(), db.rettifiche_inventario.find({}, {"_id": 0}).to_list(5000), db.smart_venue_movimenti.find({"stato": "CONFERMATO", "rettifica_id": {"$exists": True}}, {"_id": 0, "rettifica_id": 1, "stato": 1}).to_list(5000)); hidden_ids = {str(r.get("product_id")) for r in hidden}; adjustment_by_code = applicable_adjustments_by_code(adjustments, movements, smart); products = [{**p, "giacenza_vending": (vending or {}).get(str(p.get("codice") or ""), 0)} for p in products]; by_code = {str(p.get("codice") or ""): p for p in products}; rows = []
         for s in resolve_rows(smart, products):
             rid = str(s.get("id") or f"smart-venue:{s.get('codice', '')}");
             if rid in hidden_ids: continue
@@ -261,8 +294,31 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         db = get_database()
         if body.quantita <= 0 or not body.motivazione.strip() or not body.idempotency_key.strip():
             raise HTTPException(422, "Quantità, motivazione e idempotency_key sono obbligatori")
+        # This lookup deliberately precedes all current-state checks.  A retry
+        # must return its original outcome after its first request changed the
+        # balance (and hence the current difference).
+        existing = await db.smart_venue_movimenti.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+        if existing:
+            expected = {
+                "tipo": "ENTRATA_RETTIFICA", "row_id": row_id,
+                "codice": body.codice,
+                "quantita": body.quantita, "saldo_precedente": body.saldo_atteso,
+                "differenza_precedente": body.differenza_attesa,
+                "rettifica_id": body.rettifica_id,
+            }
+            if any(existing.get(field) != value for field, value in expected.items()):
+                raise HTTPException(409, "idempotency_key già utilizzata con un payload diverso")
+            return {"ok": True, "gia_confermato": True, "id": row_id,
+                    "smart_venue": existing["saldo_successivo"], "quantita": existing["quantita"],
+                    "saldo_precedente": existing["saldo_precedente"],
+                    "saldo_successivo": existing["saldo_successivo"],
+                    "differenza": existing["differenza_successiva"]}
         row = await db.smart_venue.find_one({"id": row_id}, {"_id": 0})
         if not row: raise HTTPException(404, "Riga SMARTV VENUE non trovata")
+        if body.codice != row.get("codice"):
+            raise HTTPException(422, "Codice non valido per questa riga Smart Venue")
+        if await db.smart_venue_movimenti.find_one({"tipo": "CARICO_IN_ENTRATA", "stato": "PENDENTE", "codice": row.get("codice")}, {"_id": 0, "id": 1}):
+            raise HTTPException(409, "Esiste un carico pendente: confermalo prima dallo Storico ordini")
         product = await db.prodotti.find_one({"codice": row.get("codice")}, {"_id": 0}) or {}
         vending = await vending_stock_by_code() or {}; shop = int(product.get("giacenza_negozio", 0) or 0); vend = int(vending.get(str(row.get("codice") or ""), 0) or 0)
         current = int(row.get("smart_venue", 0) or 0); difference = current - shop - vend
@@ -274,15 +330,12 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
             if not adjustment: raise HTTPException(422, "Rettifica non valida per questa riga Smart Venue")
         now = datetime.now(timezone.utc).isoformat(); updated = current + body.quantita
         async def confirm(session):
-            kwargs = session_kwargs(session); existing = await db.smart_venue_movimenti.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0}, **kwargs)
-            if existing: return existing, True
+            kwargs = session_kwargs(session)
             result = await db.smart_venue.update_one({"id": row_id, "smart_venue": current}, {"$set": {"smart_venue": updated, "updated_at": now}}, **kwargs)
             if result.matched_count != 1: raise HTTPException(409, "Saldo Smart Venue cambiato: ricarica e riprova")
-            movement = {"id": str(uuid.uuid4()), "row_id": row_id, "idempotency_key": body.idempotency_key, "codice": row["codice"], "tipo": "ENTRATA_RETTIFICA", "quantita": body.quantita, "stato": "CONFERMATO", "saldo_precedente": current, "saldo_successivo": updated, "rettifica_id": body.rettifica_id, "motivazione": body.motivazione.strip(), "operatore": request_operator(request), "created_at": now, "confirmed_at": now}
+            movement = {"id": str(uuid.uuid4()), "row_id": row_id, "idempotency_key": body.idempotency_key, "codice": row["codice"], "tipo": "ENTRATA_RETTIFICA", "quantita": body.quantita, "stato": "CONFERMATO", "saldo_precedente": current, "saldo_successivo": updated, "differenza_precedente": difference, "differenza_successiva": updated - shop - vend, "rettifica_id": body.rettifica_id, "motivazione": body.motivazione.strip(), "operatore": request_operator(request), "created_at": now, "confirmed_at": now}
             await db.smart_venue_movimenti.insert_one(movement, **kwargs); return movement, False
         movement, already = await run_transactionally(confirm)
-        if already and (movement.get("row_id") not in (None, row_id) or movement.get("tipo") != "ENTRATA_RETTIFICA"):
-            raise HTTPException(409, "idempotency_key già utilizzata per un'altra operazione")
         if not already: await record_audit_event("CONFERMATO", "SMART_VENUE_ENTRATA", movement["id"], prima={"saldo": current, "differenza": difference}, dopo={"saldo": updated, "differenza": updated - shop - vend, "quantita": body.quantita, "motivazione": body.motivazione.strip()}, operatore=movement["operatore"], idempotency_key=body.idempotency_key)
         return {"ok": True, "gia_confermato": already, "id": row_id, "smart_venue": movement["saldo_successivo"], "quantita": movement["quantita"], "differenza": movement["saldo_successivo"] - shop - vend}
 
@@ -299,4 +352,4 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         if not await db.smart_venue_hidden.find_one({"product_id": row_id}): await db.smart_venue_hidden.insert_one({"id": str(uuid.uuid4()), "product_id": row_id, "codice": row.get("codice"), "hidden_at": datetime.now(timezone.utc).isoformat()})
         return {"ok": True, "id": row_id}
 
-    return {"router": router, "import_smart_venue": import_smart_venue, "parse_smart_venue_bulk_text": parse_bulk_text, "resolve_smart_venue_product_rows": resolve_rows, "smart_venue_bulk_comparison": comparison, "preview_smart_venue_bulk": preview_smart_venue_bulk, "import_smart_venue_bulk": import_smart_venue_bulk, "import_smart_venue_excel": import_smart_venue_excel, "list_smart_venue": list_smart_venue, "create_smart_venue_product": create_smart_venue_product, "update_smart_venue_barcode": update_smart_venue_barcode, "confirm_smart_venue_difference": confirm_smart_venue_difference, "delete_smart_venue_row": delete_smart_venue_row}
+    return {"router": router, "import_smart_venue": import_smart_venue, "parse_smart_venue_bulk_text": parse_bulk_text, "resolve_smart_venue_product_rows": resolve_rows, "smart_venue_bulk_comparison": comparison, "preview_smart_venue_bulk": preview_smart_venue_bulk, "import_smart_venue_bulk": import_smart_venue_bulk, "import_smart_venue_excel": import_smart_venue_excel, "list_smart_venue": list_smart_venue, "create_smart_venue_product": create_smart_venue_product, "update_smart_venue_barcode": update_smart_venue_barcode, "confirm_smart_venue_difference": confirm_smart_venue_difference, "confirm_smart_venue_entry": confirm_smart_venue_entry, "delete_smart_venue_row": delete_smart_venue_row}
