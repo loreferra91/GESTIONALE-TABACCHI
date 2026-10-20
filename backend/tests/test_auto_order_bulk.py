@@ -280,3 +280,80 @@ def test_auto_order_excel_filters_category_and_keeps_numeric_values(monkeypatch)
     assert sheet["D5"].number_format == '€ #,##0.00'
     assert sheet.freeze_panes == "A5"
     assert "ACC1" not in [cell.value for cell in sheet["A"]]
+
+
+def test_carico_preview_imports_an_existing_auto_order_workbook(monkeypatch):
+    async def fake_auto_order():
+        return {
+            "righe": [
+                {
+                    "codice": "SIG1",
+                    "descrizione": "Articolo test",
+                    "categoria": "SIGARETTE",
+                    "qta_da_ordinare": 10,
+                    "lotto_ordine": 10,
+                    "prezzo": 5.5,
+                    "totale": 55,
+                    "motivo": "TEST",
+                }
+            ],
+            "totale": 55,
+            "n_righe": 1,
+        }
+
+    monkeypatch.setattr(server, "auto_order", fake_auto_order)
+    client = TestClient(server.app)
+    exported = client.get(
+        "/api/auto-order/excel", params={"fornitore": "Deposito Rossi"}
+    )
+    assert exported.status_code == 200
+
+    preview = client.post(
+        "/api/ordini/import-auto-order/preview",
+        files={
+            "file": (
+                "ordine_20261020.xlsx",
+                exported.content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    assert payload["file"] == "ordine_20261020.xlsx"
+    assert payload["fornitore"] == "Deposito Rossi"
+    assert payload["riepilogo"] == {
+        "prodotti": 1,
+        "pezzi": 10,
+        "totale": 55.0,
+        "avvisi": 0,
+    }
+    assert payload["righe"] == [{
+        "codice": "SIG1",
+        "descrizione": "Articolo test",
+        "quantita": 10,
+        "prezzo": 5.5,
+        "totale_excel": 55.0,
+    }]
+
+
+def test_carico_preview_rejects_a_generic_excel_file():
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "Altro foglio"
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    response = TestClient(server.app).post(
+        "/api/ordini/import-auto-order/preview",
+        files={
+            "file": (
+                "generico.xlsx",
+                buffer.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Ordine fornitore" in response.json()["detail"]

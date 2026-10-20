@@ -3,7 +3,7 @@ import Layout from "../components/Layout";
 import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
-import { CheckCircle, Clock, Plus, Trash, Warning, Lightning } from "@phosphor-icons/react";
+import { CheckCircle, Clock, FileXls, Plus, Trash, Warning, Lightning } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { defaultLotForCategory } from "../lib/categories";
 
@@ -16,6 +16,9 @@ export default function Carico() {
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importPreview, setImportPreview] = useState(null);
+  const [lastReceipt, setLastReceipt] = useState(null);
   const [recentReceipts, setRecentReceipts] = useState([]);
   const [confirmingReceipt, setConfirmingReceipt] = useState(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => createIdempotencyKey());
@@ -70,7 +73,46 @@ export default function Carico() {
     }));
     setRighe(nuove);
     setSorgente("da auto-order (modificato)");
+    setImportPreview(null);
+    setLastReceipt(null);
     toast.success(`${nuove.length} righe importate dall'Auto-Order — modifica le quantità e conferma`);
+  };
+
+  const importAutoOrderExcel = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".xlsx")) {
+      toast.error("Seleziona il file .xlsx esportato da Auto-Order");
+      return;
+    }
+    setImporting(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await api.post("/ordini/import-auto-order/preview", formData);
+      const preview = response.data;
+      const importedRows = (preview.righe || []).map((row, index) => {
+        const product = prodMap.get(row.codice);
+        return {
+          _uid: `c-xlsx-${Date.now()}-${index}`,
+          codice: row.codice,
+          descrizione: row.descrizione || product?.descrizione || row.codice,
+          quantita: row.quantita,
+          prezzo: row.prezzo || product?.prezzo || 0,
+        };
+      });
+      setRighe(importedRows);
+      setSorgente(`Auto-Order Excel · ${preview.file}`);
+      setImportPreview(preview);
+      setLastReceipt(null);
+      setIdempotencyKey(createIdempotencyKey());
+      toast.success(`${importedRows.length} prodotti importati · controlla il riepilogo e conferma l'ordine`);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile leggere l'Excel Auto-Order"));
+    } finally {
+      setImporting(false);
+    }
   };
 
   const totale = righe.reduce((s, r) => s + (r.quantita || 0) * (r.prezzo || 0), 0);
@@ -96,7 +138,17 @@ export default function Carico() {
       toast.success(r.data.gia_registrato
         ? "Carico già registrato: nessuna quantità duplicata"
         : `${r.data.caricate} righe caricate · ${r.data.prodotti_nuovi} prodotti nuovi creati`);
+      setLastReceipt({
+        ...r.data,
+        file: importPreview?.file || "",
+        fornitore: importPreview?.fornitore || "",
+        sorgente,
+        prodotti: valide.length,
+        pezzi: valide.reduce((sum, row) => sum + (row.quantita || 0), 0),
+        totale: valide.reduce((sum, row) => sum + (row.quantita || 0) * (row.prezzo || 0), 0),
+      });
       setRighe([]);
+      setImportPreview(null);
       setIdempotencyKey(createIdempotencyKey());
       setConfirmOpen(false);
       await reloadRecentReceipts();
@@ -155,7 +207,11 @@ export default function Carico() {
             <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-1">Sorgente / Bolla</label>
             <input data-testid="carico-sorgente" value={sorgente} onChange={e => setSorgente(e.target.value)} placeholder="es. ORDINE TABACCHI 18-02.xlsx / Bolla n.123" className="border rounded-md px-3 py-2 text-sm w-full" />
           </div>
-          <div className="md:col-span-2 flex items-end gap-2">
+          <div className="md:col-span-2 flex flex-wrap items-end gap-2">
+            <label data-testid="carico-import-excel-label" className={`flex cursor-pointer items-center gap-2 rounded-md border border-emerald-700 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800 transition-colors hover:bg-emerald-100 ${importing ? "pointer-events-none opacity-50" : ""}`}>
+              <FileXls size={17} weight="bold" /> {importing ? "Lettura Excel…" : "Importa Excel Auto-Order"}
+              <input data-testid="carico-import-excel" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={importAutoOrderExcel} className="sr-only" disabled={importing} />
+            </label>
             <button data-testid="carico-import-ao" onClick={importFromAO} className="flex items-center gap-2 bg-white border border-slate-300 text-slate-900 rounded-md px-3 py-2 text-sm hover:bg-slate-50 transition-colors">
               <Lightning size={16} /> Precompila da Auto-Order
             </button>
@@ -164,6 +220,25 @@ export default function Carico() {
             </button>
           </div>
         </div>
+
+        {importPreview && (
+          <div data-testid="carico-import-summary" className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="font-bold">Excel Auto-Order pronto per il carico</div>
+                <div className="mt-1 text-emerald-800">{importPreview.file}{importPreview.fornitore ? ` · ${importPreview.fornitore}` : ""}{importPreview.data_ordine ? ` · ordine del ${formatImportDate(importPreview.data_ordine)}` : ""}</div>
+              </div>
+              <Badge tone="ok">DA CONFERMARE</Badge>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div><span className="block text-xs uppercase text-emerald-700">Prodotti</span><b>{formatNum(righe.length)}</b></div>
+              <div><span className="block text-xs uppercase text-emerald-700">Pezzi</span><b>{formatNum(pezziTot)}</b></div>
+              <div><span className="block text-xs uppercase text-emerald-700">Valore</span><b>{formatEur(totale)}</b></div>
+              <div><span className="block text-xs uppercase text-emerald-700">Anomalie</span><b>{formatNum(nonRiconosciute + (importPreview.avvisi?.length || 0))}</b></div>
+            </div>
+            {importPreview.avvisi?.length > 0 && <ul className="mt-3 list-disc pl-5 text-xs text-amber-800">{importPreview.avvisi.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul>}
+          </div>
+        )}
 
         <div className="relative">
           <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-1">Aggiungi prodotto (cerca per codice o descrizione)</label>
@@ -197,7 +272,7 @@ export default function Carico() {
               </tr>
             </thead>
             <tbody>
-              {righe.length === 0 && <tr><td colSpan={7} className="text-center py-12 text-slate-400">Nessuna riga — cerca un prodotto, usa "Precompila da Auto-Order" o aggiungi una riga vuota.</td></tr>}
+              {righe.length === 0 && <tr><td colSpan={7} className="text-center py-12 text-slate-400">Nessuna riga — importa l'Excel Auto-Order, cerca un prodotto o aggiungi una riga vuota.</td></tr>}
               {righe.map((r, i) => {
                 const known = r.codice && prodMap.has(r.codice.trim());
                 return (
@@ -233,13 +308,34 @@ export default function Carico() {
       </Card>
 
       <div className="flex justify-end gap-3">
-        <button data-testid="carico-clear" onClick={() => setRighe([])} disabled={!righe.length} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="carico-clear" onClick={() => { setRighe([]); setImportPreview(null); }} disabled={!righe.length} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Svuota
         </button>
         <button data-testid="carico-conferma" onClick={() => setConfirmOpen(true)} disabled={saving || righe.filter(r => r.codice && r.quantita > 0).length === 0} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-6 py-2 text-sm font-bold transition-colors disabled:opacity-40">
-          {saving ? "Carico in corso…" : `Carica in magazzino (${formatEur(totale)})`}
+          {saving ? "Carico in corso…" : `Conferma ordine e carico (${formatEur(totale)})`}
         </button>
       </div>
+
+      {lastReceipt && (
+        <div data-testid="carico-success-summary">
+          <Card className="mt-6 border-emerald-200 bg-emerald-50 p-5">
+            <div className="flex items-start gap-3">
+              <CheckCircle size={26} weight="fill" className="shrink-0 text-emerald-700" />
+              <div className="min-w-0 flex-1">
+                <h2 className="font-heading text-lg font-black text-emerald-950">Carico confermato</h2>
+                <p className="mt-1 text-sm text-emerald-800">{lastReceipt.file || lastReceipt.sorgente}{lastReceipt.fornitore ? ` · ${lastReceipt.fornitore}` : ""}</p>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                  <div><span className="block text-xs uppercase text-emerald-700">Prodotti</span><b>{formatNum(lastReceipt.prodotti)}</b></div>
+                  <div><span className="block text-xs uppercase text-emerald-700">Pezzi caricati</span><b>{formatNum(lastReceipt.pezzi)}</b></div>
+                  <div><span className="block text-xs uppercase text-emerald-700">Valore</span><b>{formatEur(lastReceipt.totale)}</b></div>
+                  <div><span className="block text-xs uppercase text-emerald-700">Nuovi prodotti</span><b>{formatNum(lastReceipt.prodotti_nuovi || 0)}</b></div>
+                </div>
+                <p className="mt-3 break-all text-xs text-emerald-700">Ricezione {lastReceipt.batch_id} · backup di sicurezza {lastReceipt.backup_id}</p>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
 
       <Card className="mt-8 overflow-hidden">
         <div className="border-b border-slate-200 px-4 py-3">
@@ -270,17 +366,28 @@ export default function Carico() {
       </Card>
       <ConfirmDialog
         open={confirmOpen}
-        title="Confermare carico merce?"
-        confirmLabel="Aggiorna magazzino"
+        title="Confermare ordine e carico?"
+        confirmLabel="Conferma e aggiorna magazzino"
         loading={saving}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={carica}
       >
-        <p>Verranno caricate <b>{formatNum(righe.filter(r => r.codice && r.quantita > 0).length)}</b> righe, per <b>{formatNum(pezziTot)}</b> pezzi totali e valore <b>{formatEur(totale)}</b>.</p>
+        {importPreview && <p className="mb-3 rounded-md bg-slate-100 p-3 text-xs"><b>{importPreview.file}</b>{importPreview.fornitore ? ` · ${importPreview.fornitore}` : ""}<br/>{importPreview.selezione || "Tutte le categorie"}</p>}
+        <div className="grid grid-cols-3 gap-2 rounded-md border border-slate-200 p-3 text-center">
+          <div><span className="block text-xs text-slate-500">Prodotti</span><b>{formatNum(righe.filter(r => r.codice && r.quantita > 0).length)}</b></div>
+          <div><span className="block text-xs text-slate-500">Pezzi</span><b>{formatNum(pezziTot)}</b></div>
+          <div><span className="block text-xs text-slate-500">Valore</span><b>{formatEur(totale)}</b></div>
+        </div>
+        {nonRiconosciute > 0 && <p className="mt-3 font-semibold text-amber-700">Attenzione: {formatNum(nonRiconosciute)} codici non presenti saranno creati come nuovi prodotti.</p>}
         <p className="mt-2 text-slate-600">L'operazione aggiorna <b>Storico ordini</b>, <b>giacenza negozio</b> e <b>acquistati</b>.</p>
       </ConfirmDialog>
     </Layout>
   );
+}
+
+function formatImportDate(value) {
+  const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("it-IT");
 }
 
 function createIdempotencyKey() {

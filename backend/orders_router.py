@@ -1,9 +1,10 @@
 """Manual merchandise receipt history and Smart Venue confirmation routes."""
 from datetime import datetime, timezone
+import io
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo import UpdateOne
 from pymongo.errors import DuplicateKeyError
@@ -63,6 +64,110 @@ SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED = {
 }
 
 
+def parse_auto_order_excel(content: bytes, filename: str = "") -> Dict[str, Any]:
+    """Parse the compact workbook exported by the Auto-Order page."""
+    try:
+        import openpyxl
+    except Exception as exc:  # pragma: no cover - deployment dependency guard
+        raise HTTPException(500, "openpyxl non installato") from exc
+
+    try:
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(content), data_only=True, read_only=True, keep_vba=False
+        )
+    except Exception as exc:
+        raise HTTPException(422, f"File Excel non leggibile: {exc}") from exc
+
+    if "Ordine fornitore" not in workbook.sheetnames:
+        raise HTTPException(
+            422,
+            "Il file non è un Excel Auto-Order: manca il foglio 'Ordine fornitore'",
+        )
+
+    worksheet = workbook["Ordine fornitore"]
+    header_row = None
+    for row_index in range(1, min(worksheet.max_row, 20) + 1):
+        labels = [
+            str(worksheet.cell(row=row_index, column=column).value or "").strip().upper()
+            for column in range(1, 5)
+        ]
+        if labels == ["CODICE", "ARTICOLO", "QTA", "TOTALE"]:
+            header_row = row_index
+            break
+    if header_row is None:
+        raise HTTPException(
+            422,
+            "Intestazioni Auto-Order non riconosciute: servono CODICE, ARTICOLO, QTA e TOTALE",
+        )
+
+    rows_by_code: Dict[str, Dict[str, Any]] = {}
+    warnings: List[str] = []
+    for row_index in range(header_row + 1, worksheet.max_row + 1):
+        raw_code = worksheet.cell(row=row_index, column=1).value
+        raw_description = worksheet.cell(row=row_index, column=2).value
+        raw_quantity = worksheet.cell(row=row_index, column=3).value
+        raw_total = worksheet.cell(row=row_index, column=4).value
+        code = str(raw_code or "").strip()
+        if not code:
+            continue
+        if code.upper() == "TOTALE" or str(raw_quantity or "").strip().upper() == "TOTALE":
+            continue
+        try:
+            numeric_quantity = float(raw_quantity)
+            if not numeric_quantity.is_integer() or numeric_quantity <= 0:
+                raise ValueError
+            quantity = int(numeric_quantity)
+        except (TypeError, ValueError):
+            warnings.append(f"Riga {row_index}: quantità non valida per {code}, riga ignorata")
+            continue
+        try:
+            row_total = float(raw_total or 0)
+            if row_total < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            warnings.append(f"Riga {row_index}: totale non valido per {code}, impostato a zero")
+            row_total = 0
+
+        description = str(raw_description or code).lstrip("'").strip() or code
+        if code in rows_by_code:
+            existing = rows_by_code[code]
+            existing["quantita"] += quantity
+            existing["totale_excel"] = round(existing["totale_excel"] + row_total, 2)
+            existing["prezzo"] = round(existing["totale_excel"] / existing["quantita"], 2)
+            warnings.append(f"Codice {code} ripetuto: quantità aggregate")
+            continue
+        rows_by_code[code] = {
+            "codice": code,
+            "descrizione": description,
+            "quantita": quantity,
+            "prezzo": round(row_total / quantity, 2) if quantity else 0,
+            "totale_excel": round(row_total, 2),
+        }
+
+    rows = list(rows_by_code.values())
+    if not rows:
+        raise HTTPException(422, "Il file Auto-Order non contiene righe caricabili")
+
+    raw_date = worksheet["D2"].value
+    if hasattr(raw_date, "isoformat"):
+        raw_date = raw_date.isoformat()
+    return {
+        "ok": True,
+        "file": filename or "ordine_auto_order.xlsx",
+        "fornitore": str(worksheet["B2"].value or "").lstrip("'").strip(),
+        "data_ordine": str(raw_date or ""),
+        "selezione": str(worksheet["B3"].value or "").lstrip("'").strip(),
+        "righe": rows,
+        "riepilogo": {
+            "prodotti": len(rows),
+            "pezzi": sum(row["quantita"] for row in rows),
+            "totale": round(sum(row["totale_excel"] for row in rows), 2),
+            "avvisi": len(warnings),
+        },
+        "avvisi": warnings,
+    }
+
+
 def receipt_quantities_by_code(rows: List[Dict[str, Any]]) -> Dict[str, int]:
     quantities: Dict[str, int] = {}
     for row in rows:
@@ -85,8 +190,16 @@ def create_orders_router(
     categorize_description,
     normalize_nonnegative_money,
     record_audit_event,
+    read_capped,
 ):
     router = APIRouter()
+
+    @router.post("/ordini/import-auto-order/preview")
+    async def preview_auto_order_excel(file: UploadFile = File(...)):
+        filename = str(file.filename or "").replace("\\", "/").rsplit("/", 1)[-1][:180]
+        if not filename.lower().endswith(".xlsx"):
+            raise HTTPException(422, "Seleziona il file .xlsx esportato da Auto-Order")
+        return parse_auto_order_excel(await read_capped(file), filename)
 
     async def increment_smart_venue_for_receipt(
         codice: str,
@@ -622,6 +735,7 @@ def create_orders_router(
         "conferma_carico_smart_venue": conferma_carico_smart_venue,
         "del_ordine": del_ordine,
         "bulk_carico": bulk_carico,
+        "preview_auto_order_excel": preview_auto_order_excel,
         "increment_smart_venue_for_receipt": increment_smart_venue_for_receipt,
         "repair_smart_venue_auto_order_2026_10_12": repair_smart_venue_auto_order_2026_10_12,
     }

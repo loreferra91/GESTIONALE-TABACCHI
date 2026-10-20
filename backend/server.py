@@ -987,6 +987,7 @@ orders = create_orders_router(
     categorize_description=_cat_from_desc,
     normalize_nonnegative_money=nonnegative_money,
     record_audit_event=_record_audit_event,
+    read_capped=_read_capped,
 )
 orders_router = orders["router"]
 list_ordini = orders["list_ordini"]
@@ -994,6 +995,7 @@ add_ordine = orders["add_ordine"]
 conferma_carico_smart_venue = orders["conferma_carico_smart_venue"]
 del_ordine = orders["del_ordine"]
 bulk_carico = orders["bulk_carico"]
+preview_auto_order_excel = orders["preview_auto_order_excel"]
 _increment_smart_venue_for_receipt = orders["increment_smart_venue_for_receipt"]
 repair_smart_venue_auto_order_2026_10_12 = orders["repair_smart_venue_auto_order_2026_10_12"]
 backup = create_backup_router(
