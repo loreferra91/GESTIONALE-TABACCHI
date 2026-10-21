@@ -76,7 +76,7 @@ function NavItem({ item, closeMenu }) {
       end={item.end}
       data-testid={item.testid}
       onClick={closeMenu}
-      className={({ isActive }) => `group relative mx-3 flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm transition-colors ${
+      className={({ isActive }) => `group relative mx-3 flex items-center gap-3.5 rounded-md px-3 py-2.5 text-[16px] leading-6 transition-colors ${
         isActive
           ? "bg-white/10 text-white before:absolute before:-left-3 before:top-1.5 before:bottom-1.5 before:w-1 before:rounded-r before:bg-amber-400"
           : "text-slate-400 hover:bg-white/5 hover:text-white"
@@ -84,8 +84,8 @@ function NavItem({ item, closeMenu }) {
     >
       {({ isActive }) => (
         <>
-          <Icon size={19} weight={isActive ? "fill" : "bold"} className={isActive ? "text-amber-400" : ""} />
-          <span className="min-w-0 truncate font-medium">{item.label}</span>
+          <Icon size={21} weight={isActive ? "fill" : "bold"} className={isActive ? "text-amber-400" : ""} />
+          <span className="min-w-0 truncate font-semibold">{item.label}</span>
         </>
       )}
     </NavLink>
@@ -99,10 +99,10 @@ function Group({ group, expanded, toggle, closeMenu }) {
         type="button"
         onClick={toggle}
         aria-expanded={expanded}
-        className="flex w-full items-center justify-between px-5 py-2 text-left text-xs font-bold uppercase tracking-[0.14em] text-slate-400 hover:text-slate-200"
+        className="flex w-full items-center justify-between px-5 py-2 text-left text-[13px] font-bold uppercase tracking-[0.12em] text-slate-300 hover:text-white"
       >
         <span>{group.label}</span>
-        <CaretDown size={13} weight="bold" className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+        <CaretDown size={14} weight="bold" className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
       </button>
       {expanded ? <div className="space-y-0.5">{group.items.map(item => <NavItem key={item.to} item={item} closeMenu={closeMenu} />)}</div> : null}
     </div>
