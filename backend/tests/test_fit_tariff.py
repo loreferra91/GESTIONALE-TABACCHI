@@ -1,7 +1,11 @@
 import sys
 from types import SimpleNamespace
 
-from backend.adm_router import build_fit_preview, build_hybrid_tariff_snapshot_sync
+from backend.adm_router import (
+    _exact_duplicate_listino_ids,
+    build_fit_preview,
+    build_hybrid_tariff_snapshot_sync,
+)
 from backend.fit_tariff import (
     extract_fit_tariff_info,
     normalize_fit_code,
@@ -144,3 +148,56 @@ def test_hybrid_snapshot_replaces_equal_or_newer_adm_categories():
 
     assert {item["adm_codice"] for item in result["rows"]} == {"2", "3"}
     assert [item["categoria"] for item in result["adm_overlays"]] == ["SIGARI"]
+
+
+def test_fast_fit_snapshot_skips_pdf_parsing():
+    fit = {
+        "effective_date": "2026-10-14",
+        "rows": [{
+            "adm_codice": "1", "descrizione": "Prodotto", "prezzo": 5,
+            "categoria_adm": "SIGARI", "fonte": "FIT",
+        }],
+    }
+    categories = [{
+        "categoria": "SIGARI", "aggiornato_il": "19/10/2026",
+        "url": "https://example.test/sigari.pdf",
+    }]
+
+    result = build_hybrid_tariff_snapshot_sync(
+        lambda: fit,
+        lambda: categories,
+        lambda _category: (_ for _ in ()).throw(AssertionError("PDF parser called")),
+        include_adm_overlays=False,
+    )
+
+    assert result["rows"] == fit["rows"]
+    assert result["adm_overlays"] == []
+    assert "SIGARI" in result["warnings"][0]
+
+
+def test_exact_duplicate_listino_rows_are_safe_to_remove():
+    duplicate_ids, conflicts = _exact_duplicate_listino_ids({
+        "21645": [
+            {"_id": "old", "codice": "AMMS21645", "descrizione": "VIRTO", "prezzo": 5.5,
+             "confezione": "Conf. da 20", "categoria_adm": "", "fonte": ""},
+            {"_id": "copy", "codice": "AMMS21645", "descrizione": "VIRTO", "prezzo": 5.5,
+             "confezione": "Conf. da 20", "categoria_adm": "", "fonte": ""},
+        ],
+    })
+
+    assert duplicate_ids == ["copy"]
+    assert conflicts == []
+
+
+def test_non_identical_duplicate_listino_rows_require_manual_review():
+    duplicate_ids, conflicts = _exact_duplicate_listino_ids({
+        "21645": [
+            {"_id": "old", "codice": "AMMS21645", "descrizione": "VIRTO", "prezzo": 5.5,
+             "confezione": "Conf. da 20", "categoria_adm": "", "fonte": ""},
+            {"_id": "different", "codice": "AMMS21645", "descrizione": "VIRTO", "prezzo": 6,
+             "confezione": "Conf. da 20", "categoria_adm": "", "fonte": ""},
+        ],
+    })
+
+    assert duplicate_ids == []
+    assert conflicts == ["21645"]

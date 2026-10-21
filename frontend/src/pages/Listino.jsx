@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   CheckCircle,
@@ -55,6 +55,7 @@ export default function Listino() {
   const [page, setPage] = useState(1);
   const [sortKey, setSortKey] = useState("descrizione");
   const [sortDir, setSortDir] = useState("asc");
+  const previewRef = useRef(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
@@ -121,10 +122,13 @@ export default function Listino() {
     try {
       const response = await api.post("/fit/preview", {}, { timeout: 600000 });
       setPreview(response.data);
+      window.requestAnimationFrame(() => previewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
       if (response.data.prezzi_modificati) {
         toast.success(`${formatNum(response.data.prezzi_modificati)} prezzi da verificare`);
+      } else if (response.data.nuovi_articoli_listino) {
+        toast.success(`${formatNum(response.data.nuovi_articoli_listino)} righe del listino da aggiungere`);
       } else {
-        toast.success("Il catalogo prodotti è già allineato al tariffario");
+        toast.success("I prezzi sono già corretti; puoi comunque riallineare il listino ufficiale");
       }
     } catch (error) {
       toast.error(apiErrorMessage(error, "Errore durante il controllo del tariffario"));
@@ -179,7 +183,7 @@ export default function Listino() {
           className="inline-flex items-center gap-2 rounded-md bg-amber-500 px-4 py-2 text-sm font-bold text-slate-950 shadow-sm hover:bg-amber-400 disabled:opacity-50"
         >
           <ArrowClockwise size={17} weight="bold" className={previewing ? "animate-spin" : ""} />
-          {previewing ? "Controllo in corso..." : "Controlla aggiornamenti"}
+          {previewing ? "Preparo l’anteprima..." : "Prepara aggiornamento"}
         </button>
       )}
     >
@@ -205,7 +209,7 @@ export default function Listino() {
               <h2 className="font-heading text-base font-black text-slate-950">Verifica ufficiale ADM</h2>
               <p className="mt-1 text-sm text-slate-600">
                 {fitStatus?.adm_newer_categories?.length
-                  ? `${formatNum(fitStatus.adm_newer_categories.length)} categorie verranno verificate sui PDF ADM`
+                  ? `${formatNum(fitStatus.adm_newer_categories.length)} categorie ADM più recenti disponibili nella verifica PDF separata`
                   : "Il foglio FIT è più recente dei PDF di categoria"}
               </p>
             </div>
@@ -224,6 +228,7 @@ export default function Listino() {
       </Card>
 
       {preview && (
+        <div ref={previewRef} className="scroll-mt-24">
         <Card className="mb-4 border-amber-300 shadow-sm">
           <div className="flex flex-col gap-4 border-b border-slate-200 p-5 xl:flex-row xl:items-start xl:justify-between">
             <div>
@@ -248,7 +253,7 @@ export default function Listino() {
             <PreviewMetric label="Righe sorgente" value={preview.righe} />
             <PreviewMetric label="Prodotti collegati" value={preview.prodotti_collegati} tone="success" />
             <PreviewMetric label="Prezzi modificati" value={preview.prezzi_modificati} tone={preview.prezzi_modificati ? "warning" : "success"} />
-            <PreviewMetric label="Invariati" value={preview.prezzi_invariati} />
+            <PreviewMetric label="Nuove righe listino" value={preview.nuovi_articoli_listino} tone={preview.nuovi_articoli_listino ? "warning" : "success"} />
             <PreviewMetric label="Non trovati" value={preview.prodotti_non_trovati} tone={preview.prodotti_non_trovati ? "warning" : "default"} />
             <PreviewMetric label="Ambigui" value={preview.collegamenti_ambigui} tone={preview.collegamenti_ambigui ? "danger" : "default"} />
           </div>
@@ -291,6 +296,7 @@ export default function Listino() {
             </div>
           </div>
         </Card>
+        </div>
       )}
 
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center">
@@ -367,7 +373,7 @@ export default function Listino() {
         onCancel={() => setConfirmOpen(false)}
         onConfirm={applyPreview}
       >
-        Verranno aggiornati <b>{formatNum(preview?.prodotti_collegati)}</b> prodotti collegati per codice ADM.
+        Verranno riallineate <b>{formatNum(preview?.righe)}</b> righe del listino e aggiornati <b>{formatNum(preview?.prodotti_collegati)}</b> prodotti collegati per codice ADM.
         I collegamenti ambigui e i prodotti non trovati resteranno invariati. Prima dell’operazione verrà creato un backup recuperabile.
       </ConfirmDialog>
     </Layout>

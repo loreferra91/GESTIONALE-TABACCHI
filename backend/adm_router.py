@@ -370,7 +370,41 @@ def _tariff_snapshot_hash(rows: List[Dict[str, Any]]) -> str:
     ).hexdigest()
 
 
-def build_hybrid_tariff_snapshot_sync(fetch_fit_tariff, fetch_categories, parse_pdf):
+def _exact_duplicate_listino_ids(
+    existing_by_code: Dict[str, List[Dict[str, Any]]],
+) -> tuple[List[Any], List[str]]:
+    """Return safely removable duplicate row ids and conflicting ADM codes.
+
+    Older ADM imports can have created the same visible tariff row twice.  An
+    exact duplicate is safe to collapse once the caller has taken a backup;
+    rows with different commercial values must still require manual review.
+    """
+    removable_ids: List[Any] = []
+    conflicting_codes: List[str] = []
+    comparison_fields = (
+        "codice", "descrizione", "prezzo", "confezione", "categoria_adm", "fonte",
+    )
+    for code, matches in existing_by_code.items():
+        if len(matches) < 2:
+            continue
+        signatures = {
+            tuple(
+                _money_value(item.get(field)) if field == "prezzo"
+                else str(item.get(field) or "").strip()
+                for field in comparison_fields
+            )
+            for item in matches
+        }
+        if len(signatures) != 1:
+            conflicting_codes.append(code)
+            continue
+        removable_ids.extend(item["_id"] for item in matches[1:] if item.get("_id") is not None)
+    return removable_ids, sorted(conflicting_codes)
+
+
+def build_hybrid_tariff_snapshot_sync(
+    fetch_fit_tariff, fetch_categories, parse_pdf, include_adm_overlays=True,
+):
     """Use FIT XLS, replacing only categories for which ADM is demonstrably newer."""
     fit_document = fetch_fit_tariff()
     fit_date = fit_document.get("effective_date")
@@ -378,6 +412,25 @@ def build_hybrid_tariff_snapshot_sync(fetch_fit_tariff, fetch_categories, parse_
     adm_categories = fetch_categories()
     overlays = []
     warnings = []
+    if not include_adm_overlays:
+        newer = [
+            category["categoria"]
+            for category in adm_categories
+            if iso_date_from_adm(category.get("aggiornato_il"))
+            and fit_date
+            and iso_date_from_adm(category.get("aggiornato_il")) > fit_date
+        ]
+        if newer:
+            warnings.append(
+                "PDF ADM piu recenti disponibili per: " + ", ".join(newer)
+            )
+        return {
+            "rows": rows,
+            "snapshot_hash": _tariff_snapshot_hash(rows),
+            "fit": {key: value for key, value in fit_document.items() if key not in {"rows", "content"}},
+            "adm_overlays": overlays,
+            "warnings": warnings,
+        }
     for category in adm_categories:
         adm_date = iso_date_from_adm(category.get("aggiornato_il"))
         if not adm_date or not fit_date or adm_date < fit_date:
@@ -566,7 +619,7 @@ def create_adm_router(
             for category in categories
             if iso_date_from_adm(category.get("aggiornato_il"))
             and fit_date
-            and iso_date_from_adm(category.get("aggiornato_il")) >= fit_date
+            and iso_date_from_adm(category.get("aggiornato_il")) > fit_date
         ]
         last_sync = await get_database().fit_sync.find_one(
             {}, {"_id": 0}, sort=[("created_at", -1)]
@@ -586,6 +639,7 @@ def create_adm_router(
                 fetch_fit_tariff,
                 fetch_categories,
                 parse_pdf,
+                False,
             )
         except Exception as exc:
             raise HTTPException(502, f"Impossibile preparare il tariffario: {exc}") from exc
@@ -669,19 +723,27 @@ def create_adm_router(
 
         existing_by_code: Dict[str, List[Dict[str, Any]]] = {}
         async for item in database.listino_adm.find(
-            {}, {"_id": 1, "id": 1, "codice": 1, "adm_codice": 1}
+            {}, {
+                "_id": 1,
+                "id": 1,
+                "codice": 1,
+                "adm_codice": 1,
+                "descrizione": 1,
+                "prezzo": 1,
+                "confezione": 1,
+                "categoria_adm": 1,
+                "fonte": 1,
+            }
         ):
             code = _catalogue_adm_code(item)
             if code:
                 existing_by_code.setdefault(code, []).append(item)
-        duplicate_codes = sorted(
-            code for code, matches in existing_by_code.items() if len(matches) > 1
-        )
-        if duplicate_codes:
-            sample = ", ".join(duplicate_codes[:5])
+        duplicate_ids, conflicting_duplicate_codes = _exact_duplicate_listino_ids(existing_by_code)
+        if conflicting_duplicate_codes:
+            sample = ", ".join(conflicting_duplicate_codes[:5])
             raise HTTPException(
                 409,
-                f"Listino locale ambiguo per i codici ADM {sample}: correggere i duplicati",
+                f"Listino locale ambiguo per i codici ADM {sample}: correggere le righe diverse",
             )
 
         claim = await database.fit_tariff_previews.update_one(
@@ -701,6 +763,8 @@ def create_adm_router(
                     "snapshot_hash": preview["snapshot_hash"],
                 },
             )
+            if duplicate_ids:
+                await database.listino_adm.delete_many({"_id": {"$in": duplicate_ids}})
             synced_at = now.isoformat()
             listino_operations = []
             for item in rows:
@@ -746,6 +810,7 @@ def create_adm_router(
                 "aggiornati": listino_result.get("aggiornati", 0),
                 "prodotti_trovati": product_result.get("trovati", 0),
                 "prodotti_aggiornati": product_result.get("modificati", 0),
+                "duplicati_listino_rimossi": len(duplicate_ids),
                 "backup_id": backup.get("id"),
             }
             await database.fit_sync.insert_one(sync_document.copy())

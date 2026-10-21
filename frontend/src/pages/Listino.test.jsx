@@ -45,7 +45,8 @@ beforeEach(async () => {
       data: {
         preview_id: "preview-1", righe: 4325, prodotti_collegati: 1,
         prezzi_modificati: 1, prezzi_invariati: 0, prodotti_non_trovati: 0,
-        collegamenti_ambigui: 0, adm_overlays: [{ categoria: "SIGARI" }], warnings: [],
+        nuovi_articoli_listino: 18, collegamenti_ambigui: 0,
+        adm_overlays: [], warnings: ["PDF ADM piu recenti disponibili per: SIGARI"],
         variazioni: [{
           codice: "AMMS338", adm_codice: "338", descrizione: "WINSTON BLUE",
           prezzo_attuale: 5.5, prezzo_nuovo: 5.8, differenza: 0.3,
@@ -78,12 +79,13 @@ test("carica il listino paginato e mostra la fonte FIT", () => {
 
 test("prepara l'anteprima prima di applicare i prezzi", async () => {
   const button = Array.from(container.querySelectorAll("button"))
-    .find(item => item.textContent.includes("Controlla aggiornamenti"));
+    .find(item => item.textContent.includes("Prepara aggiornamento"));
   await act(async () => button.click());
 
   expect(api.post).toHaveBeenCalledWith("/fit/preview", {}, { timeout: 600000 });
   expect(container.textContent).toContain("Anteprima pronta");
   expect(container.textContent).toContain("Variazioni di prezzo");
   expect(container.textContent).toContain("5,80");
-  expect(container.textContent).toContain("Integrati i PDF ADM più recenti per: SIGARI");
+  expect(container.textContent).toContain("Nuove righe listino");
+  expect(container.textContent).toContain("PDF ADM piu recenti disponibili per: SIGARI");
 });
