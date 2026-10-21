@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from backend.adm_router import (
     _exact_duplicate_listino_ids,
+    _fit_listino_update,
     build_fit_preview,
     build_hybrid_tariff_snapshot_sync,
 )
@@ -122,6 +123,47 @@ def test_fit_preview_does_not_treat_internal_numeric_codes_as_adm_links():
 
     assert result["prodotti_collegati"] == 0
     assert result["prezzi_modificati"] == 0
+
+
+def test_fit_preview_reports_every_listino_field_change():
+    rows = [{
+        "adm_codice": "1", "codice": "AMMS1", "descrizione": "Nuovo nome",
+        "prezzo": 6.0, "confezione": "Conf. da 20", "categoria_adm": "SIGARETTE",
+        "fonte": "FIT",
+    }, {
+        "adm_codice": "2", "codice": "AMMS2", "descrizione": "Nuovo articolo",
+        "prezzo": 7.0, "confezione": "Conf. da 10", "categoria_adm": "SIGARI",
+        "fonte": "FIT",
+    }]
+    existing = [{
+        "codice": "AMMS1", "descrizione": "Vecchio nome", "prezzo": 5.5,
+        "confezione": "Conf. da 20", "categoria_adm": "", "fonte": "",
+    }]
+
+    result = build_fit_preview(rows, [], existing)
+
+    assert result["listino_nuovi"] == 1
+    assert result["listino_aggiornati"] == 1
+    assert result["listino_codici_adm_compilati"] == 1
+    assert result["listino_categorie_compilate"] == 1
+    assert result["listino_fonti_compilate"] == 1
+    updated = next(item for item in result["listino_variazioni"] if item["stato"] == "AGGIORNATO")
+    assert {item["campo"] for item in updated["campi"]} == {
+        "adm_codice", "descrizione", "categoria_adm", "fonte", "prezzo",
+    }
+
+
+def test_fit_listino_update_has_no_mongo_path_conflicts():
+    item = {
+        "adm_codice": "1", "codice": "AMMS1", "descrizione": "Prodotto",
+        "prezzo": 6.0, "confezione": "Conf. da 20", "categoria_adm": "SIGARETTE",
+        "fonte": "FIT",
+    }
+
+    update = _fit_listino_update(item, "hash", "2026-10-21T10:00:00+00:00")
+
+    assert not (set(update["$set"]) & set(update.get("$setOnInsert", {})))
+    assert update["$set"]["adm_codice"] == "1"
 
 
 def test_hybrid_snapshot_replaces_equal_or_newer_adm_categories():

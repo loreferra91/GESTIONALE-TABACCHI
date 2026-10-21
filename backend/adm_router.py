@@ -215,6 +215,111 @@ def _money_value(value: Any) -> float:
         return 0.0
 
 
+LISTINO_COMPARE_FIELDS = (
+    "codice",
+    "adm_codice",
+    "descrizione",
+    "categoria_adm",
+    "confezione",
+    "fonte",
+    "prezzo",
+)
+
+
+def _listino_field_value(field: str, value: Any) -> Any:
+    if field == "prezzo":
+        return _money_value(value)
+    return str(value or "").strip()
+
+
+def _listino_preview(
+    rows: List[Dict[str, Any]],
+    existing_listino: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return an inspectable field-by-field diff for the tariff catalogue."""
+    existing_by_code: Dict[str, List[Dict[str, Any]]] = {}
+    for item in existing_listino:
+        code = _catalogue_adm_code(item)
+        if code:
+            existing_by_code.setdefault(code, []).append(item)
+
+    source_codes = {item["adm_codice"] for item in rows}
+    changes = []
+    inserted = updated = unchanged = 0
+    backfilled_adm_codes = backfilled_categories = backfilled_sources = 0
+    duplicate_codes = []
+
+    for item in rows:
+        code = item["adm_codice"]
+        matches = existing_by_code.get(code, [])
+        if len(matches) > 1:
+            duplicate_codes.append(code)
+        if not matches:
+            inserted += 1
+            changes.append({
+                "stato": "NUOVO",
+                "codice": item.get("codice"),
+                "adm_codice": code,
+                "descrizione": item.get("descrizione"),
+                "categoria_adm": item.get("categoria_adm"),
+                "campi": [
+                    {
+                        "campo": field,
+                        "prima": None,
+                        "dopo": _listino_field_value(field, item.get(field)),
+                    }
+                    for field in LISTINO_COMPARE_FIELDS
+                    if _listino_field_value(field, item.get(field)) not in ("", 0.0)
+                ],
+            })
+            continue
+
+        current = matches[0]
+        field_changes = []
+        for field in LISTINO_COMPARE_FIELDS:
+            before = _listino_field_value(field, current.get(field))
+            after = _listino_field_value(field, item.get(field))
+            if before == after:
+                continue
+            field_changes.append({"campo": field, "prima": before, "dopo": after})
+            if field == "adm_codice" and not before and after:
+                backfilled_adm_codes += 1
+            elif field == "categoria_adm" and not before and after:
+                backfilled_categories += 1
+            elif field == "fonte" and not before and after:
+                backfilled_sources += 1
+
+        if not field_changes:
+            unchanged += 1
+            continue
+        updated += 1
+        changes.append({
+            "stato": "AGGIORNATO",
+            "codice": item.get("codice"),
+            "adm_codice": code,
+            "descrizione": item.get("descrizione"),
+            "categoria_adm": item.get("categoria_adm"),
+            "campi": field_changes,
+        })
+
+    local_only = sum(
+        len(matches)
+        for code, matches in existing_by_code.items()
+        if code not in source_codes
+    )
+    return {
+        "listino_nuovi": inserted,
+        "listino_aggiornati": updated,
+        "listino_invariati": unchanged,
+        "listino_locali_non_presenti": local_only,
+        "listino_codici_adm_compilati": backfilled_adm_codes,
+        "listino_categorie_compilate": backfilled_categories,
+        "listino_fonti_compilate": backfilled_sources,
+        "listino_codici_duplicati": len(set(duplicate_codes)),
+        "listino_variazioni": changes,
+    }
+
+
 def build_fit_preview(
     rows: List[Dict[str, Any]],
     products: List[Dict[str, Any]],
@@ -305,7 +410,32 @@ def build_fit_preview(
         "prodotti_mancanti": missing_products[:100],
         "ambigui": ambiguous_products[:100],
         "nuovi_articoli": new_official[:100],
+        **_listino_preview(rows, existing_listino),
     }
+
+
+def _fit_listino_update(
+    item: Dict[str, Any], snapshot_hash: str, synced_at: str,
+) -> Dict[str, Any]:
+    """Build a conflict-free Mongo update for both matches and upserts."""
+    insert_defaults = ListinoItem(
+        codice=item["codice"],
+        descrizione=item["descrizione"],
+        prezzo=item["prezzo"],
+        confezione=item.get("confezione", ""),
+    ).model_dump()
+    set_fields = {
+        **item,
+        "tariffa_snapshot_hash": snapshot_hash,
+        "updated_at": synced_at,
+    }
+    insert_defaults = {
+        key: value for key, value in insert_defaults.items() if key not in set_fields
+    }
+    update = {"$set": set_fields}
+    if insert_defaults:
+        update["$setOnInsert"] = insert_defaults
+    return update
 
 
 def _fit_product_update_operations(
@@ -653,7 +783,16 @@ def create_adm_router(
         ]
         existing_listino = [
             item async for item in database.listino_adm.find(
-                {}, {"_id": 0, "codice": 1, "adm_codice": 1}
+                {}, {
+                    "_id": 0,
+                    "codice": 1,
+                    "adm_codice": 1,
+                    "descrizione": 1,
+                    "prezzo": 1,
+                    "confezione": 1,
+                    "categoria_adm": 1,
+                    "fonte": 1,
+                }
             )
         ]
         summary = build_fit_preview(snapshot["rows"], products, existing_listino)
@@ -670,7 +809,13 @@ def create_adm_router(
             "fit": snapshot["fit"],
             "adm_overlays": snapshot["adm_overlays"],
             "warnings": snapshot["warnings"],
-            "summary": summary,
+            # The full row diff is returned to the browser, but need not be
+            # duplicated inside the persisted preview (the normalized rows are
+            # already stored here for the apply step).
+            "summary": {
+                key: value for key, value in summary.items()
+                if key != "listino_variazioni"
+            },
             "rows": snapshot["rows"],
         }
         previews = database.fit_tariff_previews
@@ -768,12 +913,6 @@ def create_adm_router(
             synced_at = now.isoformat()
             listino_operations = []
             for item in rows:
-                insert_defaults = ListinoItem(
-                    codice=item["codice"],
-                    descrizione=item["descrizione"],
-                    prezzo=item["prezzo"],
-                    confezione=item.get("confezione", ""),
-                ).model_dump()
                 matches = existing_by_code.get(item["adm_codice"], [])
                 exact_filter = (
                     {"_id": matches[0]["_id"]}
@@ -782,14 +921,22 @@ def create_adm_router(
                 )
                 listino_operations.append(UpdateOne(
                     exact_filter,
-                    {"$set": {
-                        **item,
-                        "tariffa_snapshot_hash": preview["snapshot_hash"],
-                        "updated_at": synced_at,
-                    }, "$setOnInsert": insert_defaults},
+                    _fit_listino_update(item, preview["snapshot_hash"], synced_at),
                     upsert=True,
                 ))
             listino_result = await bulk_upsert(database.listino_adm, listino_operations)
+            if listino_result.get("errori"):
+                raise RuntimeError(
+                    f"{listino_result['errori']} righe del listino non sono state salvate"
+                )
+            expected_writes = len(rows)
+            actual_writes = (
+                listino_result.get("inseriti", 0) + listino_result.get("aggiornati", 0)
+            )
+            if actual_writes != expected_writes:
+                raise RuntimeError(
+                    f"Listino incompleto: salvate {actual_writes} righe su {expected_writes}"
+                )
             product_operations = _fit_product_update_operations(
                 rows, products, synced_at, import_id=body.preview_id,
             )

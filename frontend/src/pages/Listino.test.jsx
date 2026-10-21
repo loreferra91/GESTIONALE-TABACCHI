@@ -46,6 +46,17 @@ beforeEach(async () => {
         preview_id: "preview-1", righe: 4325, prodotti_collegati: 1,
         prezzi_modificati: 1, prezzi_invariati: 0, prodotti_non_trovati: 0,
         nuovi_articoli_listino: 18, collegamenti_ambigui: 0,
+        listino_nuovi: 1, listino_aggiornati: 1,
+        listino_codici_adm_compilati: 1, listino_categorie_compilate: 1,
+        listino_fonti_compilate: 1,
+        listino_variazioni: [{
+          stato: "AGGIORNATO", codice: "AMMS338", adm_codice: "338",
+          descrizione: "WINSTON BLUE", categoria_adm: "SIGARETTE",
+          campi: [
+            { campo: "adm_codice", prima: "", dopo: "338" },
+            { campo: "categoria_adm", prima: "", dopo: "SIGARETTE" },
+          ],
+        }],
         adm_overlays: [], warnings: ["PDF ADM piu recenti disponibili per: SIGARI"],
         variazioni: [{
           codice: "AMMS338", adm_codice: "338", descrizione: "WINSTON BLUE",
@@ -86,6 +97,9 @@ test("prepara l'anteprima prima di applicare i prezzi", async () => {
   expect(container.textContent).toContain("Anteprima pronta");
   expect(container.textContent).toContain("Variazioni di prezzo");
   expect(container.textContent).toContain("5,80");
-  expect(container.textContent).toContain("Nuove righe listino");
+  expect(container.textContent).toContain("Nuove righe");
+  expect(container.textContent).toContain("Modifiche effettive al listino");
+  expect(container.textContent).toContain("Codici ADM compilati");
+  expect(container.textContent).toContain("SIGARETTE");
   expect(container.textContent).toContain("PDF ADM piu recenti disponibili per: SIGARI");
 });

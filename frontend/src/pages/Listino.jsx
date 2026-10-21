@@ -15,6 +15,16 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import { toast } from "sonner";
 
 const PAGE_SIZE = 100;
+const PREVIEW_PAGE_SIZE = 50;
+const FIELD_LABELS = {
+  codice: "Codice",
+  adm_codice: "Cod. ADM",
+  descrizione: "Descrizione",
+  categoria_adm: "Categoria ADM",
+  confezione: "Confezione",
+  fonte: "Fonte",
+  prezzo: "Prezzo",
+};
 
 function formatDate(value) {
   if (!value) return "—";
@@ -37,6 +47,11 @@ function PreviewMetric({ label, value, tone = "default" }) {
   );
 }
 
+function formatChangeValue(field, value) {
+  if (value === null || value === undefined || value === "") return "—";
+  return field === "prezzo" ? formatEur(value) : String(value);
+}
+
 export default function Listino() {
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
@@ -47,6 +62,9 @@ export default function Listino() {
   const [legacySyncing, setLegacySyncing] = useState(false);
   const [fitStatus, setFitStatus] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [appliedResult, setAppliedResult] = useState(null);
+  const [previewFilter, setPreviewFilter] = useState("TUTTI");
+  const [previewPage, setPreviewPage] = useState(1);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [categoria, setCategoria] = useState("");
   const [fonte, setFonte] = useState("");
@@ -107,6 +125,17 @@ export default function Listino() {
     [fitStatus],
   );
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const filteredPreviewChanges = useMemo(() => {
+    const changes = preview?.listino_variazioni || [];
+    return previewFilter === "TUTTI"
+      ? changes
+      : changes.filter(item => item.stato === previewFilter);
+  }, [preview, previewFilter]);
+  const previewPages = Math.max(1, Math.ceil(filteredPreviewChanges.length / PREVIEW_PAGE_SIZE));
+  const visiblePreviewChanges = filteredPreviewChanges.slice(
+    (previewPage - 1) * PREVIEW_PAGE_SIZE,
+    previewPage * PREVIEW_PAGE_SIZE,
+  );
 
   const toggleSort = (key) => {
     setPage(1);
@@ -122,6 +151,9 @@ export default function Listino() {
     try {
       const response = await api.post("/fit/preview", {}, { timeout: 600000 });
       setPreview(response.data);
+      setAppliedResult(null);
+      setPreviewFilter("TUTTI");
+      setPreviewPage(1);
       window.requestAnimationFrame(() => {
         if (typeof previewRef.current?.scrollIntoView === "function") {
           previewRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -154,7 +186,7 @@ export default function Listino() {
         `Tariffario aggiornato: ${formatNum(response.data.righe)} articoli, ${formatNum(response.data.prodotti_aggiornati)} prodotti modificati`,
       );
       setConfirmOpen(false);
-      setPreview(null);
+      setAppliedResult(response.data);
       await Promise.all([load(), loadFitStatus()]);
     } catch (error) {
       toast.error(apiErrorMessage(error, "Errore durante l'applicazione del tariffario"));
@@ -233,33 +265,39 @@ export default function Listino() {
 
       {preview && (
         <div ref={previewRef} className="scroll-mt-24">
-        <Card className="mb-4 border-amber-300 shadow-sm">
+        <Card className={`mb-4 shadow-sm ${appliedResult ? "border-emerald-300" : "border-amber-300"}`}>
           <div className="flex flex-col gap-4 border-b border-slate-200 p-5 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <div className="flex items-center gap-2">
                 <CheckCircle size={22} weight="fill" className="text-emerald-600" />
-                <h2 className="font-heading text-lg font-black text-slate-950">Anteprima pronta</h2>
+                <h2 className="font-heading text-lg font-black text-slate-950">
+                  {appliedResult ? "Aggiornamento completato" : "Anteprima pronta"}
+                </h2>
               </div>
               <p className="mt-1 text-sm text-slate-600">
-                I prezzi non sono ancora stati modificati. L’applicazione crea prima un backup di prodotti e listino.
+                {appliedResult
+                  ? `${formatNum(appliedResult.aggiornati)} righe aggiornate e ${formatNum(appliedResult.inseriti)} nuove righe inserite. Backup: ${appliedResult.backup_id || "creato"}.`
+                  : "I dati non sono ancora stati modificati. L’applicazione crea prima un backup di prodotti e listino."}
               </p>
             </div>
             <div className="flex gap-2">
               <button onClick={() => setPreview(null)} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-50">
-                Annulla
+                {appliedResult ? "Chiudi riepilogo" : "Annulla"}
               </button>
-              <button onClick={() => setConfirmOpen(true)} className="rounded-md bg-slate-950 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
-                Applica aggiornamento
-              </button>
+              {!appliedResult && (
+                <button onClick={() => setConfirmOpen(true)} className="rounded-md bg-slate-950 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
+                  Applica aggiornamento
+                </button>
+              )}
             </div>
           </div>
           <div className="grid grid-cols-2 gap-y-4 p-5 sm:grid-cols-3 xl:grid-cols-6">
             <PreviewMetric label="Righe sorgente" value={preview.righe} />
-            <PreviewMetric label="Prodotti collegati" value={preview.prodotti_collegati} tone="success" />
-            <PreviewMetric label="Prezzi modificati" value={preview.prezzi_modificati} tone={preview.prezzi_modificati ? "warning" : "success"} />
-            <PreviewMetric label="Nuove righe listino" value={preview.nuovi_articoli_listino} tone={preview.nuovi_articoli_listino ? "warning" : "success"} />
-            <PreviewMetric label="Non trovati" value={preview.prodotti_non_trovati} tone={preview.prodotti_non_trovati ? "warning" : "default"} />
-            <PreviewMetric label="Ambigui" value={preview.collegamenti_ambigui} tone={preview.collegamenti_ambigui ? "danger" : "default"} />
+            <PreviewMetric label="Nuove righe" value={preview.listino_nuovi} tone={preview.listino_nuovi ? "warning" : "success"} />
+            <PreviewMetric label="Righe aggiornate" value={preview.listino_aggiornati} tone={preview.listino_aggiornati ? "warning" : "success"} />
+            <PreviewMetric label="Codici ADM compilati" value={preview.listino_codici_adm_compilati} tone="success" />
+            <PreviewMetric label="Categorie compilate" value={preview.listino_categorie_compilate} tone="success" />
+            <PreviewMetric label="Fonti compilate" value={preview.listino_fonti_compilate} tone="success" />
           </div>
           {!!preview.adm_overlays?.length && (
             <div className="mx-5 mb-4 flex items-start gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
@@ -272,6 +310,68 @@ export default function Listino() {
               {preview.warnings.join(" · ")}
             </div>
           )}
+          <div className="border-t border-slate-200">
+            <div className="flex flex-col gap-3 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="font-heading text-sm font-black text-slate-900">Modifiche effettive al listino</h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Ogni riga mostra esattamente quali campi cambiano, con valore precedente e nuovo.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                {[
+                  ["TUTTI", "Tutte"],
+                  ["AGGIORNATO", "Aggiornate"],
+                  ["NUOVO", "Nuove"],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    onClick={() => { setPreviewFilter(value); setPreviewPage(1); }}
+                    className={`rounded-md px-3 py-1.5 text-xs font-bold ${previewFilter === value ? "bg-slate-950 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="max-h-[34rem] overflow-auto border-t border-slate-200">
+              <table className="data-table w-full">
+                <thead><tr><th>Stato</th><th>Articolo</th><th>Campo</th><th>Prima</th><th>Dopo</th></tr></thead>
+                <tbody>
+                  {!visiblePreviewChanges.length && (
+                    <tr><td colSpan={5} className="py-6 text-center text-slate-500">Nessuna modifica in questa sezione</td></tr>
+                  )}
+                  {visiblePreviewChanges.map(item => (
+                    <tr key={`${item.stato}-${item.adm_codice}`}>
+                      <td className="align-top"><Badge tone={item.stato === "NUOVO" ? "ok" : "warning"}>{item.stato === "NUOVO" ? "Nuova" : "Aggiornata"}</Badge></td>
+                      <td className="wrap min-w-64 align-top">
+                        <div className="font-semibold text-slate-900">{item.descrizione}</div>
+                        <div className="mt-1 font-mono text-xs text-slate-500">{item.codice} · ADM {item.adm_codice}</div>
+                      </td>
+                      <td className="align-top text-xs font-semibold text-slate-700">
+                        {item.campi.map(change => <div key={change.campo} className="min-h-6 py-1">{FIELD_LABELS[change.campo] || change.campo}</div>)}
+                      </td>
+                      <td className="wrap max-w-72 align-top text-xs text-slate-500">
+                        {item.campi.map(change => <div key={change.campo} className="min-h-6 py-1">{formatChangeValue(change.campo, change.prima)}</div>)}
+                      </td>
+                      <td className="wrap max-w-72 align-top text-xs font-semibold text-slate-900">
+                        {item.campi.map(change => <div key={change.campo} className="min-h-6 py-1">{formatChangeValue(change.campo, change.dopo)}</div>)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-col gap-2 border-t border-slate-200 px-5 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+              <span className="text-slate-500">
+                {formatNum(filteredPreviewChanges.length)} righe con modifiche · pagina {previewPage} di {previewPages}
+              </span>
+              <div className="flex gap-2">
+                <button disabled={previewPage <= 1} onClick={() => setPreviewPage(current => current - 1)} className="rounded-md border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Precedente</button>
+                <button disabled={previewPage >= previewPages} onClick={() => setPreviewPage(current => current + 1)} className="rounded-md border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Successiva</button>
+              </div>
+            </div>
+          </div>
           <div className="border-t border-slate-200">
             <div className="flex items-center justify-between px-5 py-3">
               <h3 className="font-heading text-sm font-black text-slate-900">Variazioni di prezzo</h3>

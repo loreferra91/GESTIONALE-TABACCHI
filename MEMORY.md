@@ -47,3 +47,8 @@
   giacenza negozio per copertura/riordino e il totale per la valorizzazione.
   Il vecchio URL `/magazzino` reindirizza alla nuova analisi e l'import Excel
   non viene più evidenziato nella barra di stato dell'interfaccia.
+- Dal 2026-10-21 l'aggiornamento del listino FIT è fail-closed: errori o conteggi
+  di scrittura incompleti non possono essere registrati come sincronizzazioni
+  riuscite. L'anteprima Listino mostra il confronto campo per campo prima/dopo
+  per righe nuove e aggiornate, inclusi i riempimenti di codice ADM, categoria
+  e fonte, e resta visibile come riepilogo dopo l'applicazione.
