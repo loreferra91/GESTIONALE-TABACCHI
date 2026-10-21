@@ -11,8 +11,8 @@ import {
 } from "@phosphor-icons/react";
 import { api, apiErrorMessage } from "../lib/api";
 import { Badge, Card, formatEur, formatNum } from "./UI";
-import { SearchBar } from "../lib/tableHooks";
-import { buildStockAnalysisRows } from "../lib/stockAnalysis";
+import { SearchBar, Th } from "../lib/tableHooks";
+import { buildStockAnalysisRows, sortStockAnalysisRows } from "../lib/stockAnalysis";
 
 function SummaryCard({ icon: Icon, label, value, tone = "default" }) {
   const tones = {
@@ -40,6 +40,8 @@ export default function StockAnalysis() {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("");
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState("asc");
   const deferredQuery = useDeferredValue(query);
 
   useEffect(() => {
@@ -61,13 +63,22 @@ export default function StockAnalysis() {
   const rows = useMemo(() => buildStockAnalysisRows(data), [data]);
   const visibleRows = useMemo(() => {
     const needle = deferredQuery.trim().toLocaleLowerCase("it-IT");
-    return rows.filter(row => {
+    const filtered = rows.filter(row => {
       const matchesQuery = !needle || [row.codice, row.descrizione, row.categoria]
         .some(value => String(value || "").toLocaleLowerCase("it-IT").includes(needle));
       const matchesStatus = !status || row.analysisStatus.label === status;
       return matchesQuery && matchesStatus;
     });
-  }, [deferredQuery, rows, status]);
+    return sortStockAnalysisRows(filtered, sortKey, sortDir);
+  }, [deferredQuery, rows, sortDir, sortKey, status]);
+
+  const toggleSort = key => {
+    if (sortKey === key) setSortDir(current => current === "asc" ? "desc" : "asc");
+    else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
 
   const value = rows.reduce((sum, row) => sum + row.valore_scorta, 0);
   const reorderCount = rows.filter(row => ["ESAURITO", "SCORTA BASSA"].includes(row.analysisStatus.label)).length;
@@ -131,14 +142,14 @@ export default function StockAnalysis() {
           <table className="data-table stock-workspace-table w-full min-w-[1100px]" data-testid="stock-analysis-table">
             <thead>
               <tr>
-                <th>Prodotto</th>
-                <th className="text-right">Negozio</th>
-                <th className="text-right">Vending</th>
-                <th className="text-right">Totale</th>
-                <th className="text-right">Vendite {period} gg</th>
-                <th className="text-right">Copertura</th>
-                <th className="text-right">Valore scorta</th>
-                <th>Stato</th>
+                <Th sortKey="descrizione" currentKey={sortKey} dir={sortDir} onClick={toggleSort}>Prodotto</Th>
+                <Th sortKey="magazzino_reale_lordo" currentKey={sortKey} dir={sortDir} onClick={toggleSort} align="right">Negozio</Th>
+                <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggleSort} align="right">Vending</Th>
+                <Th sortKey="giacenza" currentKey={sortKey} dir={sortDir} onClick={toggleSort} align="right">Totale</Th>
+                <Th sortKey="venduto_lungo" currentKey={sortKey} dir={sortDir} onClick={toggleSort} align="right">Vendite {period} gg</Th>
+                <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggleSort} align="right">Copertura</Th>
+                <Th sortKey="valore_scorta" currentKey={sortKey} dir={sortDir} onClick={toggleSort} align="right">Valore scorta</Th>
+                <Th sortKey="analysis_status" currentKey={sortKey} dir={sortDir} onClick={toggleSort}>Stato</Th>
                 <th></th>
               </tr>
             </thead>

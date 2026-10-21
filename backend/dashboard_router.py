@@ -373,8 +373,8 @@ def create_dashboard_router(
 
     async def sales_period_report(days: int = 30) -> Dict[str, Any]:
         """Aggregate the latest complete sales period for the printable report."""
-        if days not in {7, 30}:
-            raise HTTPException(422, "Il periodo deve essere di 7 o 30 giorni")
+        if days not in {7, 30, 365}:
+            raise HTTPException(422, "Il periodo deve essere di 7, 30 o 365 giorni")
 
         db = get_database()
         app_sales, imported_sales, latest_import = await asyncio.gather(

@@ -45,3 +45,20 @@ export function buildStockAnalysisRows(data) {
       || String(a.descrizione || "").localeCompare(String(b.descrizione || ""), "it")
     ));
 }
+
+export function sortStockAnalysisRows(rows, key, direction = "asc") {
+  if (!key) return rows;
+  const factor = direction === "desc" ? -1 : 1;
+  const valueFor = row => key === "analysis_status" ? row.analysisStatus?.label : row[key];
+  return [...rows].sort((a, b) => {
+    const left = valueFor(a);
+    const right = valueFor(b);
+    if (left == null && right == null) return String(a.descrizione || "").localeCompare(String(b.descrizione || ""), "it");
+    if (left == null) return 1;
+    if (right == null) return -1;
+    const comparison = typeof left === "number" && typeof right === "number"
+      ? left - right
+      : String(left).localeCompare(String(right), "it", { numeric: true, sensitivity: "base" });
+    return (comparison * factor) || String(a.descrizione || "").localeCompare(String(b.descrizione || ""), "it");
+  });
+}

@@ -1,4 +1,4 @@
-import { buildStockAnalysisRows, classifyStockRow } from "../lib/stockAnalysis";
+import { buildStockAnalysisRows, classifyStockRow, sortStockAnalysisRows } from "../lib/stockAnalysis";
 
 test("classifica le scorte usando gli stessi segnali operativi di Auto-Order", () => {
   expect(classifyStockRow({ anomalia: true }).label).toBe("ANOMALIA");
@@ -19,4 +19,17 @@ test("calcola sullo stock totale la valorizzazione netta e ordina prima le righe
   expect(rows[0].valore_scorta).toBe(22.5);
   expect(rows[0].giacenza).toBe(5);
   expect(rows[1].valore_scorta).toBe(45);
+});
+
+test("ordina tutte le colonne dell'analisi mantenendo i valori mancanti in fondo", () => {
+  const rows = [
+    { descrizione: "Beta", giacenza: 3, copertura_gg: null, analysisStatus: { label: "OK" } },
+    { descrizione: "Alfa", giacenza: 8, copertura_gg: 12, analysisStatus: { label: "SCORTA BASSA" } },
+    { descrizione: "Gamma", giacenza: 1, copertura_gg: 4, analysisStatus: { label: "FERMO" } },
+  ];
+
+  expect(sortStockAnalysisRows(rows, "descrizione", "asc").map(row => row.descrizione)).toEqual(["Alfa", "Beta", "Gamma"]);
+  expect(sortStockAnalysisRows(rows, "giacenza", "desc").map(row => row.giacenza)).toEqual([8, 3, 1]);
+  expect(sortStockAnalysisRows(rows, "copertura_gg", "asc").map(row => row.copertura_gg)).toEqual([4, 12, null]);
+  expect(sortStockAnalysisRows(rows, "analysis_status", "asc").map(row => row.analysisStatus.label)).toEqual(["FERMO", "OK", "SCORTA BASSA"]);
 });

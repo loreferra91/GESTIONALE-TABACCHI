@@ -124,8 +124,8 @@ export default function Sidebar() {
 
   const content = (
     <>
-      <div className="flex h-[84px] items-center overflow-hidden border-b border-white/10 px-5">
-        <img src="/terrybell-palace.png" alt="Terrybell Palace" className="h-auto w-[230px] max-w-none object-contain object-left" />
+      <div className="flex h-[84px] items-center overflow-hidden border-b border-white/10 px-[18px]">
+        <img src="/terrybell-palace.png" alt="Terrybell Palace" className="h-auto w-[236px] max-w-none object-contain object-left" />
       </div>
       <nav className="flex-1 overflow-y-auto py-3" aria-label="Navigazione principale">
         <NavItem item={DIRECT_ITEMS.dashboard} closeMenu={closeMenu} />
