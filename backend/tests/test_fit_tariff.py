@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 from backend.adm_router import (
+    _adm_product_update_operations,
     _exact_duplicate_listino_ids,
     _fit_listino_update,
     build_fit_preview,
@@ -123,6 +124,39 @@ def test_fit_preview_does_not_treat_internal_numeric_codes_as_adm_links():
 
     assert result["prodotti_collegati"] == 0
     assert result["prezzi_modificati"] == 0
+
+
+def test_legacy_adm_product_update_does_not_touch_same_numbered_accessory():
+    """Regression test: an accessory coded e.g. "938" must not be mistaken
+    for the ADM tariff product that happens to share the numeric code 938
+    (only the explicit AMMS938 local code may be updated).
+    """
+    rows = [{
+        "adm_codice": "938", "codice": "AMMS938", "descrizione": "REX BRAVO (TABACCO ADM)",
+        "confezione": "", "prezzo": 8.9, "categoria_adm": "ALTRI TABACCHI DA FUMO",
+        "fonte": "ADM", "adm_pdf_url": "https://example.test/altri-tabacchi.pdf",
+        "adm_aggiornato_il": None,
+    }]
+    product_codes = {"938"}  # Local accessory "REX BRAVO CARTINE CORTE" uses the bare code.
+
+    operations = _adm_product_update_operations(rows, product_codes)
+
+    assert operations == []
+
+
+def test_legacy_adm_product_update_matches_explicit_amms_code():
+    rows = [{
+        "adm_codice": "938", "codice": "AMMS938", "descrizione": "REX BRAVO (TABACCO ADM)",
+        "confezione": "", "prezzo": 8.9, "categoria_adm": "ALTRI TABACCHI DA FUMO",
+        "fonte": "ADM", "adm_pdf_url": "https://example.test/altri-tabacchi.pdf",
+        "adm_aggiornato_il": None,
+    }]
+    product_codes = {"AMMS938"}
+
+    operations = _adm_product_update_operations(rows, product_codes)
+
+    assert len(operations) == 1
+    assert operations[0]._filter == {"codice": "AMMS938"}
 
 
 def test_fit_preview_reports_every_listino_field_change():

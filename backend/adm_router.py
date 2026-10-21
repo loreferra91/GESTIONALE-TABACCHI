@@ -159,14 +159,22 @@ def parse_adm_pdf_sync(category: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _adm_product_update_operations(rows: List[Dict[str, Any]], product_codes: set[str]):
-    """Build ADM product updates only for codes present in the catalogue."""
+    """Build ADM product updates only for codes present in the catalogue.
+
+    Matching must require the explicit ``AMMS`` prefix (``item["codice"]``).
+    Matching on the bare numeric ADM code (``item["adm_codice"]``) would also
+    hit unrelated local products that happen to share that same number as
+    their own internal code (e.g. an accessory coded ``938``), silently
+    overwriting their category and price with an unrelated tobacco product's
+    tariff data.
+    """
     operations = []
     for item in rows:
-        candidate_codes = {item["codice"].upper(), item["adm_codice"].upper()}
-        if candidate_codes.isdisjoint(product_codes):
+        candidate_code = item["codice"].upper()
+        if candidate_code not in product_codes:
             continue
         operations.append(UpdateMany(
-            {"$or": [{"codice": item["codice"]}, {"codice": item["adm_codice"]}]},
+            {"codice": item["codice"]},
             {"$set": {
                 "categoria": item["categoria_adm"],
                 "categoria_adm": item["categoria_adm"],
