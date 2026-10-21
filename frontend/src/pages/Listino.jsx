@@ -122,7 +122,11 @@ export default function Listino() {
     try {
       const response = await api.post("/fit/preview", {}, { timeout: 600000 });
       setPreview(response.data);
-      window.requestAnimationFrame(() => previewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      window.requestAnimationFrame(() => {
+        if (typeof previewRef.current?.scrollIntoView === "function") {
+          previewRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
       if (response.data.prezzi_modificati) {
         toast.success(`${formatNum(response.data.prezzi_modificati)} prezzi da verificare`);
       } else if (response.data.nuovi_articoli_listino) {
