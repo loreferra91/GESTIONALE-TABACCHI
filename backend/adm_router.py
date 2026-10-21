@@ -1,7 +1,9 @@
 """ADM price-list discovery, parsing, synchronization, and read routes."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import gc
+import hashlib
+import json
 import re
 import tempfile
 import uuid
@@ -11,6 +13,11 @@ from urllib.parse import urljoin
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo import UpdateMany, UpdateOne
+
+try:
+    from .fit_tariff import iso_date_from_adm
+except ImportError:  # pragma: no cover - direct module execution compatibility
+    from fit_tariff import iso_date_from_adm
 
 try:
     from .money import NonNegativeMoney
@@ -40,6 +47,10 @@ class ListinoItem(BaseModel):
     descrizione: str
     prezzo: NonNegativeMoney = 0
     confezione: str = ""
+
+
+class FitApplyRequest(BaseModel):
+    preview_id: str = Field(min_length=1, max_length=100)
 
 
 def adm_numeric_code(codice: Any) -> str:
@@ -72,7 +83,6 @@ def fetch_adm_categories_sync() -> List[Dict[str, Any]]:
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     categories: Dict[str, Dict[str, Any]] = {}
-    page_text = " ".join(soup.get_text(" ", strip=True).split())
     for category, aliases in ADM_CATEGORY_ALIASES.items():
         for anchor in soup.find_all("a"):
             text = " ".join(anchor.get_text(" ", strip=True).split())
@@ -81,9 +91,10 @@ def fetch_adm_categories_sync() -> List[Dict[str, Any]]:
             if not href or ".pdf" not in href.lower():
                 continue
             if any(alias.lower() in haystack for alias in aliases):
+                context = " ".join(anchor.parent.get_text(" ", strip=True).split())
                 updated_match = re.search(
-                    rf"{re.escape(text)}.*?aggiornato il\s+(\d{{2}}/\d{{2}}/\d{{4}})",
-                    page_text,
+                    r"aggiornato\s+(?:il|al)\s+(\d{2}/\d{2}/\d{4})",
+                    context,
                     re.I,
                 )
                 categories[category] = {
@@ -171,31 +182,282 @@ def _adm_product_update_operations(rows: List[Dict[str, Any]], product_codes: se
     return operations
 
 
+def _catalogue_adm_code(product: Dict[str, Any]) -> str:
+    explicit = str(product.get("adm_codice") or "").strip()
+    if explicit:
+        return adm_numeric_code(explicit)
+    local_code = str(product.get("codice") or "").strip().upper()
+    if local_code.startswith("AMMS"):
+        return adm_numeric_code(local_code)
+    return ""
+
+
+def _catalogue_snapshot_hash(products: List[Dict[str, Any]]) -> str:
+    relevant = [
+        {
+            "id": str(item.get("id") or ""),
+            "codice": str(item.get("codice") or ""),
+            "adm_codice": str(item.get("adm_codice") or ""),
+            "prezzo": _money_value(item.get("prezzo")),
+            "categoria_adm": str(item.get("categoria_adm") or ""),
+        }
+        for item in products
+    ]
+    relevant.sort(key=lambda item: (item["id"], item["codice"], item["adm_codice"]))
+    encoded = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _money_value(value: Any) -> float:
+    try:
+        return round(float(value or 0), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_fit_preview(
+    rows: List[Dict[str, Any]],
+    products: List[Dict[str, Any]],
+    existing_listino: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Compare a normalized tariff snapshot with the local catalogue."""
+    row_by_code = {item["adm_codice"]: item for item in rows}
+    products_by_code: Dict[str, List[Dict[str, Any]]] = {}
+    for product in products:
+        code = _catalogue_adm_code(product)
+        if code:
+            products_by_code.setdefault(code, []).append(product)
+
+    linked = changed = unchanged = ambiguous = 0
+    changes = []
+    ambiguous_products = []
+    for code, matches in products_by_code.items():
+        tariff = row_by_code.get(code)
+        if not tariff:
+            continue
+        if len(matches) != 1:
+            ambiguous += len(matches)
+            ambiguous_products.append({
+                "adm_codice": code,
+                "prodotti": [str(item.get("descrizione") or item.get("codice") or "") for item in matches],
+            })
+            continue
+        product = matches[0]
+        linked += 1
+        old_price = _money_value(product.get("prezzo"))
+        new_price = _money_value(tariff.get("prezzo"))
+        if old_price == new_price:
+            unchanged += 1
+            continue
+        changed += 1
+        changes.append({
+            "product_id": product.get("id"),
+            "codice": product.get("codice"),
+            "adm_codice": code,
+            "descrizione": product.get("descrizione") or tariff.get("descrizione"),
+            "categoria_adm": tariff.get("categoria_adm"),
+            "prezzo_attuale": old_price,
+            "prezzo_nuovo": new_price,
+            "differenza": round(new_price - old_price, 2),
+        })
+
+    missing_products = []
+    for code, matches in products_by_code.items():
+        if code in row_by_code:
+            continue
+        for product in matches:
+            missing_products.append({
+                "product_id": product.get("id"),
+                "codice": product.get("codice"),
+                "adm_codice": code,
+                "descrizione": product.get("descrizione"),
+            })
+
+    existing_codes = {
+        adm_numeric_code(item.get("adm_codice") or item.get("codice"))
+        for item in existing_listino
+        if item.get("adm_codice") or item.get("codice")
+    }
+    new_official = [
+        {
+            "adm_codice": item["adm_codice"],
+            "codice": item["codice"],
+            "descrizione": item["descrizione"],
+            "categoria_adm": item["categoria_adm"],
+            "prezzo": item["prezzo"],
+        }
+        for item in rows
+        if item["adm_codice"] not in existing_codes
+    ]
+    changes.sort(key=lambda item: (item["descrizione"] or "", item["adm_codice"]))
+    missing_products.sort(key=lambda item: (item.get("descrizione") or "", item["adm_codice"]))
+    return {
+        "righe": len(rows),
+        "prodotti_catalogo_adm": sum(len(items) for items in products_by_code.values()),
+        "prodotti_collegati": linked,
+        "prezzi_modificati": changed,
+        "prezzi_invariati": unchanged,
+        "collegamenti_ambigui": ambiguous,
+        "prodotti_non_trovati": len(missing_products),
+        "righe_fit_non_collegate": max(0, len(rows) - linked),
+        "nuovi_articoli_listino": len(new_official),
+        "variazioni": changes,
+        "prodotti_mancanti": missing_products[:100],
+        "ambigui": ambiguous_products[:100],
+        "nuovi_articoli": new_official[:100],
+    }
+
+
+def _fit_product_update_operations(
+    rows: List[Dict[str, Any]], products: List[Dict[str, Any]], synced_at: str,
+    import_id: Optional[str] = None,
+) -> List[UpdateOne]:
+    row_by_code = {item["adm_codice"]: item for item in rows}
+    products_by_code: Dict[str, List[Dict[str, Any]]] = {}
+    for product in products:
+        code = _catalogue_adm_code(product)
+        if code:
+            products_by_code.setdefault(code, []).append(product)
+
+    operations = []
+    for code, matches in products_by_code.items():
+        item = row_by_code.get(code)
+        if not item or len(matches) != 1:
+            continue
+        product = matches[0]
+        product_filter = (
+            {"id": product["id"]}
+            if product.get("id")
+            else {"codice": product.get("codice")}
+        )
+        update_fields = {
+            "categoria": item["categoria_adm"],
+            "categoria_adm": item["categoria_adm"],
+            "adm_codice": item["adm_codice"],
+            "adm_descrizione": item["descrizione"],
+            "prezzo": item["prezzo"],
+            "adm_prezzo": item["prezzo"],
+            "tariffa_fonte": item.get("fonte", "FIT"),
+            "tariffa_aggiornata_il": item.get("fit_effective_date") or item.get("adm_aggiornato_il"),
+            "tariffa_sincronizzata_il": synced_at,
+            "tariffa_import_id": import_id,
+        }
+        if item.get("fonte") == "FIT":
+            update_fields.update({
+                "fit_codice": item["adm_codice"],
+                "fit_descrizione": item["descrizione"],
+                "fit_prezzo": item["prezzo"],
+                "fit_aggiornato_il": item.get("fit_effective_date"),
+                "fit_source_url": item.get("fit_xls_url"),
+            })
+        operations.append(UpdateOne(product_filter, {"$set": update_fields}))
+    return operations
+
+
+def _tariff_snapshot_hash(rows: List[Dict[str, Any]]) -> str:
+    normalized = [
+        {
+            "adm_codice": item.get("adm_codice"),
+            "descrizione": item.get("descrizione"),
+            "prezzo": _money_value(item.get("prezzo")),
+            "categoria_adm": item.get("categoria_adm"),
+            "fonte": item.get("fonte"),
+        }
+        for item in sorted(rows, key=lambda value: value.get("adm_codice", ""))
+    ]
+    return hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def build_hybrid_tariff_snapshot_sync(fetch_fit_tariff, fetch_categories, parse_pdf):
+    """Use FIT XLS, replacing only categories for which ADM is demonstrably newer."""
+    fit_document = fetch_fit_tariff()
+    fit_date = fit_document.get("effective_date")
+    rows = list(fit_document["rows"])
+    adm_categories = fetch_categories()
+    overlays = []
+    warnings = []
+    for category in adm_categories:
+        adm_date = iso_date_from_adm(category.get("aggiornato_il"))
+        if not adm_date or not fit_date or adm_date < fit_date:
+            continue
+        category_name = category["categoria"]
+        fit_count = sum(1 for item in rows if item["categoria_adm"] == category_name)
+        adm_rows = parse_pdf(category)
+        minimum_expected = max(1, int(fit_count * 0.5))
+        if len(adm_rows) < minimum_expected:
+            warnings.append(
+                f"{category_name}: ADM piu recente ma ha restituito soltanto {len(adm_rows)} righe"
+            )
+            continue
+        rows = [item for item in rows if item["categoria_adm"] != category_name]
+        rows.extend(adm_rows)
+        overlays.append({
+            "categoria": category_name,
+            "aggiornato_il": category.get("aggiornato_il"),
+            "righe_fit": fit_count,
+            "righe_adm": len(adm_rows),
+            "url": category.get("url"),
+        })
+    return {
+        "rows": rows,
+        "snapshot_hash": _tariff_snapshot_hash(rows),
+        "fit": {key: value for key, value in fit_document.items() if key not in {"rows", "content"}},
+        "adm_overlays": overlays,
+        "warnings": warnings,
+    }
+
+
 def create_adm_router(
     *,
     get_database,
     cap_limit,
     fetch_categories,
     parse_pdf,
+    fetch_fit_tariff,
     bulk_upsert,
     bulk_update,
     apply_electronic_inhalation_categories,
+    create_backup_snapshot,
+    record_audit_event,
 ):
     router = APIRouter()
 
     @router.get("/listino")
-    async def list_listino(q: Optional[str] = None, limit: int = 300):
+    async def list_listino(
+        q: Optional[str] = None,
+        categoria: Optional[str] = None,
+        fonte: Optional[str] = None,
+        limit: int = 100,
+        skip: int = 0,
+        sort: str = "descrizione",
+        direction: str = "asc",
+    ):
         filt: Dict[str, Any] = {}
         if q:
             filt["$or"] = [
                 {"codice": {"$regex": re.escape(q[:200]), "$options": "i"}},
+                {"adm_codice": {"$regex": re.escape(q[:200]), "$options": "i"}},
                 {"descrizione": {"$regex": re.escape(q[:200]), "$options": "i"}},
             ]
+        if categoria:
+            filt["categoria_adm"] = categoria[:200]
+        if fonte:
+            filt["fonte"] = fonte[:30]
         capped_limit = cap_limit(limit)
+        capped_skip = max(0, min(int(skip or 0), 1_000_000))
+        sort_fields = {
+            "codice", "adm_codice", "descrizione", "categoria_adm",
+            "confezione", "prezzo", "fonte",
+        }
+        sort_field = sort if sort in sort_fields else "descrizione"
+        sort_direction = -1 if direction.lower() == "desc" else 1
         database = get_database()
-        docs = await database.listino_adm.find(filt, {"_id": 0}).sort(
-            "descrizione", 1
-        ).limit(capped_limit).to_list(capped_limit)
+        docs = await database.listino_adm.find(filt, {"_id": 0}).sort([
+            (sort_field, sort_direction),
+            ("_id", 1),
+        ]).skip(capped_skip).limit(capped_limit).to_list(capped_limit)
         total = await database.listino_adm.count_documents(filt)
         return {"items": docs, "total": total}
 
@@ -287,4 +549,247 @@ def create_adm_router(
         await database.adm_sync.insert_one(sync_doc.copy())
         return sync_doc
 
-    return router, list_listino, adm_categories, adm_sync
+    @router.get("/fit/status")
+    async def fit_status():
+        try:
+            fit_document = await asyncio.to_thread(fetch_fit_tariff)
+        except Exception as exc:
+            raise HTTPException(502, f"Tariffario FIT non disponibile: {exc}") from exc
+        categories = await asyncio.to_thread(fetch_categories)
+        fit_date = fit_document.get("effective_date")
+        newer_categories = [
+            {
+                "categoria": category["categoria"],
+                "aggiornato_il": category.get("aggiornato_il"),
+                "url": category.get("url"),
+            }
+            for category in categories
+            if iso_date_from_adm(category.get("aggiornato_il"))
+            and fit_date
+            and iso_date_from_adm(category.get("aggiornato_il")) >= fit_date
+        ]
+        last_sync = await get_database().fit_sync.find_one(
+            {}, {"_id": 0}, sort=[("created_at", -1)]
+        )
+        return {
+            "source": "FIT XLS con verifica ADM",
+            "fit": {key: value for key, value in fit_document.items() if key not in {"rows", "content"}},
+            "adm_newer_categories": newer_categories,
+            "last_sync": last_sync,
+        }
+
+    @router.post("/fit/preview")
+    async def fit_preview():
+        try:
+            snapshot = await asyncio.to_thread(
+                build_hybrid_tariff_snapshot_sync,
+                fetch_fit_tariff,
+                fetch_categories,
+                parse_pdf,
+            )
+        except Exception as exc:
+            raise HTTPException(502, f"Impossibile preparare il tariffario: {exc}") from exc
+
+        database = get_database()
+        products = [
+            product async for product in database.prodotti.find({}, {
+                "_id": 0, "id": 1, "codice": 1, "adm_codice": 1,
+                "descrizione": 1, "prezzo": 1, "categoria_adm": 1,
+            })
+        ]
+        existing_listino = [
+            item async for item in database.listino_adm.find(
+                {}, {"_id": 0, "codice": 1, "adm_codice": 1}
+            )
+        ]
+        summary = build_fit_preview(snapshot["rows"], products, existing_listino)
+        now = datetime.now(timezone.utc)
+        preview_id = str(uuid.uuid4())
+        expires_at = now + timedelta(minutes=30)
+        preview_document = {
+            "id": preview_id,
+            "created_at": now,
+            "expires_at": expires_at,
+            "status": "READY",
+            "snapshot_hash": snapshot["snapshot_hash"],
+            "catalogue_hash": _catalogue_snapshot_hash(products),
+            "fit": snapshot["fit"],
+            "adm_overlays": snapshot["adm_overlays"],
+            "warnings": snapshot["warnings"],
+            "summary": summary,
+            "rows": snapshot["rows"],
+        }
+        previews = database.fit_tariff_previews
+        await previews.delete_many({"expires_at": {"$lt": now}})
+        await previews.insert_one(preview_document)
+        return {
+            "preview_id": preview_id,
+            "expires_at": expires_at.isoformat(),
+            "snapshot_hash": snapshot["snapshot_hash"],
+            "catalogue_hash": preview_document["catalogue_hash"],
+            "fit": snapshot["fit"],
+            "adm_overlays": snapshot["adm_overlays"],
+            "warnings": snapshot["warnings"],
+            **summary,
+        }
+
+    @router.post("/fit/apply")
+    async def fit_apply(body: FitApplyRequest):
+        database = get_database()
+        preview = await database.fit_tariff_previews.find_one(
+            {"id": body.preview_id}, {"_id": 0}
+        )
+        if not preview:
+            raise HTTPException(404, "Anteprima FIT non trovata: generarne una nuova")
+        if preview.get("status") != "READY":
+            raise HTTPException(409, "Questa anteprima FIT e gia stata applicata")
+        expires_at = preview.get("expires_at")
+        now = datetime.now(timezone.utc)
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < now:
+                raise HTTPException(409, "Anteprima FIT scaduta: generarne una nuova")
+
+        rows = preview.get("rows") or []
+        if len(rows) < 100 or _tariff_snapshot_hash(rows) != preview.get("snapshot_hash"):
+            raise HTTPException(409, "Anteprima FIT non integra: generarne una nuova")
+
+        products = [
+            product async for product in database.prodotti.find({}, {
+                "_id": 0, "id": 1, "codice": 1, "adm_codice": 1,
+                "descrizione": 1, "prezzo": 1, "categoria_adm": 1,
+            })
+        ]
+        if _catalogue_snapshot_hash(products) != preview.get("catalogue_hash"):
+            raise HTTPException(
+                409,
+                "Il catalogo prodotti e cambiato dopo l'anteprima: generarne una nuova",
+            )
+
+        existing_by_code: Dict[str, List[Dict[str, Any]]] = {}
+        async for item in database.listino_adm.find(
+            {}, {"_id": 1, "id": 1, "codice": 1, "adm_codice": 1}
+        ):
+            code = _catalogue_adm_code(item)
+            if code:
+                existing_by_code.setdefault(code, []).append(item)
+        duplicate_codes = sorted(
+            code for code, matches in existing_by_code.items() if len(matches) > 1
+        )
+        if duplicate_codes:
+            sample = ", ".join(duplicate_codes[:5])
+            raise HTTPException(
+                409,
+                f"Listino locale ambiguo per i codici ADM {sample}: correggere i duplicati",
+            )
+
+        claim = await database.fit_tariff_previews.update_one(
+            {"id": body.preview_id, "status": "READY"},
+            {"$set": {"status": "APPLYING", "apply_started_at": now.isoformat()}},
+        )
+        if not getattr(claim, "modified_count", 0):
+            raise HTTPException(409, "Questa anteprima FIT e gia in applicazione")
+        backup = None
+        try:
+            backup = await create_backup_snapshot(
+                "Prima sincronizzazione tariffario FIT",
+                "fit-tariff-sync",
+                collection_names=["prodotti", "listino_adm"],
+                metadata={
+                    "preview_id": body.preview_id,
+                    "snapshot_hash": preview["snapshot_hash"],
+                },
+            )
+            synced_at = now.isoformat()
+            listino_operations = []
+            for item in rows:
+                insert_defaults = ListinoItem(
+                    codice=item["codice"],
+                    descrizione=item["descrizione"],
+                    prezzo=item["prezzo"],
+                    confezione=item.get("confezione", ""),
+                ).model_dump()
+                matches = existing_by_code.get(item["adm_codice"], [])
+                exact_filter = (
+                    {"_id": matches[0]["_id"]}
+                    if matches
+                    else {"adm_codice": item["adm_codice"], "codice": item["codice"]}
+                )
+                listino_operations.append(UpdateOne(
+                    exact_filter,
+                    {"$set": {
+                        **item,
+                        "tariffa_snapshot_hash": preview["snapshot_hash"],
+                        "updated_at": synced_at,
+                    }, "$setOnInsert": insert_defaults},
+                    upsert=True,
+                ))
+            listino_result = await bulk_upsert(database.listino_adm, listino_operations)
+            product_operations = _fit_product_update_operations(
+                rows, products, synced_at, import_id=body.preview_id,
+            )
+            product_result = await bulk_update(database.prodotti, product_operations)
+            await apply_electronic_inhalation_categories()
+
+            sync_document = {
+                "id": str(uuid.uuid4()),
+                "created_at": synced_at,
+                "source": "FIT XLS con verifica ADM",
+                "preview_id": body.preview_id,
+                "snapshot_hash": preview["snapshot_hash"],
+                "fit": preview.get("fit"),
+                "adm_overlays": preview.get("adm_overlays", []),
+                "warnings": preview.get("warnings", []),
+                "righe": len(rows),
+                "inseriti": listino_result.get("inseriti", 0),
+                "aggiornati": listino_result.get("aggiornati", 0),
+                "prodotti_trovati": product_result.get("trovati", 0),
+                "prodotti_aggiornati": product_result.get("modificati", 0),
+                "backup_id": backup.get("id"),
+            }
+            await database.fit_sync.insert_one(sync_document.copy())
+            await record_audit_event(
+                "SINCRONIZZATO",
+                "TARIFFARIO_FIT",
+                sync_document["id"],
+                dopo={
+                    "righe": sync_document["righe"],
+                    "prodotti_aggiornati": sync_document["prodotti_aggiornati"],
+                    "backup_id": sync_document["backup_id"],
+                    "variazioni": (preview.get("summary") or {}).get("variazioni", []),
+                },
+                batch_id=body.preview_id,
+            )
+            await database.fit_tariff_previews.update_one(
+                {"id": body.preview_id, "status": "APPLYING"},
+                {"$set": {"status": "APPLIED", "applied_at": synced_at}, "$unset": {"rows": ""}},
+            )
+            return sync_document
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"[:500]
+            await database.fit_tariff_previews.update_one(
+                {"id": body.preview_id, "status": "APPLYING"},
+                {"$set": {
+                    "status": "FAILED",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "failure": failure,
+                    "backup_id": (backup or {}).get("id"),
+                }},
+            )
+            try:
+                await record_audit_event(
+                    "FALLITO",
+                    "TARIFFARIO_FIT",
+                    body.preview_id,
+                    dopo={"errore": failure, "backup_id": (backup or {}).get("id")},
+                    batch_id=body.preview_id,
+                )
+            except Exception:
+                pass
+            raise HTTPException(
+                500,
+                "Sincronizzazione FIT non completata; il backup resta disponibile",
+            ) from exc
+
+    return router, list_listino, adm_categories, adm_sync, fit_status, fit_preview, fit_apply

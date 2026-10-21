@@ -22,6 +22,7 @@ if __package__:
         create_adm_router, fetch_adm_categories_sync, parse_adm_pdf_sync,
         parse_italian_money,
     )
+    from .fit_tariff import fetch_and_parse_fit_tariff_sync
     from .audit_router import create_audit_router
     from .auto_order_router import (
         AutoOrderConfermaIn, AutoOrderRigaIn, auto_order_snapshot_key,
@@ -109,6 +110,7 @@ else:
         create_adm_router, fetch_adm_categories_sync, parse_adm_pdf_sync,
         parse_italian_money,
     )
+    from fit_tariff import fetch_and_parse_fit_tariff_sync
     from audit_router import create_audit_router
     from auto_order_router import (
         AutoOrderConfermaIn, AutoOrderRigaIn, auto_order_snapshot_key,
@@ -1074,14 +1076,25 @@ create_prodotto = products["create_prodotto"]
 update_prodotto = products["update_prodotto"]
 update_venduti_negozio = products["update_venduti_negozio"]
 delete_prodotto = products["delete_prodotto"]
-adm_router, list_listino, adm_categories, adm_sync = create_adm_router(
+(
+    adm_router,
+    list_listino,
+    adm_categories,
+    adm_sync,
+    fit_status,
+    fit_preview,
+    fit_apply,
+) = create_adm_router(
     get_database=lambda: db,
     cap_limit=_cap,
     fetch_categories=lambda: fetch_adm_categories_sync(),
     parse_pdf=lambda category: parse_adm_pdf_sync(category),
+    fetch_fit_tariff=lambda: fetch_and_parse_fit_tariff_sync(),
     bulk_upsert=lambda collection, operations: _bulk_upsert(collection, operations),
     bulk_update=lambda collection, operations: _bulk_update(collection, operations),
     apply_electronic_inhalation_categories=lambda: _apply_electronic_inhalation_categories(),
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    record_audit_event=lambda *args, **kwargs: _record_audit_event(*args, **kwargs),
 )
 operations = create_operations_router(
     get_database=lambda: db,
