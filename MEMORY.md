@@ -72,3 +72,22 @@
   codex/webapp-category-updates, ft/fix-prelievi-resti, main-merged.
   `codex/auto-order-optimization` è rimasto (worktree attivo in
   `/Users/Lorenzo/.codex/worktrees/`), non eliminabile senza rimuoverlo prima.
+- Dal 2026-10-21, bug critico nella sync listino: il pulsante di fallback
+  "PDF ADM" (`/adm/sync` in `adm_router.py`, invocato da `syncAdmFallback`
+  nella pagina Listino) aggiornava i prodotti con un filtro che includeva il
+  match sul codice ADM numerico nudo (es. `"938"`), oltre al codice locale
+  con prefisso `AMMS`. Un prodotto/accessorio non-tabacco che usa quello
+  stesso numero come proprio `codice` (es. REX BRAVO CARTINE CORTE, codice
+  `938`, categoria ACCESSORI) veniva quindi sovrascritto con categoria e
+  prezzo del prodotto da fumo omonimo. Il percorso nuovo `/fit/apply`
+  (sync listino FIT introdotta lo stesso giorno) non ha questo bug: usa
+  `_catalogue_adm_code`, che richiede sempre il prefisso `AMMS` esplicito.
+  Fix (commit 83e63a1): `_adm_product_update_operations` ora matcha solo sul
+  codice locale `AMMS{n}`, mai sul numero nudo; aggiunti 2 test di
+  regressione in `test_fit_tariff.py` sul caso REX BRAVO/938. **Non risolto:**
+  i prodotti già corrotti in produzione dalla sync legacy precedente a questo
+  fix non sono stati riparati — l'endpoint non crea un backup preventivo e
+  serve accesso diretto al MongoDB Atlas di produzione (credenziali non
+  disponibili in questo workspace) per enumerare e ripristinare i prodotti
+  non-AMMS il cui codice numerico coincide con un codice ADM/FIT ufficiale.
+  <!-- project: github.com/loreferra91/GESTIONALE-TABACCHI -->
