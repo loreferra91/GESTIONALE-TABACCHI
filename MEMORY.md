@@ -52,3 +52,23 @@
   riuscite. L'anteprima Listino mostra il confronto campo per campo prima/dopo
   per righe nuove e aggiornate, inclusi i riempimenti di codice ADM, categoria
   e fonte, e resta visibile come riepilogo dopo l'applicazione.
+- Dal 2026-10-21, revisione completa: `backend/requirements.txt` contiene SDK
+  mai importati nel codice (litellm, openai, google-generativeai, stripe,
+  boto3, passlib, bcrypt, python-jose, oauthlib) ereditati dal template
+  Emergent; `backend/requirements-prod.txt` resta il set minimale reale di
+  produzione (14 pacchetti) e non li include. `emergentintegrations==0.2.0`
+  non è pubblicato su PyPI e non è importato: va escluso quando si
+  risincronizza un venv locale da `requirements.txt`. Aggiornati con patch
+  compatibili (commit 883a140): certifi 2026.10.19, multidict 6.9.1,
+  pillow 13.0.0, PyJWT 2.15.0; verificato con 266 test backend e 33 frontend.
+  Il venv locale di sviluppo risaliva al 23/09 e girava su librerie vecchie
+  (starlette 0.37.2, pymongo 4.6.3, fastapi 0.110.1) nonostante i pin corretti
+  nel repo: risincronizzato. Rimasti senza fix compatibile non rischioso
+  (SDK non usati o major breaking): litellm, python-jose, oauthlib, ecdsa,
+  aiohttp (dipendenza di litellm), starlette 1.x (richiede major bump non
+  valutato). Branch locali stale rimossi (0 commit avanti a main):
+  allinea-contabilita-test, applica-tutto-venduti-giacenza,
+  codex/fix-adm-sync-timeout, codex/mongo-storage-csv-ledger,
+  codex/webapp-category-updates, ft/fix-prelievi-resti, main-merged.
+  `codex/auto-order-optimization` è rimasto (worktree attivo in
+  `/Users/Lorenzo/.codex/worktrees/`), non eliminabile senza rimuoverlo prima.
