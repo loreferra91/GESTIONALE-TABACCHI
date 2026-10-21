@@ -6,6 +6,7 @@ import {
   Calculator,
   CaretDown,
   ChartBar,
+  ChartLineUp,
   ClipboardText,
   ClockCounterClockwise,
   FileText,
@@ -18,6 +19,7 @@ import {
   Storefront,
   Truck,
   WarningCircle,
+  Warehouse,
   X,
 } from "@phosphor-icons/react";
 
@@ -25,6 +27,7 @@ const GROUPS = [
   {
     id: "vendite",
     label: "Vendite",
+    icon: ChartLineUp,
     items: [
       { to: "/vendite", label: "Vendite giornaliere", icon: Receipt, testid: "nav-vendite" },
       { to: "/report", label: "Report vendite", icon: FileText, testid: "nav-report" },
@@ -33,6 +36,7 @@ const GROUPS = [
   {
     id: "magazzino",
     label: "Magazzino",
+    icon: Warehouse,
     items: [
       { to: "/prodotti", label: "Prodotti", icon: Package, testid: "nav-prodotti" },
       { to: "/listino", label: "Listino ADM", icon: ListChecks, testid: "nav-listino" },
@@ -41,6 +45,7 @@ const GROUPS = [
   {
     id: "ordini",
     label: "Ordini e controllo",
+    icon: ClipboardText,
     items: [
       { to: "/auto-order", label: "Auto-Order", icon: ShoppingCart, testid: "nav-auto-order" },
       { to: "/ordini", label: "Storico ordini", icon: ClockCounterClockwise, testid: "nav-ordini" },
@@ -53,6 +58,7 @@ const GROUPS = [
   {
     id: "impostazioni",
     label: "Impostazioni",
+    icon: Gear,
     items: [
       { to: "/parametri", label: "Parametri", icon: Gear, testid: "nav-parametri" },
       { to: "/anomalie", label: "Anomalie", icon: WarningCircle, testid: "nav-anomalie" },
@@ -93,16 +99,20 @@ function NavItem({ item, closeMenu }) {
 }
 
 function Group({ group, expanded, toggle, closeMenu }) {
+  const Icon = group.icon;
   return (
     <div className="border-t border-white/10 py-2.5">
       <button
         type="button"
         onClick={toggle}
         aria-expanded={expanded}
-        className="flex w-full items-center justify-between px-5 py-2 text-left text-[13px] font-bold uppercase tracking-[0.12em] text-slate-300 hover:text-white"
+        className="flex w-full items-center px-5 py-2 text-left text-[13px] font-bold uppercase tracking-[0.1em] text-slate-300 hover:text-white"
       >
-        <span>{group.label}</span>
-        <CaretDown size={14} weight="bold" className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+        <span className="flex min-w-0 items-center gap-3">
+          <Icon size={20} weight="bold" className="shrink-0" />
+          <span className="truncate">{group.label}</span>
+        </span>
+        <CaretDown size={14} weight="bold" className={`ml-auto shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
       </button>
       {expanded ? <div className="space-y-0.5">{group.items.map(item => <NavItem key={item.to} item={item} closeMenu={closeMenu} />)}</div> : null}
     </div>
