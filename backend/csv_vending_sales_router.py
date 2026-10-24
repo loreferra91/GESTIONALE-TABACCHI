@@ -23,6 +23,7 @@ def create_csv_vending_sales_router(
     adm_local_code: Callable[[Any], str],
     sale_model: Any,
     run_transactionally: Callable[[Any], Any],
+    ensure_vending_cash_balance: Callable[..., Any],
     adjust_vending_cash_balance: Callable[..., Any],
     get_store_vending_accounting_snapshot: Callable[..., Any],
     accounting_state_id: str,
@@ -165,6 +166,10 @@ def create_csv_vending_sales_router(
             if stock_summary["errori_giacenza"]:
                 details.append("vendite superiori alla giacenza disponibile")
             raise HTTPException(409, "Import CSV bloccato: " + "; ".join(details))
+
+        # Initialize the operational cache before inserting the new sales, so
+        # the same batch cannot be counted both by derivation and by its delta.
+        await ensure_vending_cash_balance()
 
         backup = await create_backup_snapshot(
             "Prima dell'import vendite vending",

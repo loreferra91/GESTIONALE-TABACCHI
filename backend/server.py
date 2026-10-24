@@ -330,6 +330,8 @@ DEFAULT_PARAMS = {
     },
 }
 
+VENDING_CASH_RECONCILIATION_ID = "vending-cash-accounting-balance-v1"
+
 
 LOTTO_PARAM_BY_CATEGORY = {
     "SIGARETTE": ("LOTTO_SIGARETTE", 10),
@@ -478,6 +480,8 @@ async def on_start():
         products_reconciled = await reconcile_all_vending_stock()
         if products_reconciled:
             logging.info("Reconciled %s product vending stock caches", products_reconciled)
+        vending_cash_reconciliation = await reconcile_vending_cash_state()
+        logging.info("Vending cash state reconciliation: %s", vending_cash_reconciliation)
         smart_venue_repair = await repair_smart_venue_auto_order_2026_10_12()
         if smart_venue_repair.get("righe_riparate"):
             logging.info(
@@ -826,6 +830,86 @@ async def reconcile_all_vending_stock() -> int:
     return changed
 
 
+async def reconcile_vending_cash_state() -> Dict[str, Any]:
+    """One-time repair of the operational vending cash cache.
+
+    Accounting collections remain authoritative and are never changed here.
+    """
+    existing_migration = await db.app_migrations.find_one(
+        {"id": VENDING_CASH_RECONCILIATION_ID}, {"_id": 0}
+    )
+    if existing_migration:
+        return {"gia_applicata": True, **existing_migration}
+
+    accounting_snapshot = await _vending_cash_accounting_snapshot()
+    expected = money(accounting_snapshot.get("giacenza") or 0)
+    state = await db.cassa_vending_stato.find_one(
+        {"id": VENDING_CASH_STATE_ID}, {"_id": 0}
+    )
+    previous = money((state or {}).get("giacenza") or 0)
+    changed = state is None or previous != expected
+    backup_id = None
+    now = datetime.now(timezone.utc).isoformat()
+
+    if changed:
+        backup = await create_backup_snapshot(
+            "Prima del riallineamento saldo contanti vending",
+            "riallineamento-saldo-contanti-vending",
+            [
+                "parametri",
+                "db_storico_vend",
+                "db_storico_vending_ext",
+                "vendite",
+                "prelievi_vending",
+                "scontrini_vending",
+                "cassa_vending_stato",
+                "vending_accounting_snapshots",
+                "vending_accounting_state",
+                "vending_accounting_events",
+                "audit_events",
+            ],
+            metadata={
+                "saldo_tecnico_precedente": previous,
+                "saldo_contabile_atteso": expected,
+            },
+        )
+        backup_id = backup["id"]
+        await db.cassa_vending_stato.update_one(
+            {"id": VENDING_CASH_STATE_ID},
+            {
+                "$set": {
+                    "id": VENDING_CASH_STATE_ID,
+                    "giacenza": expected,
+                    "origine": "CONTABILITA_DERIVATA",
+                    "updated_at": now,
+                    "reconciled_at": now,
+                },
+                "$setOnInsert": {"initialized_at": now},
+            },
+            upsert=True,
+        )
+        await _record_audit_event(
+            "RICONCILIATO",
+            "CASSA_VENDING_STATO",
+            VENDING_CASH_STATE_ID,
+            prima={"giacenza": previous},
+            dopo={**accounting_snapshot, "giacenza": expected},
+            idempotency_key=VENDING_CASH_RECONCILIATION_ID,
+        )
+
+    migration = {
+        "id": VENDING_CASH_RECONCILIATION_ID,
+        "created_at": now,
+        "backup_id": backup_id,
+        "modificato": changed,
+        "saldo_tecnico_precedente": previous,
+        "saldo_contabile_atteso": expected,
+        "fonti": accounting_snapshot,
+    }
+    await db.app_migrations.insert_one(migration.copy())
+    return {"gia_applicata": False, **migration}
+
+
 async def _read_capped(file: UploadFile, max_bytes: int = MAX_UPLOAD_BYTES) -> bytes:
     """Read an UploadFile with a hard size cap; raise 413 if exceeded."""
     buf = bytearray()
@@ -1129,6 +1213,7 @@ cash_movements = create_cash_movements_router(
     get_database=lambda: db,
     record_audit_event=_record_audit_event,
     cap_limit=_cap,
+    get_authoritative_vending_cash_snapshot=lambda: _vending_cash_accounting_snapshot(),
 )
 cash_movements_router = cash_movements["router"]
 _vending_cash_balance = cash_movements["vending_cash_balance"]
@@ -1163,6 +1248,7 @@ csv_vending_sales = create_csv_vending_sales_router(
     adm_local_code=adm_local_code,
     sale_model=VenditaGiornaliera,
     run_transactionally=lambda operation: _run_transactionally(operation),
+    ensure_vending_cash_balance=lambda: _vending_cash_balance(),
     adjust_vending_cash_balance=lambda *args, **kwargs: _adjust_vending_cash_balance(*args, **kwargs),
     get_store_vending_accounting_snapshot=lambda *args, **kwargs: _store_vending_accounting_snapshot(*args, **kwargs),
     accounting_state_id=VENDING_ACCOUNTING_STATE_ID,
@@ -1220,6 +1306,7 @@ _vending_payment_values = dashboard_module["vending_payment_values"]
 _latest_historical_vending_date = dashboard_module["latest_historical_vending_date"]
 _calculate_dashboard_balances = dashboard_module["calculate_dashboard_balances"]
 _dashboard_balances = dashboard_module["dashboard_balances"]
+_vending_cash_accounting_snapshot = dashboard_module["vending_cash_accounting_snapshot"]
 _supplemental_store_cash_sales = dashboard_module["supplemental_store_cash_sales"]
 _shop_sold_accounting_corrections = dashboard_module["shop_sold_accounting_corrections"]
 _dashboard_sales_trend = dashboard_module["dashboard_sales_trend"]

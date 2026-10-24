@@ -19,11 +19,102 @@ def fresh_db(monkeypatch):
     return database
 
 
-def test_legacy_withdrawal_total_initializes_current_vending_cash(monkeypatch):
+def test_missing_cash_state_is_initialized_from_accounting(monkeypatch):
     database = fresh_db(monkeypatch)
-    asyncio.run(database.prelievi_vending.insert_one({"id": "legacy", "importo": 237.55}))
 
-    assert asyncio.run(server._vending_cash_balance()) == 237.55
+    async def scenario():
+        await database.parametri.insert_one({
+            "nome": "GIACENZA_INIZIALE_CONTANTI_VENDING", "valore": 654.55,
+        })
+        await database.vending_accounting_state.insert_one({
+            "id": server.VENDING_ACCOUNTING_STATE_ID,
+            "baseline_importi_pagamenti": {"CONTANTI": 4314.50},
+            "baseline_righe": 1,
+            "created_at": "2026-10-24T10:00:00+00:00",
+        })
+        await database.prelievi_vending.insert_one({
+            "id": "existing", "data": "2026-10-10", "importo": 3527.05,
+        })
+        balance = await server._vending_cash_balance()
+        state = await database.cassa_vending_stato.find_one({"id": "saldo"}, {"_id": 0})
+        return balance, state
+
+    balance, state = asyncio.run(scenario())
+
+    assert balance == 1442.0
+    assert state["giacenza"] == 1442.0
+    assert state["origine"] == "CONTABILITA_DERIVATA"
+
+
+def test_reconciliation_repairs_only_cash_cache_and_allows_real_withdrawal(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.parametri.insert_one({
+            "nome": "GIACENZA_INIZIALE_CONTANTI_VENDING", "valore": 654.55,
+        })
+        await database.vending_accounting_state.insert_one({
+            "id": server.VENDING_ACCOUNTING_STATE_ID,
+            "baseline_importi_pagamenti": {"CONTANTI": 4314.50},
+            "baseline_righe": 1,
+            "created_at": "2026-10-24T10:00:00+00:00",
+        })
+        await database.prelievi_vending.insert_one({
+            "id": "existing", "data": "2026-10-10", "importo": 3527.05,
+        })
+        await database.scontrini_vending.insert_one({
+            "id": "receipt", "data": "2026-10-10", "importo": 334.40,
+        })
+        await database.cassa_vending_stato.insert_one({
+            "id": "saldo", "giacenza": -964.80,
+        })
+        accounting_before = {
+            "parametri": await database.parametri.find({}, {"_id": 0}).to_list(None),
+            "ledger": await database.vending_accounting_state.find({}, {"_id": 0}).to_list(None),
+            "prelievi": await database.prelievi_vending.find({}, {"_id": 0}).to_list(None),
+            "scontrini": await database.scontrini_vending.find({}, {"_id": 0}).to_list(None),
+        }
+        first = await server.reconcile_vending_cash_state()
+        second = await server.reconcile_vending_cash_state()
+        state_after_reconciliation = await server._vending_cash_balance()
+        accounting_after = {
+            "parametri": await database.parametri.find({}, {"_id": 0}).to_list(None),
+            "ledger": await database.vending_accounting_state.find({}, {"_id": 0}).to_list(None),
+            "prelievi": await database.prelievi_vending.find({}, {"_id": 0}).to_list(None),
+            "scontrini": await database.scontrini_vending.find({}, {"_id": 0}).to_list(None),
+        }
+        movement = await server.add_prelievo_vending(server.PrelievoVendingIn(
+            data="2026-10-24",
+            importo=1181.30,
+            descrizione="prelievo vending 24/10",
+            operatore="MC",
+        ))
+        return {
+            "first": first,
+            "second": second,
+            "state_after_reconciliation": state_after_reconciliation,
+            "accounting_unchanged": accounting_before == accounting_after,
+            "movement": movement,
+            "final_balance": await server._vending_cash_balance(),
+            "backups": await database.backup_snapshots.count_documents({}),
+            "audits": await database.audit_events.count_documents({
+                "entita": "CASSA_VENDING_STATO",
+                "azione": "RICONCILIATO",
+            }),
+        }
+
+    result = asyncio.run(scenario())
+
+    assert result["first"]["saldo_tecnico_precedente"] == -964.80
+    assert result["first"]["saldo_contabile_atteso"] == 1442.0
+    assert result["first"]["modificato"] is True
+    assert result["second"]["gia_applicata"] is True
+    assert result["state_after_reconciliation"] == 1442.0
+    assert result["accounting_unchanged"] is True
+    assert result["movement"]["importo"] == 1181.30
+    assert result["final_balance"] == 260.70
+    assert result["backups"] == 1
+    assert result["audits"] == 1
 
 
 def test_cash_csv_increments_vending_cash_but_cards_do_not(monkeypatch):
@@ -34,7 +125,7 @@ def test_cash_csv_increments_vending_cash_but_cards_do_not(monkeypatch):
         "04/10/2026 10:01;PRODOTTO CARTA;6,0;1-A02;1002;Sigarette;Carte\n"
     )
     async def scenario():
-        await database.prelievi_vending.insert_one({"id": "legacy", "importo": 237.55})
+        await database.cassa_vending_stato.insert_one({"id": "saldo", "giacenza": 237.55})
         for index, code in enumerate(("AMMS1001", "AMMS1002"), start=1):
             await database.prodotti.insert_one({
                 "id": f"product-{index}", "codice": code,
@@ -68,7 +159,7 @@ def test_csv_import_can_be_undone_with_stock_column_and_cash_restored(monkeypatc
     )
 
     async def scenario():
-        await database.prelievi_vending.insert_one({"id": "legacy", "importo": 100})
+        await database.cassa_vending_stato.insert_one({"id": "saldo", "giacenza": 100})
         await database.vending_accounting_snapshots.insert_one({
             "id": "previous-accounting",
             "status": "active",
@@ -541,8 +632,7 @@ def test_csv_import_is_blocked_instead_of_clipping_stock_to_zero(monkeypatch):
 
 def test_registering_and_deleting_withdrawal_updates_vending_cash(monkeypatch):
     database = fresh_db(monkeypatch)
-    asyncio.run(database.prelievi_vending.insert_one({"id": "legacy", "importo": 237.55}))
-    asyncio.run(server._vending_cash_balance())
+    asyncio.run(database.cassa_vending_stato.insert_one({"id": "saldo", "giacenza": 237.55}))
 
     movement = asyncio.run(server.add_prelievo_vending(server.PrelievoVendingIn(
         data="2026-10-04", importo=100, descrizione="Test", operatore="Codex"

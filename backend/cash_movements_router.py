@@ -101,7 +101,13 @@ class ScontrinoVendingIn(BaseModel):
     idempotency_key: str | None = None
 
 
-def create_cash_movements_router(*, get_database, record_audit_event, cap_limit):
+def create_cash_movements_router(
+    *,
+    get_database,
+    record_audit_event,
+    cap_limit,
+    get_authoritative_vending_cash_snapshot,
+):
     router = APIRouter()
 
     def session_kwargs(session):
@@ -117,16 +123,15 @@ def create_cash_movements_router(*, get_database, record_audit_event, cap_limit)
         if state:
             return money(state.get("giacenza") or 0)
 
-        legacy_docs = await database.prelievi_vending.find(
-            {}, {"_id": 0, "importo": 1}, **kwargs
-        ).to_list(None)
-        legacy_balance = money_sum(document.get("importo") or 0 for document in legacy_docs)
+        snapshot = await get_authoritative_vending_cash_snapshot()
+        authoritative_balance = money(snapshot.get("giacenza") or 0)
         now = datetime.now(timezone.utc).isoformat()
         await database.cassa_vending_stato.update_one(
             {"id": VENDING_CASH_STATE_ID},
             {"$setOnInsert": {
                 "id": VENDING_CASH_STATE_ID,
-                "giacenza": legacy_balance,
+                "giacenza": authoritative_balance,
+                "origine": "CONTABILITA_DERIVATA",
                 "initialized_at": now,
                 "updated_at": now,
             }},

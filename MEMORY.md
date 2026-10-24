@@ -2,6 +2,11 @@
 
 ## Gestionale Tabacchi
 
+- Dal 2026-10-24 la contabilità vending resta invariata e costituisce la fonte
+  autorevole del contante fisico: `giacenza iniziale + vendite in contanti -
+  prelievi lordi`. Una migrazione idempotente riallinea soltanto
+  `cassa_vending_stato`, con backup e audit preventivi; gli scontrini continuano
+  a incidere solo sul prelievo contabile netto.
 - Dal 2026-10-10 il **Prelievo da vending** contabile è netto degli scontrini:
   `prelievo netto = totale prelievi registrati - totale scontrini vending`.
   Esempio di accettazione: `3.527,05 € - 327,90 € = 3.199,15 €`.

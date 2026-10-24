@@ -303,6 +303,37 @@ def create_dashboard_router(
                 continue
         return normalize_money(total)
 
+    async def vending_cash_accounting_snapshot() -> Dict[str, Any]:
+        """Return the physical vending cash derived from accounting sources."""
+        db = get_database()
+        latest_import, historical_dates, prelievi, opening_document = await asyncio.gather(
+            get_latest_accounting_import(),
+            db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
+            get_prelievi_vending_summary(),
+            db.parametri.find_one(
+                {"nome": "GIACENZA_INIZIALE_CONTANTI_VENDING"},
+                {"_id": 0, "valore": 1},
+            ),
+        )
+        latest_imported_sale = latest_sale_date(historical_dates)
+        opening_cash = normalize_money((opening_document or {}).get("valore") or 0)
+        gross_withdrawals = normalize_money(prelievi.get("totale") or 0)
+        balances = await dashboard_balances(
+            0,
+            gross_withdrawals,
+            0,
+            (latest_import or {}).get("created_at"),
+            opening_cash,
+        )
+        return {
+            "giacenza": balances["giacenzaVendingContanti"],
+            "giacenza_iniziale": opening_cash,
+            "vendite_contanti": balances["venditeVendingContanti"],
+            "prelievi_lordi": gross_withdrawals,
+            "ultima_vendita_importata": latest_imported_sale.isoformat()
+            if latest_imported_sale else None,
+        }
+
     async def shop_sold_accounting_corrections(latest_import_created_at: Any = None) -> float:
         db = get_database()
         cutoff = parse_utc_datetime(latest_import_created_at)
@@ -663,6 +694,7 @@ def create_dashboard_router(
         "latest_historical_vending_date": latest_historical_vending_date,
         "calculate_dashboard_balances": calculate_dashboard_balances,
         "dashboard_balances": dashboard_balances,
+        "vending_cash_accounting_snapshot": vending_cash_accounting_snapshot,
         "supplemental_store_cash_sales": supplemental_store_cash_sales,
         "shop_sold_accounting_corrections": shop_sold_accounting_corrections,
         "dashboard_sales_trend": dashboard_sales_trend,
