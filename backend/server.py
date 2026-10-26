@@ -103,6 +103,7 @@ if __package__:
         create_smart_venue_router,
     )
     from .vending_router import VendingColonna, VendingCreateIn, create_vending_router
+    from .vending_column_migrations import migrate_vending_column_zero_padding
 else:
     from adm_router import (
         ADM_CATEGORY_ALIASES, ADM_PREZZI_URL, ListinoItem,
@@ -191,6 +192,7 @@ else:
         create_smart_venue_router,
     )
     from vending_router import VendingColonna, VendingCreateIn, create_vending_router
+    from vending_column_migrations import migrate_vending_column_zero_padding
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -480,6 +482,10 @@ async def on_start():
         products_reconciled = await reconcile_all_vending_stock()
         if products_reconciled:
             logging.info("Reconciled %s product vending stock caches", products_reconciled)
+        vending_column_migration = await migrate_vending_column_zero_padding(
+            db, create_backup_snapshot
+        )
+        logging.info("Vending column zero-padding migration: %s", vending_column_migration)
         vending_cash_reconciliation = await reconcile_vending_cash_state()
         logging.info("Vending cash state reconciliation: %s", vending_cash_reconciliation)
         smart_venue_repair = await repair_smart_venue_auto_order_2026_10_12()
