@@ -20,6 +20,39 @@ def test_agent_integration_is_disabled_by_default(monkeypatch):
     monkeypatch.setenv("APP_PASSWORD", "human-password")
     response = client.get("/api/agent/v1/status")
     assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_unknown_agent_path_does_not_bypass_human_basic_auth(monkeypatch):
+    monkeypatch.setenv("APP_USERNAME", "human")
+    monkeypatch.setenv("APP_PASSWORD", "human-password")
+
+    unknown = client.get("/api/agent/v1/future")
+    trailing_slash = client.get("/api/agent/v1/status/")
+
+    assert unknown.status_code == 401
+    assert unknown.headers["www-authenticate"].startswith("Basic")
+    assert trailing_slash.status_code == 401
+    assert trailing_slash.headers["www-authenticate"].startswith("Basic")
+
+
+def test_agent_path_variants_and_non_get_methods_do_not_bypass_basic_auth(monkeypatch):
+    monkeypatch.setenv("APP_USERNAME", "human")
+    monkeypatch.setenv("APP_PASSWORD", "human-password")
+
+    for path in (
+        "/api/agent/v1//status",
+        "/api/agent/v1/STATUS",
+        "/api/agent/v1/status/extra",
+    ):
+        response = client.get(path)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"].startswith("Basic")
+
+    post = client.post("/api/agent/v1/status")
+    head = client.head("/api/agent/v1/status")
+    assert post.status_code == 401
+    assert head.status_code == 401
 
 
 def test_agent_integration_requires_separate_bearer_token(monkeypatch):
@@ -34,6 +67,8 @@ def test_agent_integration_requires_separate_bearer_token(monkeypatch):
     assert missing.status_code == 401
     assert wrong.status_code == 401
     assert missing.headers["www-authenticate"] == "Bearer"
+    assert missing.headers["cache-control"] == "no-store"
+    assert wrong.headers["cache-control"] == "no-store"
 
 
 def test_agent_inventory_is_read_only_filtered_and_does_not_expose_descriptions(monkeypatch):
@@ -54,6 +89,7 @@ def test_agent_inventory_is_read_only_filtered_and_does_not_expose_descriptions(
     )
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.json()["classification"] == "DATO_VERIFICATO"
     assert response.json()["possible_anomalies"][0]["code"] == "P-INJECT"
     assert "IGNORE ALL RULES" not in response.text
@@ -103,6 +139,7 @@ def test_agent_status_times_out_without_affecting_other_routes(monkeypatch):
     health = client.get("/api/")
 
     assert response.status_code == 504
+    assert response.headers["cache-control"] == "no-store"
     assert health.status_code == 200
 
 
@@ -121,6 +158,7 @@ def test_agent_rate_limit(monkeypatch):
     assert first.status_code == 200
     assert second.status_code == 429
     assert second.headers["retry-after"] == "60"
+    assert second.headers["cache-control"] == "no-store"
 
 
 def test_agent_rejects_invalid_runtime_limits_as_unavailable(monkeypatch):
@@ -135,6 +173,7 @@ def test_agent_rejects_invalid_runtime_limits_as_unavailable(monkeypatch):
 
     assert response.status_code == 503
     assert "rate limit" in response.json()["detail"].lower()
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_agent_rejects_invalid_timeout_as_unavailable(monkeypatch):
@@ -152,3 +191,4 @@ def test_agent_rejects_invalid_timeout_as_unavailable(monkeypatch):
 
     assert response.status_code == 503
     assert "timeout" in response.json()["detail"].lower()
+    assert response.headers["cache-control"] == "no-store"

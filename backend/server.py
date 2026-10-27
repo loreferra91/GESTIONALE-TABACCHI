@@ -262,6 +262,12 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="God Services Gestionale Tabacchi", lifespan=lifespan)
 api = APIRouter(prefix="/api")
+AGENT_SERVICE_PATHS = frozenset({
+    "/api/agent/v1/status",
+    "/api/agent/v1/inventory",
+    "/api/agent/v1/vending",
+    "/api/agent/v1/orders",
+})
 audit_router, _record_audit_event, list_audit_events = create_audit_router(
     get_database=lambda: db,
 )
@@ -274,11 +280,7 @@ async def optional_basic_auth(request: Request, call_next):
     password = os.environ.get("APP_PASSWORD")
 
     request_path = request.scope["path"]
-    agent_prefix = "/api/agent/v1/"
-    agent_suffix = request_path[len(agent_prefix):] if request_path.startswith(agent_prefix) else ""
-    is_agent_service = bool(agent_suffix) and all(
-        segment not in {".", ".."} for segment in agent_suffix.split("/")
-    )
+    is_agent_service = request.method == "GET" and request_path in AGENT_SERVICE_PATHS
     is_health_check = (request.method == "GET" and request_path == "/api/") or (
         request.method == "HEAD" and request_path == "/"
     )
@@ -320,6 +322,8 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.scope["path"] in AGENT_SERVICE_PATHS:
+        response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 

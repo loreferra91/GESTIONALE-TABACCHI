@@ -5,9 +5,12 @@
 - macOS app: `/Applications/OpenClaw.app`.
 - CLI: `OpenClaw 2026.10.7 (157d8c2)`.
 - Gateway: running as a LaunchAgent on loopback `ws://127.0.0.1:18789`, token authentication reported by `openclaw status`; Tailscale exposure is off and no channels are configured.
-- Agents: status reports three agents and existing OpenCode-backed sessions.
-- Configuration: `openclaw config validate` reports invalid legacy/current-schema fields, including the gateway token field. Because of this, plugin, skill, agent and deep-security listings did not run. No repair was attempted: `openclaw doctor --fix` would mutate user configuration and requires explicit approval plus a backup/review of the current file.
-- Health: the Gateway is reachable, but the CLI does not currently have a valid read-scope credential for health RPCs.
+- Configured agents: `main`, `ios-ai`, and the new isolated `gestionale-supervisor`; no routing binding points to the Supervisor. The OpenClaw app visibly reports the same agent and its single controlled `activation-dry-run` session.
+- Configuration: `openclaw config validate` passes. A pre-change backup is stored outside the repository under `~/.openclaw/backups/`.
+- Supervisor policy: zero enabled skills, `minimal` tool profile, only the optional `gestionale_read` plugin tool added, `gateway` denied, elevated mode disabled, no sub-agent targets, and no agent-to-agent send targets. Its workspace contains a fail-closed read-only operating contract.
+- Health: the Gateway and event loop are healthy. The deep audit probe still lacks `operator.read`; this limits the diagnostic probe, not the local Gateway's availability.
+- Deep audit: one critical finding belongs to an unrelated executable onboarding skill in the `main` workspace. Additional warnings cover global cross-agent session defaults, missing plugin allowlisting, unpinned plugin install records, and absent trusted proxies. The Supervisor cannot see the flagged skill because its skill list is empty. Trusted proxies are not required while the Gateway remains loopback-only.
+- CLI note: the Gateway runs the 2026.10.7 installation under the NVM path, while the first `openclaw` on the interactive shell `PATH` is an older Homebrew 2026.6.8 binary. Administrative commands for this review used the explicit 2026.10.7 binary.
 
 Official sources used for the design:
 
@@ -44,6 +47,25 @@ Enablement requires `AGENT_INTEGRATION_ENABLED=true` and a separate random `AGEN
 
 The current rate limiter is per-process and appropriate as a first application guard. A multi-instance deployment must add a shared edge limiter before enabling the integration on more than one instance.
 
+Only `GET` requests to the four exact paths above bypass the operator Basic Auth middleware. Unknown paths, trailing-slash variants, and non-GET methods do not. Agent responses, including failures, use `Cache-Control: no-store`; successful service authentication is logged without the credential.
+
+## OpenClaw tool plugin
+
+`openclaw/gestionale-supervisor-plugin` is a version-pinned OpenClaw 2026.10.7 tool plugin. It declares one optional tool, `gestionale_read`, with the closed action set `status | inventory | vending | orders`.
+
+The plugin:
+
+- constructs the endpoint internally and accepts no arbitrary URL or HTTP method;
+- requires a bare HTTPS origin, refuses redirects, and sends one GET with the dedicated Bearer credential;
+- caps timeout at 10 seconds and response size at 256 KiB;
+- rejects non-JSON, malformed JSON, invalid envelopes, and upstream error bodies;
+- declares the token as a capability-owned `SecretRef` input so failed secret resolution fails cold;
+- has no shell, filesystem, browser, Gateway, database, deployment, messaging, or mutation surface.
+
+Local evidence: six plugin tests pass, plugin build/validation succeeds, production-dependency audit reports zero vulnerabilities, and runtime inspection reports exactly one optional tool with no routes, hooks, services, commands, providers, or skills. The locally packed plugin is installed and allowlisted only for `gestionale-supervisor`.
+
+An actual OpenClaw dry run invoked the tool without configuration and returned `Monitoraggio non attivo` because the credential was absent. This is the intended fail-closed state. The run used `omniroute/openclaw-resilient` with reported cost zero; the agent is pinned to that working route because the configured ACP/OpenCode model catalog was listed as available but rejected by the Gateway agent runner.
+
 ## Agent profiles
 
 ### READ ONLY (default and only implemented profile)
@@ -76,9 +98,13 @@ Each automation must be explicitly approved with schedule, timeout and notificat
 
 ## Activation prerequisites
 
-1. Back up and repair the invalid OpenClaw configuration with operator approval; re-run `openclaw config validate`, `openclaw status --deep`, and `openclaw security audit --deep`.
-2. Create `GESTIONALE SUPERVISOR` with the deny-first profile above and no access to the general OpenClaw/Codex/OpenCode agents.
-3. Generate a dedicated token outside the repository, store it in Render secret configuration and OpenClaw's secret store, and test rotation/revocation.
-4. Confirm HTTPS reachability from the Mac/Gateway to Render without exposing the local Gateway.
-5. Execute the isolated authorization, timeout, rate-limit and offline tests against a staging deployment.
-6. Obtain explicit approval before enabling the environment flag or creating any automation.
+Completed: configuration validation, backups, dedicated deny-first Supervisor creation, app/CLI visibility, deep audit, application-level authorization/timeout/rate-limit regression tests, purpose-built tool implementation, package validation, local install, per-agent allowlisting, and a fail-closed live agent dry run without credentials.
+
+Still required before activation:
+
+1. Generate a dedicated token outside the repository, store it in Render secret configuration and an appropriate OpenClaw secret provider, and test rotation/revocation without exposing it to prompts or logs.
+2. Confirm HTTPS reachability from the Mac/Gateway to Render without exposing the local Gateway.
+3. Execute authorization, malformed-response, timeout, rate-limit, revocation, and Gateway-offline tests against staging or an equivalent isolated environment.
+4. Obtain explicit approval before setting `AGENT_INTEGRATION_ENABLED=true` or creating any automation.
+
+Current decision: **not activated**. Render has no Supervisor credential or enabled integration flag from this phase.
