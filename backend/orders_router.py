@@ -1,6 +1,8 @@
 """Manual merchandise receipt history and Smart Venue confirmation routes."""
 from datetime import datetime, timezone
+import hashlib
 import io
+import json
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +48,7 @@ class OrdineIn(BaseModel):
     quantita: int
     prezzo: NonNegativeMoney = 0
     file_sorgente: Optional[str] = "manuale"
+    idempotency_key: str
 
 
 class BulkOrdineIn(BaseModel):
@@ -66,6 +69,15 @@ SMART_VENUE_AUTO_ORDER_REPAIR_EXPECTED = {
     "AMMS81": 10, "AMMS177": 10, "AMMS3688": 20, "AMMS1733": 20,
     "AMMS20153": 20, "AMMS21460": 10, "AMMS245": 10,
 }
+
+
+class _OrderIdempotencyCollision(Exception):
+    """Duplicate idempotency key detected after Mongo aborted a transaction."""
+
+
+def _canonical_fingerprint(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def parse_auto_order_excel(content: bytes, filename: str = "") -> Dict[str, Any]:
@@ -381,31 +393,108 @@ def create_orders_router(
     async def add_ordine(order: OrdineIn, request: Request = None):
         if order.quantita <= 0:
             raise HTTPException(422, "La quantità deve essere maggiore di zero")
+        key = str(order.idempotency_key or "").strip()
+        if not 10 <= len(key) <= 160:
+            raise HTTPException(422, "idempotency_key non valida")
         database = get_database()
-        smart_venue_applicable = bool(
-            await database.smart_venue.find_one({"codice": order.codice}, {"_id": 1})
+        fingerprint_payload = order.model_dump(mode="json", exclude={"idempotency_key"})
+        fingerprint_payload["codice"] = str(fingerprint_payload.get("codice") or "").strip()
+        fingerprint = _canonical_fingerprint(fingerprint_payload)
+
+        def replay(existing):
+            if existing.get("request_fingerprint") != fingerprint:
+                raise HTTPException(409, "Chiave idempotente già usata con dati differenti")
+            return {**existing, "gia_registrato": True}
+
+        existing = await database.storico_ordini.find_one(
+            {"idempotency_key": key}, {"_id": 0}
         )
-        document = OrdineStorico(
-            **order.model_dump(),
-            smart_venue_applicabile=smart_venue_applicable,
-            caricato_smart_venue=False if smart_venue_applicable else None,
-            smart_venue_stato=smart_state(smart_venue_applicable),
-            operatore=request_operator(request),
-        ).model_dump()
-        await database.storico_ordini.insert_one(document)
-        if order.codice:
-            await database.prodotti.update_one(
-                {"codice": order.codice},
-                {"$inc": {
-                    "giacenza_negozio": order.quantita,
-                    "acquistati": order.quantita,
-                }},
+        if existing:
+            return replay(existing)
+
+        async def persist(session):
+            kwargs = session_kwargs(session)
+            smart_venue_applicable = bool(
+                await database.smart_venue.find_one(
+                    {"codice": order.codice}, {"_id": 1}, **kwargs
+                )
             )
-            if smart_venue_applicable:
-                movement_id = await create_pending_smart_movement(order_id=document["id"], batch_id=None, code=order.codice, quantity=order.quantita, operator=document["operatore"], created_at=document["created_at"])
-                await database.storico_ordini.update_one({"id": document["id"]}, {"$set": {"smart_venue_movimento_id": movement_id}})
-                document["smart_venue_movimento_id"] = movement_id
-        return document
+            document = OrdineStorico(
+                **order.model_dump(exclude={"idempotency_key"}),
+                smart_venue_applicabile=smart_venue_applicable,
+                caricato_smart_venue=False if smart_venue_applicable else None,
+                smart_venue_stato=smart_state(smart_venue_applicable),
+                operatore=request_operator(request),
+            ).model_dump()
+            document.update({
+                "idempotency_key": key,
+                "request_fingerprint": fingerprint,
+            })
+            try:
+                await database.storico_ordini.insert_one(document, **kwargs)
+            except DuplicateKeyError as exc:
+                raise _OrderIdempotencyCollision from exc
+
+            product_changed = False
+            movement_id = None
+            try:
+                if order.codice:
+                    product_result = await database.prodotti.update_one(
+                        {"codice": order.codice},
+                        {"$inc": {
+                            "giacenza_negozio": order.quantita,
+                            "acquistati": order.quantita,
+                        }},
+                        **kwargs,
+                    )
+                    if product_result.matched_count != 1:
+                        raise HTTPException(409, f"Prodotto {order.codice} non trovato")
+                    product_changed = True
+                    if smart_venue_applicable:
+                        movement_id = await create_pending_smart_movement(
+                            order_id=document["id"], batch_id=None,
+                            code=order.codice, quantity=order.quantita,
+                            operator=document["operatore"], created_at=document["created_at"],
+                            session=session,
+                        )
+                        await database.storico_ordini.update_one(
+                            {"id": document["id"]},
+                            {"$set": {"smart_venue_movimento_id": movement_id}},
+                            **kwargs,
+                        )
+                        document["smart_venue_movimento_id"] = movement_id
+            except Exception:
+                if session is None:
+                    if movement_id:
+                        await database.smart_venue_movimenti.delete_one(
+                            {"id": movement_id}
+                        )
+                    if product_changed:
+                        await database.prodotti.update_one(
+                            {"codice": order.codice},
+                            {"$inc": {
+                                "giacenza_negozio": -order.quantita,
+                                "acquistati": -order.quantita,
+                            }},
+                        )
+                    await database.storico_ordini.delete_one({"id": document["id"]})
+                raise
+            return {**document, "gia_registrato": False}
+
+        try:
+            result = await run_transactionally(persist)
+        except _OrderIdempotencyCollision:
+            existing = await database.storico_ordini.find_one(
+                {"idempotency_key": key}, {"_id": 0}
+            )
+            if existing:
+                return replay(existing)
+            raise HTTPException(409, "Ordine già in elaborazione")
+        await record_audit_event(
+            "CREATO", "ORDINE_MANUALE", result["id"],
+            dopo=result, idempotency_key=key,
+        )
+        return result
 
     @router.post("/ordini/{order_id}/conferma-smart-venue")
     async def conferma_carico_smart_venue(
@@ -571,20 +660,6 @@ def create_orders_router(
         if len(idempotency_key) > 200:
             raise HTTPException(422, "Chiave idempotente troppo lunga")
 
-        existing_batch = await database.ricezioni_merce.find_one(
-            {"idempotency_key": idempotency_key}, {"_id": 0}
-        )
-        if existing_batch:
-            if (
-                existing_batch.get("status") == "completed"
-                and existing_batch.get("response")
-            ):
-                return {**existing_batch["response"], "gia_registrato": True}
-            raise HTTPException(
-                409,
-                "Questo carico è già in elaborazione: attendi e aggiorna la pagina",
-            )
-
         prepared = []
         errors = []
         for index, row in enumerate(body.righe):
@@ -620,6 +695,28 @@ def create_orders_router(
         if not prepared:
             raise HTTPException(422, "Nessuna riga valida da caricare")
 
+        request_fingerprint = _canonical_fingerprint({
+            "data": data,
+            "file_sorgente": body.file_sorgente,
+            "righe": [{
+                "codice": row["codice"], "quantita": row["quantita"],
+                "prezzo": str(row["prezzo"]), "descrizione": row["descrizione"],
+            } for row in prepared],
+        })
+
+        def replay_batch(existing_batch):
+            if existing_batch.get("request_fingerprint") != request_fingerprint:
+                raise HTTPException(409, "Chiave idempotente già usata con dati differenti")
+            if existing_batch.get("status") == "completed" and existing_batch.get("response"):
+                return {**existing_batch["response"], "gia_registrato": True}
+            raise HTTPException(409, "Questo carico è già in elaborazione: attendi e aggiorna la pagina")
+
+        existing_batch = await database.ricezioni_merce.find_one(
+            {"idempotency_key": idempotency_key}, {"_id": 0}
+        )
+        if existing_batch:
+            return replay_batch(existing_batch)
+
         batch_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         operator = request_operator(request)
@@ -634,6 +731,7 @@ def create_orders_router(
             await database.ricezioni_merce.insert_one({
                 "id": batch_id,
                 "idempotency_key": idempotency_key,
+                "request_fingerprint": request_fingerprint,
                 "status": "processing",
                 "created_at": created_at,
                 "data": data,
@@ -786,12 +884,8 @@ def create_orders_router(
             existing_batch = await database.ricezioni_merce.find_one(
                 {"idempotency_key": idempotency_key}, {"_id": 0}
             )
-            if (
-                existing_batch
-                and existing_batch.get("status") == "completed"
-                and existing_batch.get("response")
-            ):
-                return {**existing_batch["response"], "gia_registrato": True}
+            if existing_batch:
+                return replay_batch(existing_batch)
             raise HTTPException(409, "Questo carico è già stato inviato")
 
     return {

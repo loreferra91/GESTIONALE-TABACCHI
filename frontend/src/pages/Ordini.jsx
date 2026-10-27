@@ -4,6 +4,7 @@ import { api, apiErrorMessage } from "../lib/api";
 import { Badge, Card, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 export default function Ordini() {
   const [allRows, setAllRows] = useState([]);
@@ -27,7 +28,9 @@ export default function Ordini() {
   const save = async () => {
     if (!form.codice || !form.quantita) return toast.error("Codice e quantità richiesti");
     setSaving(true);
-    try { await api.post("/ordini", form); toast.success("Ordine registrato"); setForm({ ...form, codice: "", descrizione: "", quantita: 10, prezzo: 0 }); await load(); }
+    const payload = { ...form };
+    const idempotencyKey = idempotencyKeyFor("ordine-manuale", payload);
+    try { await api.post("/ordini", { ...payload, idempotency_key: idempotencyKey }); clearIdempotencyKey("ordine-manuale"); toast.success("Ordine registrato"); setForm({ ...form, codice: "", descrizione: "", quantita: 10, prezzo: 0 }); await load(); }
     catch (error) { toast.error(apiErrorMessage(error, "Impossibile registrare il carico")); }
     finally { setSaving(false); }
   };

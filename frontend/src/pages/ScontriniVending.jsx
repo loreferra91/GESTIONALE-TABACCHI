@@ -4,6 +4,7 @@ import Layout from "../components/Layout";
 import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, formatEur } from "../components/UI";
 import { SearchBar, Th, useSortSearch } from "../lib/tableHooks";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 export default function ScontriniVending() {
   const [data, setData] = useState({ movimenti: [], totale: 0 });
@@ -29,8 +30,10 @@ export default function ScontriniVending() {
 
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
+    const idempotencyKey = idempotencyKeyFor("scontrino-vending", form);
     try {
-      await api.post("/scontrini-vending", form);
+      await api.post("/scontrini-vending", { ...form, idempotency_key: idempotencyKey });
+      clearIdempotencyKey("scontrino-vending");
       toast.success("Scontrino vending registrato");
       setForm(current => ({ ...current, importo: 0, descrizione: "" }));
       load();

@@ -4,6 +4,7 @@ import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, formatEur } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 export default function Versamenti() {
   const [data, setData] = useState({ movimenti: [], totaleVendutoNegozio: 0, totaleVersamenti: 0, liquiditaResidua: 0 });
@@ -41,7 +42,8 @@ export default function Versamenti() {
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
     setSaving(true);
-    try { await api.post("/versamenti", form); toast.success("Versamento registrato"); setForm({ ...form, importo: 0, descrizione: "" }); await load(); }
+    const idempotencyKey = idempotencyKeyFor("versamento", form);
+    try { await api.post("/versamenti", { ...form, idempotency_key: idempotencyKey }); clearIdempotencyKey("versamento"); toast.success("Versamento registrato"); setForm({ ...form, importo: 0, descrizione: "" }); await load(); }
     catch (error) { toast.error(apiErrorMessage(error, "Impossibile registrare il versamento")); }
     finally { setSaving(false); }
   };

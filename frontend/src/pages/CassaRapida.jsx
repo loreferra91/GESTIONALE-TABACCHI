@@ -5,6 +5,7 @@ import { toast, Toaster } from "sonner";
 import { House, Trash, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { formatEur, formatNum } from "../components/UI";
 import { PRODUCT_CATEGORIES, shortCategory } from "../lib/categories";
+import { clearIdempotencyKey, idempotencyRecordFor } from "../lib/idempotency";
 
 const CAT_STYLE = {
   "SIGARETTE": "bg-slate-900 text-white",
@@ -59,19 +60,21 @@ export default function CassaRapida() {
   const conferma = async () => {
     if (!cart.length) return toast.error("Carrello vuoto");
     setSaving(true);
-    const nowIso = new Date().toISOString();
+    const operation = {
+      pagamento,
+      righe: cart.map(x => ({
+        codice: x.codice, descrizione: x.descrizione,
+        quantita: x.qta, prezzo: x.prezzo,
+      })),
+    };
+    const idempotency = idempotencyRecordFor("cassa-rapida", operation);
     try {
       const response = await api.post("/vendite/cassa-rapida", {
-        data: nowIso,
-        pagamento,
-        righe: cart.map(x => ({
-          codice: x.codice,
-          descrizione: x.descrizione,
-          quantita: x.qta,
-          prezzo: x.prezzo,
-        })),
-        idempotency_key: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`,
+        data: idempotency.createdAt,
+        ...operation,
+        idempotency_key: idempotency.key,
       });
+      clearIdempotencyKey("cassa-rapida");
       toast.success(`Vendita registrata: ${formatEur(totale)}`);
       setLastSale(response.data);
       setCart([]);

@@ -1,7 +1,10 @@
 """Cash, deposit, receipt, and vending-withdrawal routes."""
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 import uuid
+import logging
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +19,11 @@ else:
 
 VENDING_CASH_STATE_ID = "saldo"
 ELECTRONIC_PAYMENT_METHODS = {"POS", "SATISPAY", "ALTRO"}
+logger = logging.getLogger(__name__)
+
+
+class _VendingIdempotencyCollision(Exception):
+    """Signals a duplicate insert after Mongo has aborted the transaction."""
 
 
 def cash_payment_method(document):
@@ -107,11 +115,27 @@ def create_cash_movements_router(
     record_audit_event,
     cap_limit,
     get_authoritative_vending_cash_snapshot,
+    run_transactionally=None,
 ):
     router = APIRouter()
 
+    if run_transactionally is None:
+        async def run_transactionally(operation):
+            return await operation(None)
+
     def session_kwargs(session):
         return {"session": session} if session is not None else {}
+
+    def movement_fingerprint(movement, **overrides):
+        payload = movement.model_dump(mode="json", exclude={"idempotency_key"})
+        payload.update(overrides)
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def replay(existing, fingerprint):
+        if existing.get("request_fingerprint") != fingerprint:
+            raise HTTPException(409, "Chiave idempotente già usata con dati differenti")
+        return {**existing, "gia_registrato": True}
 
     async def vending_cash_balance(session=None):
         """Return cash in the vending machine, initializing legacy state once."""
@@ -126,18 +150,21 @@ def create_cash_movements_router(
         snapshot = await get_authoritative_vending_cash_snapshot()
         authoritative_balance = money(snapshot.get("giacenza") or 0)
         now = datetime.now(timezone.utc).isoformat()
-        await database.cassa_vending_stato.update_one(
-            {"id": VENDING_CASH_STATE_ID},
-            {"$setOnInsert": {
-                "id": VENDING_CASH_STATE_ID,
-                "giacenza": authoritative_balance,
-                "origine": "CONTABILITA_DERIVATA",
-                "initialized_at": now,
-                "updated_at": now,
-            }},
-            upsert=True,
-            **kwargs,
-        )
+        try:
+            await database.cassa_vending_stato.update_one(
+                {"id": VENDING_CASH_STATE_ID},
+                {"$setOnInsert": {
+                    "id": VENDING_CASH_STATE_ID,
+                    "giacenza": authoritative_balance,
+                    "origine": "CONTABILITA_DERIVATA",
+                    "initialized_at": now,
+                    "updated_at": now,
+                }},
+                upsert=True,
+                **kwargs,
+            )
+        except DuplicateKeyError:
+            logger.debug("Vending cash state initialized concurrently")
         state = await database.cassa_vending_stato.find_one(
             {"id": VENDING_CASH_STATE_ID}, {"_id": 0}, **kwargs
         )
@@ -204,21 +231,24 @@ def create_cash_movements_router(
         key = str(movement.idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "idempotency_key non valido")
+        fingerprint = movement_fingerprint(movement)
         if key:
             existing = await database.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
-                return existing
+                return replay(existing, fingerprint)
         document = Versamento(**{
             key_: value for key_, value in movement.model_dump().items()
             if key_ != "idempotency_key"
         }).model_dump()
         if key:
             document["idempotency_key"] = key
+            document["request_fingerprint"] = fingerprint
         response = dict(document)
         try:
             await database.versamenti.insert_one(document)
         except DuplicateKeyError:
-            return await database.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
+            existing = await database.versamenti.find_one({"idempotency_key": key}, {"_id": 0})
+            return replay(existing, fingerprint)
         await record_audit_event(
             "CREATO", "VERSAMENTO", document["id"], dopo=response, idempotency_key=key
         )
@@ -248,35 +278,57 @@ def create_cash_movements_router(
         key = str(movement.idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "idempotency_key non valido")
-        if key:
-            existing = await database.prelievi_vending.find_one({"idempotency_key": key}, {"_id": 0})
-            if existing:
-                return existing
-        await vending_cash_balance()
+        fingerprint = movement_fingerprint(movement)
         document = PrelievoVending(**{
             key_: value for key_, value in movement.model_dump().items()
             if key_ != "idempotency_key"
         }).model_dump()
         if key:
             document["idempotency_key"] = key
+            document["request_fingerprint"] = fingerprint
         response = dict(document)
+        await vending_cash_balance()
+        async def operation(session):
+            kwargs = session_kwargs(session)
+            if key:
+                existing = await database.prelievi_vending.find_one(
+                    {"idempotency_key": key}, {"_id": 0}, **kwargs
+                )
+                if existing:
+                    return replay(existing, fingerprint)
+            await vending_cash_balance(session)
+            try:
+                await database.prelievi_vending.insert_one(document, **kwargs)
+            except DuplicateKeyError as exc:
+                raise _VendingIdempotencyCollision from exc
+            try:
+                await adjust_vending_cash_balance(
+                    -movement.importo,
+                    session=session,
+                    require_nonnegative=True,
+                )
+            except Exception:
+                if session is None:
+                    try:
+                        await database.prelievi_vending.delete_one({"id": document["id"]})
+                    except Exception:
+                        logger.exception(
+                            "Standalone rollback failed after vending withdrawal insert adjustment error"
+                        )
+                raise
+            return response
+
         try:
-            await database.prelievi_vending.insert_one(document)
-        except DuplicateKeyError:
+            result = await run_transactionally(operation)
+        except _VendingIdempotencyCollision:
             existing = await database.prelievi_vending.find_one(
                 {"idempotency_key": key}, {"_id": 0}
             )
             if existing:
-                return existing
+                return replay(existing, fingerprint)
             raise HTTPException(409, "Prelievo già registrato")
-        try:
-            await adjust_vending_cash_balance(
-                -movement.importo,
-                require_nonnegative=True,
-            )
-        except Exception:
-            await database.prelievi_vending.delete_one({"id": document["id"]})
-            raise
+        if result != response:
+            return result
         await record_audit_event(
             "CREATO", "PRELIEVO_VENDING", document["id"],
             dopo=response, idempotency_key=key,
@@ -287,10 +339,27 @@ def create_cash_movements_router(
     async def del_prelievo_vending(m_id: str):
         database = get_database()
         await vending_cash_balance()
-        existing = await database.prelievi_vending.find_one({"id": m_id}, {"_id": 0})
-        await database.prelievi_vending.delete_one({"id": m_id})
+        async def operation(session):
+            kwargs = session_kwargs(session)
+            await vending_cash_balance(session)
+            existing = await database.prelievi_vending.find_one({"id": m_id}, {"_id": 0}, **kwargs)
+            await database.prelievi_vending.delete_one({"id": m_id}, **kwargs)
+            if existing:
+                try:
+                    await adjust_vending_cash_balance(float(existing.get("importo") or 0), session=session)
+                except Exception:
+                    if session is None:
+                        try:
+                            await database.prelievi_vending.insert_one(existing)
+                        except Exception:
+                            logger.exception(
+                                "Standalone rollback failed after vending withdrawal delete adjustment error"
+                            )
+                    raise
+            return existing
+
+        existing = await run_transactionally(operation)
         if existing:
-            await adjust_vending_cash_balance(float(existing.get("importo") or 0))
             await record_audit_event(
                 "ELIMINATO", "PRELIEVO_VENDING", m_id, prima=existing
             )
@@ -311,21 +380,24 @@ def create_cash_movements_router(
         key = str(movement.idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "idempotency_key non valido")
+        fingerprint = movement_fingerprint(movement)
         if key:
             existing = await database.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
-                return existing
+                return replay(existing, fingerprint)
         document = ScontrinoVending(**{
             key_: value for key_, value in movement.model_dump().items()
             if key_ != "idempotency_key"
         }).model_dump()
         if key:
             document["idempotency_key"] = key
+            document["request_fingerprint"] = fingerprint
         response = dict(document)
         try:
             await database.scontrini_vending.insert_one(document)
         except DuplicateKeyError:
-            return await database.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
+            existing = await database.scontrini_vending.find_one({"idempotency_key": key}, {"_id": 0})
+            return replay(existing, fingerprint)
         await record_audit_event(
             "CREATO", "SCONTRINO_VENDING", document["id"],
             dopo=response, idempotency_key=key,
@@ -382,10 +454,11 @@ def create_cash_movements_router(
         key = str(movement.idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "idempotency_key non valido")
+        fingerprint = movement_fingerprint(movement, pagamento=payment)
         if key:
             existing = await database.cassa.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
-                return existing
+                return replay(existing, fingerprint)
         document = MovimentoCassa(**{
             key_: value for key_, value in movement.model_dump().items()
             if key_ != "idempotency_key"
@@ -393,11 +466,13 @@ def create_cash_movements_router(
         document["pagamento"] = payment
         if key:
             document["idempotency_key"] = key
+            document["request_fingerprint"] = fingerprint
         response = dict(document)
         try:
             await database.cassa.insert_one(document)
         except DuplicateKeyError:
-            return await database.cassa.find_one({"idempotency_key": key}, {"_id": 0})
+            existing = await database.cassa.find_one({"idempotency_key": key}, {"_id": 0})
+            return replay(existing, fingerprint)
         await record_audit_event(
             "CREATO", "MOVIMENTO_CASSA", document["id"],
             dopo=response, idempotency_key=key,
