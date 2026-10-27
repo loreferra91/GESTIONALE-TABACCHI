@@ -24,6 +24,7 @@ if __package__:
     )
     from .fit_tariff import fetch_and_parse_fit_tariff_sync
     from .audit_router import create_audit_router
+    from .agent_integration_router import create_agent_integration_router
     from .auto_order_router import (
         AutoOrderConfermaIn, AutoOrderRigaIn, auto_order_snapshot_key,
         create_auto_order_router,
@@ -113,6 +114,7 @@ else:
     )
     from fit_tariff import fetch_and_parse_fit_tariff_sync
     from audit_router import create_audit_router
+    from agent_integration_router import create_agent_integration_router
     from auto_order_router import (
         AutoOrderConfermaIn, AutoOrderRigaIn, auto_order_snapshot_key,
         create_auto_order_router,
@@ -202,17 +204,46 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 
+def _is_production() -> bool:
+    return str(os.environ.get("ENVIRONMENT") or "development").strip().lower() in {"production", "prod"}
+
+
 def _validate_runtime_security() -> None:
     """In produzione le credenziali devono essere complete e CORS non può essere aperto."""
-    environment = str(os.environ.get("ENVIRONMENT") or "development").strip().lower()
-    if environment not in {"production", "prod"}:
+    if not _is_production():
         return
     missing = [name for name in ("APP_USERNAME", "APP_PASSWORD") if not os.environ.get(name)]
     if missing:
         raise RuntimeError(f"Configurazione produzione incompleta: manca {', '.join(missing)}")
     origins = [item.strip() for item in os.environ.get("CORS_ORIGINS", "").split(",") if item.strip()]
-    if "*" in origins:
-        raise RuntimeError("CORS_ORIGINS non può contenere '*' in produzione")
+    if not origins or "*" in origins:
+        raise RuntimeError("CORS_ORIGINS deve contenere solo origini esplicite in produzione")
+    agent_enabled = str(os.environ.get("AGENT_INTEGRATION_ENABLED") or "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if agent_enabled and len(os.environ.get("AGENT_INTEGRATION_TOKEN") or "") < 32:
+        raise RuntimeError("AGENT_INTEGRATION_TOKEN deve contenere almeno 32 caratteri")
+
+
+async def _verify_transaction_capability() -> Dict[str, Any]:
+    """Read Mongo topology and fail closed in production if transactions are unavailable."""
+    hello = await client.admin.command("hello")
+    topology = (
+        "sharded" if hello.get("msg") == "isdbgrid"
+        else "replica_set" if hello.get("setName")
+        else "standalone"
+    )
+    capable = bool(
+        hello.get("logicalSessionTimeoutMinutes") is not None
+        and topology in {"replica_set", "sharded"}
+    )
+    result = {"topology": topology, "transactions": capable}
+    if _is_production() and not capable:
+        raise RuntimeError(
+            "MongoDB di produzione non supporta transazioni multi-documento: "
+            f"topologia rilevata {topology}"
+        )
+    return result
 
 
 @asynccontextmanager
@@ -220,6 +251,8 @@ async def lifespan(_app: FastAPI):
     # on_start è risolto quando il lifespan viene eseguito, dopo il caricamento
     # completo del modulo.
     _validate_runtime_security()
+    transaction_capability = await _verify_transaction_capability()
+    logging.info("MongoDB transaction capability: %s", transaction_capability)
     await on_start()
     try:
         yield
@@ -240,11 +273,17 @@ async def optional_basic_auth(request: Request, call_next):
     username = os.environ.get("APP_USERNAME")
     password = os.environ.get("APP_PASSWORD")
 
-    is_health_check = request.url.path == "/api/" or (
-        request.method == "HEAD" and request.url.path == "/"
+    request_path = request.scope["path"]
+    agent_prefix = "/api/agent/v1/"
+    agent_suffix = request_path[len(agent_prefix):] if request_path.startswith(agent_prefix) else ""
+    is_agent_service = bool(agent_suffix) and all(
+        segment not in {".", ".."} for segment in agent_suffix.split("/")
+    )
+    is_health_check = (request.method == "GET" and request_path == "/api/") or (
+        request.method == "HEAD" and request_path == "/"
     )
 
-    if not username or not password or is_health_check:
+    if not username or not password or is_health_check or is_agent_service:
         request.state.authenticated_user = "operatore-locale"
         return await call_next(request)
 
@@ -401,6 +440,18 @@ async def ensure_product_ids() -> int:
     return result["modificati"]
 
 
+def _validate_required_index_results(results: List[Dict[str, Any]]) -> None:
+    blocked = [
+        f"{item.get('collection')}.{item.get('field')}"
+        for item in results if item.get("status") == "duplicates"
+    ]
+    if blocked and _is_production():
+        raise RuntimeError(
+            "Indici univoci essenziali non creati per duplicati preesistenti: "
+            + ", ".join(blocked)
+        )
+
+
 async def on_start():
     try:
         await seed_if_empty()
@@ -417,6 +468,7 @@ async def on_start():
                 await db.parametri.insert_many(missing)
         unique_index_results = await migrate_unique_business_indexes(db)
         logging.info("Business-key index migration: %s", unique_index_results)
+        _validate_required_index_results(unique_index_results)
         # Gli import fanno upsert su queste chiavi: senza indici Atlas deve
         # scandire le collezioni per ogni riga, anche quando usiamo bulk_write.
         await asyncio.gather(
@@ -432,6 +484,7 @@ async def on_start():
             db.storico_ordini.create_index("codice"),
             db.storico_ordini.create_index("batch_id"),
             db.storico_ordini.create_index("smart_venue_stato"),
+            db.storico_ordini.create_index("idempotency_key", unique=True, sparse=True),
             db.ordini_fornitore.create_index("batch_key", unique=True),
             db.ordini_fornitore_righe.create_index("batch_key"),
             db.ricezioni_merce.create_index("idempotency_key", unique=True),
@@ -464,6 +517,8 @@ async def on_start():
             db.vending_accounting_events.create_index("csv_accounting_key", unique=True, sparse=True),
             db.vending_accounting_events.create_index("data"),
             db.vending_accounting_events.create_index("source_batch_id"),
+            db.vending_operations.create_index("idempotency_key", unique=True),
+            db.vending_operations.create_index("created_at"),
             db.listino_adm.create_index("adm_codice"),
             db.listino_adm.create_index("categoria_adm"),
             db.adm_sync.create_index("created_at"),
@@ -497,6 +552,8 @@ async def on_start():
             )
     except Exception as e:
         logging.exception("seed failed: %s", e)
+        if _is_production():
+            raise
 
 
 # ------------------------- Helpers -------------------------
@@ -529,13 +586,20 @@ async def _run_transactionally(operation):
         return await operation(None)
     try:
         async with await database_client.start_session() as session:
-            async with session.start_transaction():
-                return await operation(session)
+            # Motor/PyMongo retries the whole callback for transient transaction
+            # errors and retries uncertain commits.  The write paths also carry
+            # unique idempotency keys, so a retried callback cannot duplicate a
+            # completed business operation.
+            return await session.with_transaction(operation)
     except (AttributeError, NotImplementedError):
         return await operation(None)
     except OperationFailure as exc:
         message = str(exc).lower()
         if exc.code in {20, 303} or "transaction numbers are only allowed" in message:
+            if _is_production():
+                raise RuntimeError(
+                    "MongoDB di produzione ha rifiutato una transazione multi-documento"
+                ) from exc
             return await operation(None)
         raise
 
@@ -1037,6 +1101,7 @@ vending = create_vending_router(
     param_value=_param,
     product_code_text=_product_code_text,
     session_kwargs=_session_kwargs,
+    run_transactionally=_run_transactionally,
 )
 vending_router = vending["router"]
 create_vending_column = vending["create_vending_column"]
@@ -1220,6 +1285,7 @@ cash_movements = create_cash_movements_router(
     record_audit_event=_record_audit_event,
     cap_limit=_cap,
     get_authoritative_vending_cash_snapshot=lambda: _vending_cash_accounting_snapshot(),
+    run_transactionally=_run_transactionally,
 )
 cash_movements_router = cash_movements["router"]
 _vending_cash_balance = cash_movements["vending_cash_balance"]
@@ -1346,6 +1412,7 @@ smart_venue = create_smart_venue_router(
     record_audit_event=_record_audit_event,
 )
 smart_venue_router = smart_venue["router"]
+agent_integration_router = create_agent_integration_router(get_database=lambda: db)
 _import_smart_venue = smart_venue["import_smart_venue"]
 _parse_smart_venue_bulk_text = smart_venue["parse_smart_venue_bulk_text"]
 _resolve_smart_venue_product_rows = smart_venue["resolve_smart_venue_product_rows"]
@@ -1381,6 +1448,7 @@ api.include_router(parameters_router)
 api.include_router(auto_order_router)
 api.include_router(dashboard_router)
 api.include_router(smart_venue_router)
+api.include_router(agent_integration_router)
 app.include_router(api)
 
 

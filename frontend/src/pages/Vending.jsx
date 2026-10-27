@@ -6,6 +6,7 @@ import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 import { CheckCircle, FloppyDisk, Plus, Printer } from "@phosphor-icons/react";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 const EMPTY_VENDING_FORM = {
   colonna: "",
@@ -154,8 +155,12 @@ export default function Vending() {
       toast.error("Inserisci una quantità intera maggiore di zero");
       return;
     }
+    const payload = { quantita };
+    const scope = `vending-ricarica-${v.id}`;
+    const idempotencyKey = idempotencyKeyFor(scope, payload);
     try {
-      const response = await api.post(`/vending/${v.id}/ricarica`, { quantita });
+      const response = await api.post(`/vending/${v.id}/ricarica`, { ...payload, idempotency_key: idempotencyKey });
+      clearIdempotencyKey(scope);
       toast.success(`Colonna ${v.colonna}: caricati ${response.data.quantita_caricata} pezzi`);
       setQuantitaManuali(current => {
         const next = { ...current };
@@ -202,10 +207,14 @@ export default function Vending() {
 
   const caricaTutto = async () => {
     setBulkLoading(true);
+    const righe = righeDaCaricare.map(r => ({ id: r.id, quantita: quantitaEffettiva(r) }));
+    const idempotencyKey = idempotencyKeyFor("vending-ricarica-completa", { righe });
     try {
       const response = await api.post("/vending/ricarica-completa", {
-        righe: righeDaCaricare.map(r => ({ id: r.id, quantita: quantitaEffettiva(r) })),
+        righe,
+        idempotency_key: idempotencyKey,
       });
+      clearIdempotencyKey("vending-ricarica-completa");
       toast.success(`${response.data.colonne_caricate} colonne caricate, ${response.data.pezzi_caricati} pezzi totali`);
       setQuantitaManuali({});
       setConfirmOpen(false);

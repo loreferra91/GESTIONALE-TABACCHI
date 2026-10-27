@@ -26,7 +26,7 @@ def test_manual_order_cancellation_compensates_stock_purchase_and_smart_venue(mo
         await database.smart_venue.insert_one({"id": "sv1", "codice": "P1", "smart_venue": 4})
         created = await server.add_ordine(server.OrdineIn(
             data="2026-10-19", codice="P1", descrizione="Prodotto",
-            quantita=3, prezzo=5,
+                quantita=3, prezzo=5, idempotency_key="manual-order-cancel-001",
         ))
         cancelled = await server.del_ordine(created["id"])
         repeated = await server.del_ordine(created["id"])
@@ -327,6 +327,7 @@ def test_single_receipt_creates_pending_smart_venue_movement(monkeypatch):
             descrizione="Prodotto Smart",
             quantita=2,
             prezzo=5,
+                idempotency_key="manual-order-smart-001",
         ))
         return await database.smart_venue.find_one({"codice": "P1"})
 

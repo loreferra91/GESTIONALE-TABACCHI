@@ -4,6 +4,7 @@ import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 export default function Cassa() {
   const [data, setData] = useState({ movimenti: [], saldo: 0, pagamenti: {} });
@@ -30,8 +31,10 @@ export default function Cassa() {
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
     setSaving(true);
+    const idempotencyKey = idempotencyKeyFor("movimento-cassa", form);
     try {
-      await api.post("/cassa", form);
+      await api.post("/cassa", { ...form, idempotency_key: idempotencyKey });
+      clearIdempotencyKey("movimento-cassa");
       toast.success("Movimento registrato");
       setForm({ ...form, importo: 0, descrizione: "" });
       await load();

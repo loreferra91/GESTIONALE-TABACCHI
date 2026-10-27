@@ -48,7 +48,7 @@ def test_large_exact_sum_and_numeric_serialization():
 @pytest.mark.parametrize("model,extra,field", [
     (server.VenditaIn, {"codice": "P1", "data": "2026-10-18"}, "importo"),
     (server.ProdottoIn, {"codice": "P1", "descrizione": "P"}, "prezzo"),
-    (server.OrdineIn, {"codice": "P1", "data": "2026-10-18", "quantita": 1}, "prezzo"),
+    (server.OrdineIn, {"codice": "P1", "data": "2026-10-18", "quantita": 1, "idempotency_key": "money-boundary-order"}, "prezzo"),
     (server.VersamentoIn, {"data": "2026-10-18"}, "importo"),
     (server.PrelievoVendingIn, {"data": "2026-10-18"}, "importo"),
     (server.ScontrinoVendingIn, {"data": "2026-10-18"}, "importo"),

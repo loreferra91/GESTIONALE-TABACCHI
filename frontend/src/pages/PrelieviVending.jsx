@@ -6,6 +6,7 @@ import { api, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, formatEur } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 export default function PrelieviVending() {
   const [data, setData] = useState({ movimenti: [], totale: 0, venditeVendingContanti: 0, giacenzaVending: 0, prelievoVending: 0, scontriniVending: 0 });
@@ -52,8 +53,10 @@ export default function PrelieviVending() {
 
   const save = async () => {
     if (!form.importo) return toast.error("Importo obbligatorio");
+    const idempotencyKey = idempotencyKeyFor("prelievo-vending", form);
     try {
-      await api.post("/prelievi-vending", form);
+      await api.post("/prelievi-vending", { ...form, idempotency_key: idempotencyKey });
+      clearIdempotencyKey("prelievo-vending");
       toast.success("Prelievo vending registrato");
       setForm({ ...form, importo: 0, descrizione: "" });
       load();

@@ -107,7 +107,15 @@ def fake_db(vending, prodotti, reserve=2):
     parametri = FakeListCollection([
         {"nome": "SCORTA_MINIMA_NEGOZIO_VENDING", "valore": reserve},
     ])
-    return SimpleNamespace(vending=vending, prodotti=prodotti, parametri=parametri)
+    operations = AsyncMongoMockClient()["vending_test"].vending_operations
+    return SimpleNamespace(
+        vending=vending, prodotti=prodotti, parametri=parametri,
+        vending_operations=operations,
+    )
+
+
+def restock_body(quantity, suffix="default"):
+    return {"quantita": quantity, "idempotency_key": f"restock-test-{suffix}"}
 
 
 def test_vending_proposals_respect_warehouse_availability(monkeypatch):
@@ -198,7 +206,7 @@ def test_restock_rejects_quantity_above_column_capacity(monkeypatch):
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.ricarica_vending("v1", {"quantita": 10}))
+        asyncio.run(server.ricarica_vending("v1", restock_body(10, "capacity")))
 
     assert exc.value.status_code == 422
     assert "al massimo 1" in exc.value.detail
@@ -217,7 +225,7 @@ def test_restock_fills_to_capacity_and_leaves_remaining_shop_stock(monkeypatch):
     prodotti = FakeCollection({"codice": "P1", "giacenza_negozio": 5})
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti))
 
-    result = asyncio.run(server.ricarica_vending("v1", {"quantita": 2}))
+    result = asyncio.run(server.ricarica_vending("v1", restock_body(2, "fill")))
 
     assert result["quantita_caricata"] == 2
     assert result["nuova_giacenza"] == 4
@@ -243,7 +251,7 @@ def test_restock_rejects_when_warehouse_cannot_fill_capacity(monkeypatch):
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.ricarica_vending("v1", {"quantita": 5}))
+        asyncio.run(server.ricarica_vending("v1", restock_body(5, "reserve")))
 
     assert exc.value.status_code == 409
     assert "Scorta negozio protetta" in exc.value.detail
@@ -263,7 +271,7 @@ def test_restock_rejects_quantity_that_would_consume_shop_reserve(monkeypatch):
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti, reserve=2))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.ricarica_vending("v1", {"quantita": 4}))
+        asyncio.run(server.ricarica_vending("v1", restock_body(4, "consume-reserve")))
 
     assert exc.value.status_code == 409
     assert "caricabili 3" in exc.value.detail
@@ -282,7 +290,7 @@ def test_restock_accepts_partial_manual_quantity(monkeypatch):
     prodotti = FakeCollection({"codice": "P1", "giacenza_negozio": 10})
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti))
 
-    result = asyncio.run(server.ricarica_vending("v1", {"quantita": 1}))
+    result = asyncio.run(server.ricarica_vending("v1", restock_body(1, "partial")))
 
     assert result["quantita_caricata"] == 1
     assert result["nuova_giacenza"] == 3
@@ -307,7 +315,7 @@ def test_restock_rejects_when_warehouse_is_empty(monkeypatch):
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.ricarica_vending("v1", {"quantita": 5}))
+        asyncio.run(server.ricarica_vending("v1", restock_body(5, "empty")))
 
     assert exc.value.status_code == 409
     assert vending.updates == []
@@ -317,7 +325,7 @@ def test_restock_rejects_when_warehouse_is_empty(monkeypatch):
 @pytest.mark.parametrize("quantita", [0, -1, 1.5, "1.5", "non-numerica"])
 def test_restock_rejects_non_positive_or_invalid_quantity(quantita):
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.ricarica_vending("v1", {"quantita": quantita}))
+        asyncio.run(server.ricarica_vending("v1", restock_body(quantita, f"invalid-{quantita}")))
     assert exc.value.status_code == 422
 
 
@@ -333,6 +341,7 @@ def test_complete_restock_applies_manual_and_proposed_quantities(monkeypatch):
     monkeypatch.setattr(server, "db", fake_db(vending, prodotti))
 
     result = asyncio.run(server.ricarica_vending_completa({
+        "idempotency_key": "bulk-restock-success",
         "righe": [
             {"id": "v1", "quantita": 1},
             {"id": "v2", "quantita": 4},
@@ -362,6 +371,7 @@ def test_complete_restock_validates_all_rows_before_updates(monkeypatch):
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(server.ricarica_vending_completa({
+            "idempotency_key": "bulk-restock-invalid",
             "righe": [
                 {"id": "v1", "quantita": 2},
                 {"id": "v2", "quantita": 2},
@@ -387,6 +397,7 @@ def test_complete_restock_preserves_shop_reserve(monkeypatch):
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(server.ricarica_vending_completa({
+            "idempotency_key": "bulk-restock-reserve",
             "righe": [{"id": "v1", "quantita": 4}],
         }))
 

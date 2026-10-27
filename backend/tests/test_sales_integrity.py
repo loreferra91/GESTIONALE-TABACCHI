@@ -97,6 +97,35 @@ def test_pos_batch_is_atomic_and_idempotent(monkeypatch):
     assert cash == 1
 
 
+def test_pos_batch_rejects_idempotency_key_reuse_with_different_payload(monkeypatch):
+    database = AsyncMongoMockClient()["pos_batch_fingerprint"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "id": "p1", "codice": "P1", "descrizione": "Uno", "prezzo": 2,
+            "giacenza_negozio": 5, "venduti_negozio": 0,
+        })
+        first = server.CassaRapidaIn(
+            data="2026-10-18T16:00:00Z", idempotency_key="pos-fingerprint-001",
+            righe=[{"codice": "P1", "quantita": 1, "prezzo": 2}],
+        )
+        changed = server.CassaRapidaIn(
+            data="2026-10-18T16:00:00Z", idempotency_key="pos-fingerprint-001",
+            righe=[{"codice": "P1", "quantita": 2, "prezzo": 2}],
+        )
+        await server.vendita_cassa_rapida(first)
+        with pytest.raises(HTTPException) as caught:
+            await server.vendita_cassa_rapida(changed)
+        product = await database.prodotti.find_one({"codice": "P1"}, {"_id": 0})
+        return caught.value, product, await database.vendite.count_documents({})
+
+    error, product, count = asyncio.run(scenario())
+    assert error.status_code == 409
+    assert product["giacenza_negozio"] == 4
+    assert count == 1
+
+
 def test_pos_electronic_balance_and_cancellation_are_consistent(monkeypatch):
     database = AsyncMongoMockClient()["pos_cancel"]
     monkeypatch.setattr(server, "db", database)

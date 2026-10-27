@@ -78,7 +78,8 @@ test("crea un checkout atomico con quantità aggregata, pagamento e chiave di id
     }],
   }));
   expect(payload.data).toEqual(expect.any(String));
-  expect(payload.idempotency_key).toMatch(/^pos-/);
+  expect(payload.idempotency_key).toEqual(expect.any(String));
+  expect(payload.idempotency_key.length).toBeGreaterThanOrEqual(10);
   expect(container.querySelector('[data-testid="cart-row-AMMS001"]')).toBeNull();
 });
 

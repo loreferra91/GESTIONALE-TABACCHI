@@ -1,7 +1,9 @@
 """Vending column catalogue, availability proposals, and manual corrections."""
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import io
+import json
 import re
 import uuid
 from typing import Any, Dict
@@ -9,6 +11,16 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from pymongo.errors import DuplicateKeyError
+
+
+class _VendingOperationCollision(Exception):
+    """Duplicate idempotency key detected after transaction abort."""
+
+
+def _operation_fingerprint(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class VendingColonna(BaseModel):
@@ -37,8 +49,20 @@ def create_vending_router(
     param_value,
     product_code_text,
     session_kwargs,
+    run_transactionally=None,
 ):
     router = APIRouter()
+
+    if run_transactionally is None:
+        async def run_transactionally(operation):
+            return await operation(None)
+
+    def replay_operation(existing, fingerprint):
+        if existing.get("request_fingerprint") != fingerprint:
+            raise HTTPException(409, "Chiave idempotente già usata con dati differenti")
+        if existing.get("status") != "completed" or not existing.get("response"):
+            raise HTTPException(409, "Operazione già in elaborazione")
+        return {**existing["response"], "gia_registrato": True}
 
     @router.post("/vending")
     async def create_vending_column(payload: VendingCreateIn):
@@ -347,6 +371,9 @@ def create_vending_router(
 
     @router.post("/vending/{column_id}/ricarica")
     async def ricarica_vending(column_id: str, body: Dict[str, Any]):
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not 10 <= len(idempotency_key) <= 160:
+            raise HTTPException(422, "idempotency_key non valida")
         raw_quantity = body.get("quantita", 0)
         try:
             quantity = int(raw_quantity)
@@ -364,100 +391,129 @@ def create_vending_router(
             raise HTTPException(422, "quantita deve essere maggiore di zero")
 
         database = get_database()
-        column, params = await asyncio.gather(
-            database.vending.find_one({"id": column_id}), get_params()
+        fingerprint = _operation_fingerprint({
+            "tipo": "RICARICA_SINGOLA", "column_id": column_id,
+            "quantita": quantity,
+        })
+        existing = await database.vending_operations.find_one(
+            {"idempotency_key": idempotency_key}, {"_id": 0}
         )
-        if not column:
-            raise HTTPException(404, "not found")
-        reserve = max(
-            0,
-            int(param_value(params, "SCORTA_MINIMA_NEGOZIO_VENDING", 2)),
-        )
-        stock = int(column.get("giacenza", 0) or 0)
-        capacity = int(column.get("capacita_max", 0) or 0)
-        code = column.get("codice")
-        product = (
-            await database.prodotti.find_one({"codice": code}) if code else None
-        )
-        available = max(
-            0, int((product or {}).get("giacenza_negozio", 0) or 0)
-        )
-        needed = max(0, capacity - stock)
-        if needed <= 0:
-            raise HTTPException(409, "Colonna già alla capacità massima")
-        if quantity > needed:
-            raise HTTPException(
-                422,
-                f"La quantità supera la capacità della colonna: puoi caricare al massimo {needed} pezzi",
-            )
-        loadable = max(0, available - reserve)
-        if loadable <= 0:
-            raise HTTPException(
-                409,
-                f"Scorta negozio protetta: devono restare almeno {reserve} pezzi",
-            )
-        if quantity > loadable:
-            raise HTTPException(
-                409,
-                f"Scorta negozio protetta: richiesti {quantity} pezzi, caricabili {loadable} "
-                f"(disponibili {available}, riserva {reserve})",
-            )
+        if existing:
+            return replay_operation(existing, fingerprint)
 
-        new_stock = stock + quantity
-        updated_at = datetime.now(timezone.utc).isoformat()
-        vending_result = await database.vending.update_one(
-            {"id": column_id, "giacenza": column.get("giacenza", 0)},
-            {
-                "$inc": {"giacenza": quantity},
-                "$set": {
+        async def operation(session):
+            kwargs = session_kwargs(session)
+            try:
+                await database.vending_operations.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "idempotency_key": idempotency_key,
+                    "request_fingerprint": fingerprint,
+                    "status": "processing",
+                    "operation": "RICARICA_SINGOLA",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }, **kwargs)
+            except DuplicateKeyError as exc:
+                raise _VendingOperationCollision from exc
+
+            column = await database.vending.find_one({"id": column_id}, **kwargs)
+            params = await get_params()
+            if not column:
+                raise HTTPException(404, "not found")
+            reserve = max(0, int(param_value(params, "SCORTA_MINIMA_NEGOZIO_VENDING", 2)))
+            stock = int(column.get("giacenza", 0) or 0)
+            capacity = int(column.get("capacita_max", 0) or 0)
+            code = column.get("codice")
+            product = await database.prodotti.find_one({"codice": code}, **kwargs) if code else None
+            available = max(0, int((product or {}).get("giacenza_negozio", 0) or 0))
+            needed = max(0, capacity - stock)
+            if needed <= 0:
+                raise HTTPException(409, "Colonna già alla capacità massima")
+            if quantity > needed:
+                raise HTTPException(422, f"La quantità supera la capacità della colonna: puoi caricare al massimo {needed} pezzi")
+            loadable = max(0, available - reserve)
+            if quantity > loadable:
+                raise HTTPException(409, f"Scorta negozio protetta: richiesti {quantity} pezzi, caricabili {loadable} (disponibili {available}, riserva {reserve})")
+
+            new_stock = stock + quantity
+            updated_at = datetime.now(timezone.utc).isoformat()
+            vending_result = await database.vending.update_one(
+                {"id": column_id, "giacenza": column.get("giacenza", 0)},
+                {"$inc": {"giacenza": quantity}, "$set": {
                     "giacenza_aggiornata_il": updated_at,
                     "giacenza_sorgente": "RICARICA",
-                },
-            },
-        )
-        if vending_result.matched_count == 0:
-            raise HTTPException(
-                409,
-                "La colonna è cambiata nel frattempo: aggiorna la pagina e riprova",
+                }}, **kwargs,
             )
+            if vending_result.matched_count == 0:
+                raise HTTPException(409, "La colonna è cambiata nel frattempo: aggiorna la pagina e riprova")
+            try:
+                product_result = await database.prodotti.update_one(
+                    {"codice": code, "giacenza_negozio": {"$gte": quantity + reserve}},
+                    {"$inc": {"giacenza_negozio": -quantity, "giacenza_vending": quantity}},
+                    **kwargs,
+                )
+                if product_result.matched_count == 0:
+                    raise RuntimeError("la disponibilità negozio è cambiata")
+            except Exception:
+                if session is None:
+                    await database.vending.update_one(
+                        {"id": column_id, "giacenza": new_stock},
+                        {"$inc": {"giacenza": -quantity}, "$set": {
+                            "giacenza_aggiornata_il": column.get("giacenza_aggiornata_il"),
+                            "giacenza_sorgente": column.get("giacenza_sorgente"),
+                        }},
+                    )
+                raise
+            response = {
+                "ok": True, "colonna": column["colonna"],
+                "nuova_giacenza": new_stock, "quantita_caricata": quantity,
+                "giacenza_magazzino_residua": available - quantity,
+                "scorta_minima_negozio": reserve, "gia_registrato": False,
+            }
+            try:
+                completed = await database.vending_operations.update_one(
+                    {"idempotency_key": idempotency_key, "status": "processing"},
+                    {"$set": {"status": "completed", "response": response,
+                              "completed_at": datetime.now(timezone.utc).isoformat()}},
+                    **kwargs,
+                )
+                if completed.matched_count != 1:
+                    raise RuntimeError("stato idempotente della ricarica cambiato")
+            except Exception:
+                if session is None:
+                    await database.prodotti.update_one(
+                        {"codice": code},
+                        {"$inc": {"giacenza_negozio": quantity, "giacenza_vending": -quantity}},
+                    )
+                    await database.vending.update_one(
+                        {"id": column_id, "giacenza": new_stock},
+                        {"$inc": {"giacenza": -quantity}, "$set": {
+                            "giacenza_aggiornata_il": column.get("giacenza_aggiornata_il"),
+                            "giacenza_sorgente": column.get("giacenza_sorgente"),
+                        }},
+                    )
+                raise
+            return response
+
         try:
-            product_result = await database.prodotti.update_one(
-                {
-                    "codice": code,
-                    "giacenza_negozio": {"$gte": quantity + reserve},
-                },
-                {"$inc": {
-                    "giacenza_negozio": -quantity,
-                    "giacenza_vending": quantity,
-                }},
+            return await run_transactionally(operation)
+        except _VendingOperationCollision:
+            existing = await database.vending_operations.find_one(
+                {"idempotency_key": idempotency_key}, {"_id": 0}
             )
-            if product_result.matched_count == 0:
-                raise RuntimeError("la disponibilità negozio è cambiata")
-        except Exception as exc:
-            await database.vending.update_one(
-                {"id": column_id, "giacenza": new_stock},
-                {
-                    "$inc": {"giacenza": -quantity},
-                    "$set": {
-                        "giacenza_aggiornata_il": column.get(
-                            "giacenza_aggiornata_il"
-                        ),
-                        "giacenza_sorgente": column.get("giacenza_sorgente"),
-                    },
-                },
-            )
-            raise HTTPException(409, f"Ricarica annullata: {exc}")
-        return {
-            "ok": True,
-            "colonna": column["colonna"],
-            "nuova_giacenza": new_stock,
-            "quantita_caricata": quantity,
-            "giacenza_magazzino_residua": available - quantity,
-            "scorta_minima_negozio": reserve,
-        }
+            if existing:
+                return replay_operation(existing, fingerprint)
+            raise HTTPException(409, "Ricarica già in elaborazione")
+        except Exception:
+            await database.vending_operations.delete_one({
+                "idempotency_key": idempotency_key, "status": "processing",
+            })
+            raise
 
     @router.post("/vending/ricarica-completa")
     async def ricarica_vending_completa(body: Dict[str, Any]):
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not 10 <= len(idempotency_key) <= 160:
+            raise HTTPException(422, "idempotency_key non valida")
         input_rows = body.get("righe")
         if not isinstance(input_rows, list) or not input_rows:
             raise HTTPException(422, "Nessuna riga da caricare")
@@ -506,6 +562,18 @@ def create_vending_router(
             quantities_by_id[column_id] = quantity
 
         database = get_database()
+        canonical_rows = [
+            {"id": column_id, "quantita": quantities_by_id[column_id]}
+            for column_id in sorted(quantities_by_id)
+        ]
+        fingerprint = _operation_fingerprint({
+            "tipo": "RICARICA_COMPLETA", "righe": canonical_rows,
+        })
+        existing = await database.vending_operations.find_one(
+            {"idempotency_key": idempotency_key}, {"_id": 0}
+        )
+        if existing:
+            return replay_operation(existing, fingerprint)
         ids = list(quantities_by_id)
         columns, params = await asyncio.gather(
             database.vending.find({"id": {"$in": ids}}).to_list(500),
@@ -574,84 +642,114 @@ def create_vending_router(
                     f"caricabili {loadable} (disponibili {available}, riserva {reserve})",
                 )
 
-        applied_columns = []
-        applied_products = []
-        updated_at = datetime.now(timezone.utc).isoformat()
-        try:
-            for item in prepared:
-                original = columns_by_id[item["id"]]
-                item["giacenza_aggiornata_il"] = original.get(
-                    "giacenza_aggiornata_il"
-                )
-                item["giacenza_sorgente"] = original.get("giacenza_sorgente")
-                result = await database.vending.update_one(
-                    {"id": item["id"], "giacenza": item["giacenza"]},
-                    {
-                        "$inc": {"giacenza": item["quantita"]},
-                        "$set": {
+        async def operation(session):
+            kwargs = session_kwargs(session)
+            try:
+                await database.vending_operations.insert_one({
+                    "id": str(uuid.uuid4()), "idempotency_key": idempotency_key,
+                    "request_fingerprint": fingerprint, "status": "processing",
+                    "operation": "RICARICA_COMPLETA",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }, **kwargs)
+            except DuplicateKeyError as exc:
+                raise _VendingOperationCollision from exc
+
+            applied_columns = []
+            applied_products = []
+            updated_at = datetime.now(timezone.utc).isoformat()
+            try:
+                for item in prepared:
+                    original = columns_by_id[item["id"]]
+                    item["giacenza_aggiornata_il"] = original.get("giacenza_aggiornata_il")
+                    item["giacenza_sorgente"] = original.get("giacenza_sorgente")
+                    result = await database.vending.update_one(
+                        {"id": item["id"], "giacenza": item["giacenza"]},
+                        {"$inc": {"giacenza": item["quantita"]}, "$set": {
                             "giacenza_aggiornata_il": updated_at,
                             "giacenza_sorgente": "RICARICA_COMPLETA",
-                        },
-                    },
-                )
-                if result.matched_count == 0:
-                    raise RuntimeError(
-                        f"La colonna {item['colonna']} è cambiata durante il caricamento"
+                        }}, **kwargs,
                     )
-                applied_columns.append(item)
+                    if result.matched_count == 0:
+                        raise RuntimeError(f"La colonna {item['colonna']} è cambiata durante il caricamento")
+                    applied_columns.append(item)
 
-            for code, quantity in requested_by_code.items():
-                result = await database.prodotti.update_one(
-                    {
-                        "codice": code,
-                        "giacenza_negozio": {"$gte": quantity + reserve},
-                    },
-                    {"$inc": {
-                        "giacenza_negozio": -quantity,
-                        "giacenza_vending": quantity,
-                    }},
-                )
-                if result.matched_count == 0:
-                    raise RuntimeError(
-                        f"La disponibilità di {code} è cambiata durante il caricamento"
+                for code, quantity in requested_by_code.items():
+                    result = await database.prodotti.update_one(
+                        {"codice": code, "giacenza_negozio": {"$gte": quantity + reserve}},
+                        {"$inc": {"giacenza_negozio": -quantity, "giacenza_vending": quantity}},
+                        **kwargs,
                     )
-                applied_products.append((code, quantity))
-        except Exception as exc:
-            for code, quantity in reversed(applied_products):
-                await database.prodotti.update_one(
-                    {"codice": code},
-                    {"$inc": {
-                        "giacenza_negozio": quantity,
-                        "giacenza_vending": -quantity,
-                    }},
-                )
-            for item in reversed(applied_columns):
-                await database.vending.update_one(
-                    {"id": item["id"]},
-                    {
-                        "$inc": {"giacenza": -item["quantita"]},
-                        "$set": {
-                            "giacenza_aggiornata_il": item.get(
-                                "giacenza_aggiornata_il"
-                            ),
-                            "giacenza_sorgente": item.get("giacenza_sorgente"),
-                        },
-                    },
-                )
-            raise HTTPException(409, f"Caricamento annullato: {exc}")
+                    if result.matched_count == 0:
+                        raise RuntimeError(f"La disponibilità di {code} è cambiata durante il caricamento")
+                    applied_products.append((code, quantity))
+            except Exception as exc:
+                if session is None:
+                    for code, quantity in reversed(applied_products):
+                        await database.prodotti.update_one(
+                            {"codice": code}, {"$inc": {
+                                "giacenza_negozio": quantity, "giacenza_vending": -quantity,
+                            }},
+                        )
+                    for item in reversed(applied_columns):
+                        await database.vending.update_one(
+                            {"id": item["id"]}, {"$inc": {"giacenza": -item["quantita"]}, "$set": {
+                                "giacenza_aggiornata_il": item.get("giacenza_aggiornata_il"),
+                                "giacenza_sorgente": item.get("giacenza_sorgente"),
+                            }},
+                        )
+                raise HTTPException(409, f"Caricamento annullato: {exc}")
 
-        return {
-            "ok": True,
-            "colonne_caricate": len(prepared),
-            "pezzi_caricati": sum(item["quantita"] for item in prepared),
-            "scorta_minima_negozio": reserve,
-            "righe": [{
-                "id": item["id"],
-                "colonna": item["colonna"],
-                "quantita_caricata": item["quantita"],
-                "nuova_giacenza": item["giacenza"] + item["quantita"],
-            } for item in prepared],
-        }
+            response = {
+                "ok": True, "colonne_caricate": len(prepared),
+                "pezzi_caricati": sum(item["quantita"] for item in prepared),
+                "scorta_minima_negozio": reserve, "gia_registrato": False,
+                "righe": [{
+                    "id": item["id"], "colonna": item["colonna"],
+                    "quantita_caricata": item["quantita"],
+                    "nuova_giacenza": item["giacenza"] + item["quantita"],
+                } for item in prepared],
+            }
+            try:
+                completed = await database.vending_operations.update_one(
+                    {"idempotency_key": idempotency_key, "status": "processing"},
+                    {"$set": {"status": "completed", "response": response,
+                              "completed_at": datetime.now(timezone.utc).isoformat()}},
+                    **kwargs,
+                )
+                if completed.matched_count != 1:
+                    raise RuntimeError("stato idempotente del caricamento cambiato")
+            except Exception as exc:
+                if session is None:
+                    for code, quantity in reversed(applied_products):
+                        await database.prodotti.update_one(
+                            {"codice": code}, {"$inc": {
+                                "giacenza_negozio": quantity, "giacenza_vending": -quantity,
+                            }},
+                        )
+                    for item in reversed(applied_columns):
+                        await database.vending.update_one(
+                            {"id": item["id"]}, {"$inc": {"giacenza": -item["quantita"]}, "$set": {
+                                "giacenza_aggiornata_il": item.get("giacenza_aggiornata_il"),
+                                "giacenza_sorgente": item.get("giacenza_sorgente"),
+                            }},
+                        )
+                raise HTTPException(409, f"Caricamento annullato: {exc}")
+            return response
+
+        try:
+            return await run_transactionally(operation)
+        except _VendingOperationCollision:
+            existing = await database.vending_operations.find_one(
+                {"idempotency_key": idempotency_key}, {"_id": 0}
+            )
+            if existing:
+                return replay_operation(existing, fingerprint)
+            raise HTTPException(409, "Caricamento già in elaborazione")
+        except Exception:
+            await database.vending_operations.delete_one({
+                "idempotency_key": idempotency_key, "status": "processing",
+            })
+            raise
 
     @router.get("/vending/ricarica-pdf")
     async def vending_ricarica_pdf():

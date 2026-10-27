@@ -2,15 +2,22 @@ import asyncio
 import io
 import os
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from mongomock_motor import AsyncMongoMockClient
+from pymongo.errors import DuplicateKeyError
 from starlette.datastructures import UploadFile
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 from backend import server
+
+
+async def _async_value(value):
+    return value
 
 
 def fresh_db(monkeypatch):
@@ -689,6 +696,128 @@ def test_withdrawal_idempotency_does_not_debit_vending_cash_twice(monkeypatch):
     assert first["id"] == second["id"]
     assert balance == 75
     assert movements == 1
+
+def test_transaction_duplicate_key_reads_idempotent_document_after_abort(monkeypatch):
+    prelievi = SimpleNamespace()
+    state = SimpleNamespace()
+    prelievi.find_one = AsyncMock()
+    existing = {"id": "already-there", "idempotency_key": "collision-key-001", "importo": 25}
+
+    async def duplicate_with_same_fingerprint(document, **_kwargs):
+        existing["request_fingerprint"] = document["request_fingerprint"]
+        raise DuplicateKeyError("duplicate")
+
+    prelievi.insert_one = AsyncMock(side_effect=duplicate_with_same_fingerprint)
+    state.find_one = AsyncMock(side_effect=[None, {"id": "saldo", "giacenza": 100}, {"id": "saldo", "giacenza": 100}])
+    state.update_one = AsyncMock()
+    prelievi.find_one.side_effect = [None, existing]
+    audit = AsyncMock()
+    transaction_sessions = []
+
+    async def run_transactionally(operation):
+        session = object()
+        transaction_sessions.append(session)
+        return await operation(session)
+
+    database = SimpleNamespace(prelievi_vending=prelievi, cassa_vending_stato=state)
+    monkeypatch.setattr(server, "db", database)
+    from backend.cash_movements_router import create_cash_movements_router
+    routes = create_cash_movements_router(
+        get_database=lambda: database,
+        record_audit_event=audit,
+        cap_limit=lambda: 0,
+        get_authoritative_vending_cash_snapshot=lambda: _async_value({"giacenza": 100}),
+        run_transactionally=run_transactionally,
+    )
+
+    result = asyncio.run(routes["add_prelievo_vending"](server.PrelievoVendingIn(
+        data="2026-10-04", importo=25, descrizione="Test",
+        idempotency_key="collision-key-001",
+    )))
+
+    assert result == {**existing, "gia_registrato": True}
+    assert transaction_sessions
+    assert audit.await_count == 0
+    assert all(call.kwargs.get("session") is None for call in prelievi.find_one.await_args_list[-1:])
+
+def test_transaction_non_duplicate_error_propagates_without_external_read(monkeypatch):
+    prelievi = SimpleNamespace()
+    state = SimpleNamespace()
+    prelievi.find_one = AsyncMock(return_value=None)
+    prelievi.insert_one = AsyncMock(side_effect=RuntimeError("insert failed"))
+    state.find_one = AsyncMock(side_effect=[None, {"id": "saldo", "giacenza": 100}, {"id": "saldo", "giacenza": 100}])
+    state.update_one = AsyncMock()
+    audit = AsyncMock()
+
+    async def run_transactionally(operation):
+        return await operation(object())
+
+    database = SimpleNamespace(prelievi_vending=prelievi, cassa_vending_stato=state)
+    from backend.cash_movements_router import create_cash_movements_router
+    routes = create_cash_movements_router(
+        get_database=lambda: database,
+        record_audit_event=audit,
+        cap_limit=lambda: 0,
+        get_authoritative_vending_cash_snapshot=lambda: _async_value({"giacenza": 100}),
+        run_transactionally=run_transactionally,
+    )
+
+    with pytest.raises(RuntimeError, match="insert failed"):
+        asyncio.run(routes["add_prelievo_vending"](server.PrelievoVendingIn(
+            data="2026-10-04", importo=25, descrizione="Test",
+            idempotency_key="runtime-error-key-001",
+        )))
+
+    assert prelievi.find_one.await_count == 1
+    assert prelievi.find_one.await_args.kwargs.get("session") is not None
+    assert audit.await_count == 0
+
+
+def test_withdrawal_adjustment_error_compensates_insert(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 100,
+        })
+        collection_type = type(database.cassa_vending_stato)
+
+        async def fail_adjustment(*args, **kwargs):
+            raise RuntimeError("adjustment failed")
+
+        monkeypatch.setattr(collection_type, "update_one", fail_adjustment)
+        with pytest.raises(RuntimeError, match="adjustment failed"):
+            await server.add_prelievo_vending(server.PrelievoVendingIn(
+                data="2026-10-04", importo=25, descrizione="Test",
+                idempotency_key="withdrawal-adjustment-error-001",
+            ))
+        return await database.prelievi_vending.count_documents({})
+
+    movements = asyncio.run(scenario())
+    assert movements == 0
+
+
+def test_withdrawal_delete_error_restores_original_document(monkeypatch):
+    database = fresh_db(monkeypatch)
+    original = {"id": "withdrawal-to-restore", "data": "2026-10-04", "importo": 25, "descrizione": "Test"}
+
+    async def scenario():
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 75,
+        })
+        await database.prelievi_vending.insert_one(dict(original))
+        collection_type = type(database.cassa_vending_stato)
+
+        async def fail_adjustment(*args, **kwargs):
+            raise RuntimeError("adjustment failed")
+
+        monkeypatch.setattr(collection_type, "update_one", fail_adjustment)
+        with pytest.raises(RuntimeError, match="adjustment failed"):
+            await server.del_prelievo_vending(original["id"])
+        return await database.prelievi_vending.find_one({"id": original["id"]}, {"_id": 0})
+
+    restored = asyncio.run(scenario())
+    assert restored == original
 
 
 def test_updating_opening_cash_adjusts_current_balance_by_the_delta(monkeypatch):

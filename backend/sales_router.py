@@ -1,6 +1,8 @@
 import re
 import unicodedata
 import uuid
+import hashlib
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
@@ -54,6 +56,11 @@ class CassaRapidaIn(BaseModel):
     pagamento: str = "CONTANTI"
     righe: List[Dict[str, Any]]
     idempotency_key: Optional[str] = None
+
+
+def _request_fingerprint(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 BULK_CATEGORY_SUMMARY_ROWS = {
@@ -465,13 +472,6 @@ def create_sales_router(
         pagamento = str(body.pagamento or "CONTANTI").strip().upper()
         if not body.righe:
             raise HTTPException(422, "Il carrello è vuoto")
-        if key:
-            existing = await db.cassa_rapida_batches.find_one(
-                {"idempotency_key": key}, {"_id": 0}
-            )
-            if existing:
-                return existing
-
         batch_id = str(uuid.uuid4())
         prepared = []
         total = Decimal(0)
@@ -510,6 +510,28 @@ def create_sales_router(
                 raise HTTPException(422, f"Riga {index + 1}: {exc}") from exc
 
         total_float = normalize_money(total)
+        fingerprint = _request_fingerprint({
+            "data": body.data,
+            "pagamento": pagamento,
+            "righe": [{
+                "codice": row["codice"],
+                "quantita": row["quantita"],
+                "importo": row["importo"],
+            } for row in prepared],
+        })
+
+        def replay(existing):
+            if existing.get("request_fingerprint") != fingerprint:
+                raise HTTPException(409, "Chiave idempotente già usata con dati differenti")
+            return existing
+
+        if key:
+            existing = await db.cassa_rapida_batches.find_one(
+                {"idempotency_key": key}, {"_id": 0}
+            )
+            if existing:
+                return replay(existing)
+
         created_at = datetime.now(timezone.utc).isoformat()
         batch = {
             "id": batch_id,
@@ -519,6 +541,7 @@ def create_sales_router(
             "totale": total_float,
             "pezzi": sum(int(row["quantita"]) for row in prepared),
             "idempotency_key": key,
+            "request_fingerprint": fingerprint if key else None,
             "status": "active",
         }
         cash_entry = cash_movement_model(
@@ -539,7 +562,7 @@ def create_sales_router(
                     {"idempotency_key": key}, {"_id": 0}, **kwargs
                 )
                 if existing:
-                    return existing
+                    return replay(existing)
             changed = []
             try:
                 for sale in prepared:
@@ -583,7 +606,7 @@ def create_sales_router(
                     {"idempotency_key": key}, {"_id": 0}
                 )
                 if existing:
-                    return existing
+                    return replay(existing)
             raise
 
     @router.post("/vendite/cassa-rapida/{batch_id}/annulla")
