@@ -1,7 +1,14 @@
 # Security, reliability and OpenClaw report
 
 Date: 2026-10-27
-Status: implementation complete in an isolated worktree; **not certified for production**.
+Status: application hardening merged and deployed; OpenClaw integration remains disabled pending isolated activation checks.
+
+## Current release status
+
+- GitHub PR #4 was merged as `b707914d3b5fd41084e2971e43a800f89188966e` and the corresponding Render deployment completed successfully.
+- Read-only live smoke checks passed; production duplicate preflights were zero and an internal backup was prepared.
+- The historical baseline, test counts, and pre-deployment statements below describe the evidence available at the original review milestone. Later status is explicitly recorded in sections F and J.
+- The current follow-up hardening is being prepared in a separate worktree and is not yet merged or deployed.
 
 ## A. Executive summary
 
@@ -66,12 +73,15 @@ Production multi-document writes now depend on verified transaction capability a
 
 Development/mocked standalone Mongo uses compensating writes. These paths are regression-tested but cannot guarantee atomicity after process death, network partition, or failure of the compensation itself. That limitation is intentionally not presented as production assurance.
 
-## F. OpenClaw
+## F. OpenClaw (updated after deployment)
 
 - Installed application: `/Applications/OpenClaw.app`; CLI `OpenClaw 2026.10.7 (157d8c2)`.
 - Gateway: LaunchAgent running on loopback `ws://127.0.0.1:18789`, token authentication reported, Tailscale off, no channels configured, telemetry and host desktop disabled.
-- The CLI configuration fails current-schema validation on several legacy/current fields. As a result, deep status, plugin, skill, agent and deep-security inventories could not be completed. Gateway health is reachable, but the CLI lacks a valid read-scope health credential.
-- No config repair, plugin install, permission change, Gateway exposure or automation was performed.
+- Current configuration validation passes. The Gateway and event loop are healthy; the deep diagnostic probe still lacks `operator.read`.
+- Deep audit completed and reports one critical finding in an unrelated executable onboarding skill under the `main` workspace, plus global policy/plugin warnings documented in `docs/OPENCLAW_INTEGRATION.md`.
+- A backed-up configuration change created `gestionale-supervisor` with zero skills, a minimal profile, Gateway/elevated/sub-agent/cross-agent restrictions, no routing binding, and a dedicated fail-closed workspace. OpenClaw.app shows the agent.
+- A locally built, version-pinned plugin adds only the optional `gestionale_read` tool. Six plugin tests, package validation, runtime surface inspection, and a real no-credential fail-closed agent turn passed. No generic HTTP/browser/shell tool was granted.
+- No Gateway exposure or automation was added, and no production service token or integration flag was configured.
 - Implemented API: disabled by default, read-only `GET /api/agent/v1/{status,inventory,vending,orders}` with filtered schemas and explicit unauthorized actions.
 - Proposed `GESTIONALE SUPERVISOR`: deny-first, no shell/filesystem/process/Gateway/agent-spawn powers. Proposal and Approved Actions profiles are design-only; there are no mutation endpoints.
 - Full architecture, prompt-injection boundary and activation prerequisites: `docs/OPENCLAW_INTEGRATION.md`.
@@ -101,9 +111,9 @@ Development/mocked standalone Mongo uses compensating writes. These paths are re
 ### NOT VERIFIED
 
 - Real MongoDB replica-set commit, rollback, write-conflict, network-error and crash tests (no local daemon/container runtime was available).
-- Render environment, host allowlist, deployment, runtime smoke checks and production Mongo topology.
+- A staging deployment and real replica-set fault injection remain unverified. Production deployment and read-only runtime smoke checks completed successfully.
 - Production/staging backup restoration.
-- OpenClaw deep audit and actual Supervisor connectivity while its local config remains invalid.
+- Actual authenticated Supervisor-to-Render connectivity; the narrow tool exists and is installed, but intentionally has no URL/credential while activation remains unapproved.
 - Multi-instance distributed rate limiting.
 
 ## H. Residual risks
@@ -117,10 +127,10 @@ Development/mocked standalone Mongo uses compensating writes. These paths are re
 
 ### Infrastructure
 
-- Production Mongo transaction support and duplicate-free index preconditions are unknown until staging/production-safe checks run.
+- Production duplicate-free index preconditions passed the executed audit. Real fault-injection evidence remains outstanding.
 - Agent rate limiting is in-process; horizontal scaling requires a shared limiter.
 - Trusted Host enforcement needs the authoritative Render host list.
-- OpenClaw configuration is invalid and should be backed up/repaired only with explicit approval.
+- Global OpenClaw cross-agent defaults, plugin allowlisting/pinning, and the unrelated `main` onboarding skill remain broader-risk items; the dedicated Supervisor is isolated from them by its own zero-skill/minimal policy.
 
 ### Missing verification
 
@@ -132,6 +142,6 @@ OpenCode was actually executed with the local read-only review skill. It reviewe
 
 Review target: branch `codex/security-reliability-openclaw`, compared with baseline `03ae497e56335666e6d5ec3f820d494a7f576f7f`. OpenCode reviewed the working diff before the final local commit; no push or merge was performed.
 
-## J. Deployment
+## J. Deployment (updated)
 
-No deployment was performed. The controlled sequence, backup/restore requirements, rollback strategy, post-deploy checks and stop conditions are in `docs/DEPLOYMENT_PLAN.md`. Release remains blocked until real replica-set/staging verification, duplicate/index preflight, backup restoration evidence, and explicit human authorization.
+PR #4 was merged and deployed to Render at commit `b707914d3b5fd41084e2971e43a800f89188966e`; deployment and read-only smoke checks succeeded. The OpenClaw integration stayed disabled. Remaining release-assurance work includes staging/real replica-set fault injection and a verified restore drill. The follow-up exact-route/cache-control hardening in the current worktree requires its own review and deployment before any Supervisor activation.

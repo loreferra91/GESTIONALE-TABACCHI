@@ -29,3 +29,16 @@ The Mongo wrapper now uses the driver's `with_transaction` helper, which retries
 - Required unique-index creation against a sanitized production-like dataset.
 - Compensation failure telemetry in non-production standalone mode.
 - Eventual migration away from the legacy Create React App stack; the immediate SVGO advisories are resolved with the tested @svgr 8/SVGO 3 constraint.
+
+## Post-deployment hardening review
+
+OpenCode V2 was run a second time, read-only, against merge commit `b707914d3b5fd41084e2971e43a800f89188966e` and the OpenClaw integration surface. Codex independently verified the findings against the live local OpenClaw state.
+
+- Rejected as stale: OpenCode repeated the earlier claims that the OpenClaw configuration was invalid and the deep audit unavailable. Direct 2026.10.7 CLI checks prove configuration validation succeeds and the deep audit runs.
+- Confirmed and fixed: the Basic Auth exemption matched future `/api/agent/v1/*` paths instead of an exact endpoint allowlist. It now permits only `GET` on the four documented paths; unknown, case/double-slash/trailing-slash variants and non-GET methods have regression coverage.
+- Confirmed and fixed: agent responses now declare `Cache-Control: no-store`, and successful service authentication produces a credential-free audit log entry.
+- Confirmed external hardening gap: global OpenClaw policy remains broader than the Supervisor requires. A separate Supervisor was therefore created with zero skills and a deny-first minimal policy instead of weakening or repurposing the existing agents.
+- Deferred intentionally: no generic HTTP/browser/shell mechanism and no service credential were granted. Activation waits for a purpose-built four-route tool and isolated end-to-end verification.
+- Final follow-up review found no confirmed blocking regression. Its requested middleware/header checks were then covered empirically across 401, 404, 429, 503, and 504 responses plus successful reads.
+
+The final independent pass reviewed every source/test/manifest/package file in the version-pinned `openclaw/gestionale-supervisor-plugin` plus the backend exemption. Its verdict was **GO** with no blocker. It confirmed fixed HTTPS route construction, redirect refusal, credential non-disclosure, bounded timeout/response handling, envelope checks, matching optional-tool metadata, and exact GET-only Basic Auth exemption. Non-blocking gaps were limited to extra-field tolerance and additional slow-body/abort coverage; bearer enforcement and failure-path behavior are independently covered by the backend suite and the live fail-closed OpenClaw turn.

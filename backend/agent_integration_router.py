@@ -3,6 +3,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 import asyncio
 import hashlib
+import logging
 import os
 import secrets
 import time
@@ -84,6 +85,11 @@ def create_agent_integration_router(*, get_database):
             if len(bucket) >= limit:
                 raise HTTPException(429, "Rate limit exceeded", headers={"Retry-After": "60"})
             bucket.append(now)
+        logging.info(
+            "Agent integration request authorized: method=%s path=%s",
+            request.method,
+            request.scope["path"],
+        )
 
     def envelope(data: Dict[str, Any], anomalies: List[Dict[str, Any]] | None = None):
         return {

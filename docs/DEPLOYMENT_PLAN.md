@@ -1,6 +1,6 @@
 # Controlled deployment plan
 
-No deployment was performed as part of this work.
+The initial hardened release was deployed successfully from merge commit `b707914d3b5fd41084e2971e43a800f89188966e`. This document now serves as the controlled checklist for follow-up releases and OpenClaw activation. The integration remains disabled.
 
 ## Preconditions
 
