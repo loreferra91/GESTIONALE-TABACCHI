@@ -36,6 +36,11 @@ from pymongo.errors import DuplicateKeyError, OperationFailure
 DEFAULT_MONGO_URL = "mongodb://127.0.0.1:27018/?directConnection=true"
 DEFAULT_DB_NAME = "gestionale_cert_harness"
 SYNTHETIC_PREFIX = "CERT-"
+# Any database the harness is allowed to drop MUST start with this prefix.
+# This is the guard that keeps a mistyped CERT_DB_NAME from destroying a real
+# database: reset() refuses anything that does not look like a cert database.
+ALLOWED_DB_PREFIX = "gestionale_cert"
+
 
 
 class CertificationBlocked(RuntimeError):
@@ -105,10 +110,26 @@ class CertificationHarness:
             )
         return topo
 
+    def assert_disposable(self) -> None:
+        """Refuse to touch a database that is not obviously a cert database.
+
+        Guards every destructive operation (``reset``) against a mistyped
+        ``CERT_DB_NAME`` such as ``gestionale`` or a production database name.
+        The prefix allowlist is deliberately strict: no override flag, no
+        environment escape hatch, because the cost of being wrong is data loss.
+        """
+        if not self.db_name.startswith(ALLOWED_DB_PREFIX):
+            raise CertificationBlocked(
+                f"refusing to drop database {self.db_name!r}: name must start "
+                f"with {ALLOWED_DB_PREFIX!r}. Set CERT_DB_NAME to a disposable "
+                "certification database."
+            )
+
     def reset(self) -> None:
         """Drop every collection in the isolated certification database."""
         if self.client is None:
             raise CertificationBlocked("harness not connected")
+        self.assert_disposable()
         self.client.drop_database(self.db_name)
         self.db = self.client[self.db_name]
 
@@ -281,6 +302,7 @@ def write_conflict_probe(client: MongoClient, db_name: str) -> Dict[str, Any]:
         t.start()
     for t in threads:
         t.join(timeout=20)
+    assert not any(t.is_alive() for t in threads), "a conflict worker never finished"
     final = coll.find_one({"_id": "counter"})["n"]
     conflicts = sum("WriteConflict" in e or "TransientTransactionError" in e for e in errors)
     coll.drop()
@@ -291,6 +313,8 @@ def write_conflict_probe(client: MongoClient, db_name: str) -> Dict[str, Any]:
         "other_errors": [e for e in errors if "WriteConflict" not in e and "TransientTransactionError" not in e],
         "elapsed_s": round(time.monotonic() - started, 3),
         "lost_update": final < 4 and conflicts == 0,
+        "retried_transparently": final == 4 and conflicts == 0,
+        "retries_exhausted": conflicts > 0,
     }
 
 
@@ -317,6 +341,7 @@ def duplicate_idempotency_probe(client: MongoClient, db_name: str) -> Dict[str, 
         t.start()
     for t in threads:
         t.join(timeout=20)
+    assert not any(t.is_alive() for t in threads), "an idempotency worker never finished"
     total = coll.count_documents({"idempotency_key": key})
     coll.drop()
     return {

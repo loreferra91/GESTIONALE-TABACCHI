@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import pytest
 
 from backend.tests.certification_harness import (
+    ALLOWED_DB_PREFIX,
     DEFAULT_DB_NAME,
     CertificationBlocked,
     CertificationHarness,
@@ -80,6 +81,25 @@ class TestReplicaSetPrimitives:
         result = write_conflict_probe(harness.client, harness.db_name)
         assert result["final_counter"] == result["expected_if_serialized"], result
         assert result["lost_update"] is False, result
+        # Exactly one of the two outcomes must hold: the driver retried the
+        # loser transparently, or the retries were exhausted and surfaced a
+        # conflict. Anything else means the probe proved nothing.
+        assert result["retried_transparently"] or result["retries_exhausted"], result
+
+    def test_reset_refuses_non_disposable_database_name(self):
+        """A mistyped CERT_DB_NAME must never let reset() drop a real database."""
+        for bad_name in ("gestionale", "admin", "prod", "staging_cert"):
+            assert not bad_name.startswith(ALLOWED_DB_PREFIX), bad_name
+            h = CertificationHarness(mongo_url=MONGO_URL, db_name=bad_name)
+            with pytest.raises(CertificationBlocked) as exc:
+                h.assert_disposable()
+            assert "refusing to drop database" in str(exc.value)
+
+    def test_reset_accepts_certification_database_names(self):
+        for good_name in ("gestionale_cert_harness", "gestionale_cert_run_42"):
+            assert good_name.startswith(ALLOWED_DB_PREFIX), good_name
+            h = CertificationHarness(mongo_url=MONGO_URL, db_name=good_name)
+            h.assert_disposable()  # must not raise
 
 
 # ---------------------------------------------------------------------------
