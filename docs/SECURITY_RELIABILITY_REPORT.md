@@ -1,5 +1,8 @@
 # Security, reliability and OpenClaw report
 
+> Historical milestone report. For the post-activation evidence, current test counts,
+> dependency audit and final acceptance decision, see `FINAL_ENGINEERING_REPORT.md`.
+
 Date: 2026-10-27
 Status: application hardening merged and deployed; OpenClaw integration remains disabled pending isolated activation checks.
 
