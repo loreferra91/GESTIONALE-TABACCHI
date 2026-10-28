@@ -54,6 +54,15 @@ describe("requestGestionale", () => {
     await expect(requestGestionale("status", undefined, {})).rejects.toThrow("credential is unavailable");
   });
 
+  it("fails closed if a SecretRef reaches the plugin unresolved", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(requestGestionale("status", undefined, {
+      baseUrl: config.baseUrl,
+      token: { source: "store", provider: "default", id: "GESTIONALE_AGENT_TOKEN" },
+    })).rejects.toThrow("credential reference was not resolved");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("rejects non-HTTPS or path-bearing origins", async () => {
     await expect(requestGestionale("status", undefined, {
       ...config,

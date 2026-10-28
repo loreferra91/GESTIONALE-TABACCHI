@@ -9,9 +9,14 @@ const ACTION_PATHS = {
 } as const;
 
 type Action = keyof typeof ACTION_PATHS;
+type SecretRef = {
+  source: "env" | "file" | "exec" | "store";
+  provider: string;
+  id: string;
+};
 type PluginConfig = {
   baseUrl?: string;
-  token?: string;
+  token?: string | SecretRef;
   timeoutMs?: number;
 };
 
@@ -19,7 +24,12 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 
 function requireConfig(config: PluginConfig) {
   const baseUrl = String(config.baseUrl ?? "").trim();
-  const token = String(config.token ?? "");
+  // OpenClaw materializes supported SecretRefs before activating this plugin.
+  // Refuse an unresolved object instead of coercing it into a fake credential.
+  if (config.token && typeof config.token === "object") {
+    throw new Error("Gestionale Supervisor credential reference was not resolved");
+  }
+  const token = typeof config.token === "string" ? config.token : "";
   const timeoutMs = config.timeoutMs ?? 4000;
 
   if (token.length < 32) {
@@ -158,7 +168,22 @@ export default defineToolPlugin({
   configSchema: Type.Object(
     {
       baseUrl: Type.Optional(Type.String({ minLength: 1 })),
-      token: Type.Optional(Type.String({ minLength: 32 })),
+      token: Type.Optional(Type.Union([
+        Type.String({ minLength: 32 }),
+        Type.Object(
+          {
+            source: Type.Union([
+              Type.Literal("env"),
+              Type.Literal("file"),
+              Type.Literal("exec"),
+              Type.Literal("store"),
+            ]),
+            provider: Type.String({ minLength: 1 }),
+            id: Type.String({ minLength: 1 }),
+          },
+          { additionalProperties: false },
+        ),
+      ])),
       timeoutMs: Type.Optional(Type.Integer({ minimum: 250, maximum: 10000, default: 4000 })),
     },
     { additionalProperties: false },

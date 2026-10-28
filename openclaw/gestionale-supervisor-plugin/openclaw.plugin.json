@@ -2,7 +2,7 @@
   "id": "gestionale-supervisor",
   "name": "Gestionale Supervisor",
   "description": "Read-only access to the allowlisted Gestionale supervision API.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "categories": [
     "other"
   ],
@@ -14,8 +14,51 @@
         "minLength": 1
       },
       "token": {
-        "type": "string",
-        "minLength": 32
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 32
+          },
+          {
+            "type": "object",
+            "required": [
+              "source",
+              "provider",
+              "id"
+            ],
+            "properties": {
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "env"
+                  },
+                  {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  {
+                    "type": "string",
+                    "const": "exec"
+                  },
+                  {
+                    "type": "string",
+                    "const": "store"
+                  }
+                ]
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
       },
       "timeoutMs": {
         "type": "integer",

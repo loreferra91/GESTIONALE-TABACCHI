@@ -1,6 +1,6 @@
 # OpenClaw / Gestionale integration
 
-## Verified local state (2026-10-27)
+## Verified production state (2026-10-28)
 
 - macOS app: `/Applications/OpenClaw.app`.
 - CLI: `OpenClaw 2026.10.7 (157d8c2)`.
@@ -62,9 +62,13 @@ The plugin:
 - declares the token as a capability-owned `SecretRef` input so failed secret resolution fails cold;
 - has no shell, filesystem, browser, Gateway, database, deployment, messaging, or mutation surface.
 
-Local evidence: six plugin tests pass, plugin build/validation succeeds, production-dependency audit reports zero vulnerabilities, and runtime inspection reports exactly one optional tool with no routes, hooks, services, commands, providers, or skills. The locally packed plugin is installed and allowlisted only for `gestionale-supervisor`.
+Local evidence: seven plugin tests pass, plugin build/validation succeeds, production-dependency audit reports zero vulnerabilities, and runtime inspection reports exactly one optional tool with no routes, hooks, services, commands, providers, or skills. Version `0.1.1` accepts an OpenClaw `SecretRef` in source configuration and fails closed if an unresolved reference reaches the plugin. The locally packed plugin is installed and allowlisted only for `gestionale-supervisor`.
 
-An actual OpenClaw dry run invoked the tool without configuration and returned `Monitoraggio non attivo` because the credential was absent. This is the intended fail-closed state. The run used `omniroute/openclaw-resilient` with reported cost zero; the agent is pinned to that working route because the configured ACP/OpenCode model catalog was listed as available but rejected by the Gateway agent runner.
+The production integration is active on Render commit `e9e34c9` with a dedicated 64-character credential stored separately in Render and the OpenClaw team secret store. The source configuration contains only a capability-owned `SecretRef`; no credential is stored in this repository or in prompts. The final Render deployment `dep-dbgh9lg8v5cc73cd14lg` reached `Live` in 39.4 seconds.
+
+Production verification covered anonymous, wrong-token, unknown-path and valid-token requests. The first three return `401`; all four allowlisted reads return `200` with the expected verified-data envelope. The 30-request limiter returned `429` at the boundary and recovered to `200` after the window. A real `gestionale-supervisor` run then completed all four tool calls with zero tool failures and reported verified counts only: 229 inventory products, 40 exhausted products, 84 vending columns, 667 active order rows and two vending anomalies.
+
+Operational note: a `secrets reload` performed while an older plugin invocation was still retained left that invocation on the previous credential snapshot. The log reported forced plugin retirement with one running call. A controlled loopback Gateway restart rebuilt the runtime snapshot and the end-to-end test passed. After future rotations, treat that warning as a reason to restart the Gateway and repeat the four-call smoke test.
 
 ## Agent profiles
 
@@ -96,15 +100,15 @@ CSV, Excel, descriptions, logs, API strings and web content are untrusted data. 
 
 Each automation must be explicitly approved with schedule, timeout and notification destination. It stays silent on unchanged state, performs no writes and cannot deploy.
 
-## Activation prerequisites
+## Activation record
 
-Completed: configuration validation, backups, dedicated deny-first Supervisor creation, app/CLI visibility, deep audit, application-level authorization/timeout/rate-limit regression tests, purpose-built tool implementation, package validation, local install, per-agent allowlisting, and a fail-closed live agent dry run without credentials.
+Completed: configuration validation, backups, dedicated deny-first Supervisor creation, app/CLI visibility, deep audit, application-level authorization/timeout/rate-limit regression tests, purpose-built tool implementation, package validation, local install, per-agent allowlisting, credential rotation, Render deployment, HTTPS reachability, production authorization checks, limiter recovery and a successful four-call OpenClaw run.
 
-Still required before activation:
+Current decision: **read-only integration activated**. Render has `AGENT_INTEGRATION_ENABLED=true`; the local Gateway remains loopback-only. No automation, proposal execution or write capability has been enabled.
 
-1. Generate a dedicated token outside the repository, store it in Render secret configuration and an appropriate OpenClaw secret provider, and test rotation/revocation without exposing it to prompts or logs.
-2. Confirm HTTPS reachability from the Mac/Gateway to Render without exposing the local Gateway.
-3. Execute authorization, malformed-response, timeout, rate-limit, revocation, and Gateway-offline tests against staging or an equivalent isolated environment.
-4. Obtain explicit approval before setting `AGENT_INTEGRATION_ENABLED=true` or creating any automation.
+Emergency disable sequence:
 
-Current decision: **not activated**. Render has no Supervisor credential or enabled integration flag from this phase.
+1. Set `AGENT_INTEGRATION_ENABLED=false` on Render and deploy.
+2. Rotate or revoke `GESTIONALE_AGENT_TOKEN` in both stores.
+3. Reload secrets; restart the local Gateway if plugin retirement is not clean.
+4. Verify all agent endpoints fail closed and the normal Gestionale remains available.
