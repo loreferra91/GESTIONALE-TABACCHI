@@ -1,6 +1,6 @@
 # Controlled deployment plan
 
-The initial hardened release was deployed successfully from merge commit `b707914d3b5fd41084e2971e43a800f89188966e`. This document now serves as the controlled checklist for follow-up releases and OpenClaw activation. The integration remains disabled.
+The initial hardened release was deployed successfully from merge commit `b707914d3b5fd41084e2971e43a800f89188966e`. The read-only OpenClaw release was subsequently deployed from merge commit `e9e34c977675fd194e62f69f178488a7ea8b07ea`; production activation and the four-endpoint smoke test completed on 2026-10-28. This document now serves as the controlled checklist for follow-up releases.
 
 ## Preconditions
 
@@ -24,7 +24,7 @@ The initial hardened release was deployed successfully from merge commit `b70791
 
 - Application: redeploy the previously verified image/commit. Do not use `git reset --hard` on a working checkout.
 - Database: no schema/data rollback is normally required because changes add indexes/fields. If a canary reveals incorrect writes, stop traffic-producing operations and restore only from a verified snapshot under a separate incident plan.
-- OpenClaw: leave integration disabled. If later enabled, revoke the service token and set `AGENT_INTEGRATION_ENABLED=false`; the Gestionale remains independent.
+- OpenClaw: set `AGENT_INTEGRATION_ENABLED=false`, deploy, and revoke the dedicated service token in both Render and the OpenClaw store. Reload secrets and restart the loopback Gateway if a plugin instance does not retire cleanly. The Gestionale remains independent.
 
 ## Stop conditions
 
