@@ -181,6 +181,18 @@ These are **not** failures. They are gaps that the disposable local environment 
 
 ---
 
+## 8a. Existing-Solutions / Free-Infrastructure Preflight
+
+Per workspace policy, checked whether a maintained free option already covers the staging need instead of building custom infrastructure.
+
+| Need | Existing option | Assessment |
+|---|---|---|
+| Transaction-capable MongoDB for staging | **MongoDB Atlas M0 (free shared tier)** | Atlas M0 is a replica set and **does** support multi-document transactions. There is a widely-reported `Transaction numbers are only allowed on a replica set member or mongos` error on M0, but it is a *connection-string* problem (missing `replicaSet`/`retryWrites`, or `directConnection=true` against a shared cluster), not a missing capability. Relevant to this repo: a `directConnection=true` URL — the form used for the local drill — is **not** appropriate for Atlas shared tiers. |
+| App hosting | Render / Railway / Fly.io free or near-free tiers | Render is already referenced in this project's deployment docs. Adequate for a staging app instance; free tiers sleep, so they are unsuitable for latency or durability testing. |
+| Backups | Atlas automated snapshots (paid tiers) | M0 has **no** automated backup/restore. The provider-level backup gate in §10 therefore requires a paid tier or a self-managed dump strategy — it cannot be closed on a free cluster. |
+
+**Conclusion:** no custom infrastructure is warranted. Atlas M0 covers transaction-capable staging; the two things it cannot cover (automated provider backups, multi-node failover) are exactly the two items already listed as NOT VERIFIED in §7 — and they require spend approval, which was not given. No paid resource was provisioned.
+
 ## 9. Reproducing This Certification
 
 ```zsh
