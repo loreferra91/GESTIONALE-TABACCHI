@@ -10,6 +10,10 @@ The module drops ``CERT_DB_NAME`` on entry and exit.
 """
 import asyncio
 import os
+from pathlib import Path
+import select
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -259,6 +263,52 @@ class TestApplicationIdempotency:
 # 4. Interruption / restart semantics
 # ---------------------------------------------------------------------------
 class TestInterruptionAndRestart:
+    def test_sigkill_during_real_application_transaction_leaves_no_torn_state(self, harness):
+        harness.reset()
+        environment = os.environ.copy()
+        environment.update({
+            "CERT_MONGO_URL": MONGO_URL,
+            "CERT_DB_NAME": harness.db_name,
+            "ENVIRONMENT": "test",
+            "MONGO_URL": MONGO_URL,
+            "DB_NAME": harness.db_name,
+        })
+        repository_root = Path(__file__).resolve().parents[2]
+        process = subprocess.Popen(
+            [sys.executable, "-m", "backend.tests.certification_crash_worker"],
+            cwd=repository_root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            ready = False
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and process.poll() is None:
+                readable, _, _ = select.select([process.stdout], [], [], 0.5)
+                if readable and process.stdout.readline().strip() == "TRANSACTION_OPEN":
+                    ready = True
+                    break
+            if not ready:
+                if process.poll() is None:
+                    process.kill()
+                _, stderr = process.communicate(timeout=10)
+                pytest.fail("worker never opened its transaction: " + stderr[:500])
+            process.kill()
+            process.wait(timeout=10)
+            assert process.returncode < 0
+
+            collection = harness.db["_cert_process_kill"]
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and collection.count_documents({}):
+                time.sleep(0.2)
+            assert collection.count_documents({}) == 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+
     def test_in_flight_transaction_is_invisible_to_other_sessions(self, harness):
         """A session that never commits must not expose its writes."""
         db = harness.db

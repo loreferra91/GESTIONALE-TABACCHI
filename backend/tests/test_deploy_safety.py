@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pymongo.errors import OperationFailure
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
@@ -213,6 +214,108 @@ def test_transaction_wrapper_uses_driver_retry_helper(monkeypatch):
 
     assert result is session
     assert session.called is True
+
+
+def test_transaction_wrapper_surfaces_exhausted_write_conflict_as_retryable(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        async def with_transaction(self, callback):
+            # Simulate the driver's callback retry contract before it gives up.
+            await callback(self)
+            await callback(self)
+            raise OperationFailure(
+                "WriteConflict",
+                code=112,
+                details={"errorLabels": ["TransientTransactionError"]},
+            )
+
+        async def end_session(self):
+            calls.append("ended")
+
+    session = FakeSession()
+    fake_client = SimpleNamespace(start_session=AsyncMock(return_value=session))
+    monkeypatch.setattr(server, "db", SimpleNamespace(client=fake_client))
+
+    async def operation(active):
+        calls.append(active)
+
+    with pytest.raises(server.HTTPException) as exc:
+        asyncio.run(server._run_transactionally(operation))
+
+    assert exc.value.status_code == 503
+    assert exc.value.headers == {"Retry-After": "1"}
+    assert "stessa chiave idempotente" in exc.value.detail
+    assert calls == [session, session, "ended"]
+
+
+def test_transaction_wrapper_does_not_guess_transience_from_code_alone(monkeypatch):
+    class FakeSession:
+        async def with_transaction(self, _callback):
+            raise OperationFailure("unlabelled conflict", code=112)
+
+        async def end_session(self):
+            return None
+
+    fake_client = SimpleNamespace(start_session=AsyncMock(return_value=FakeSession()))
+    monkeypatch.setattr(server, "db", SimpleNamespace(client=fake_client))
+
+    with pytest.raises(OperationFailure, match="unlabelled conflict"):
+        asyncio.run(server._run_transactionally(lambda _active: asyncio.sleep(0)))
+
+
+def test_transaction_wrapper_reports_uncertain_commit_without_retry_advice(monkeypatch):
+    class FakeSession:
+        async def with_transaction(self, _callback):
+            raise OperationFailure(
+                "commit result unknown",
+                code=64,
+                details={"errorLabels": ["UnknownTransactionCommitResult"]},
+            )
+
+        async def end_session(self):
+            return None
+
+    fake_client = SimpleNamespace(start_session=AsyncMock(return_value=FakeSession()))
+    monkeypatch.setattr(server, "db", SimpleNamespace(client=fake_client))
+
+    with pytest.raises(server.HTTPException) as exc:
+        asyncio.run(server._run_transactionally(lambda _active: asyncio.sleep(0)))
+
+    assert exc.value.status_code == 503
+    assert exc.value.headers is None
+    assert "verificare lo stato" in exc.value.detail
+
+
+def test_transaction_wrapper_closes_session_without_transaction_api(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        async def end_session(self):
+            calls.append("ended")
+
+    fake_client = SimpleNamespace(start_session=AsyncMock(return_value=FakeSession()))
+    monkeypatch.setattr(server, "db", SimpleNamespace(client=fake_client))
+    monkeypatch.setenv("ENVIRONMENT", "test")
+
+    result = asyncio.run(
+        server._run_transactionally(
+            lambda active: asyncio.sleep(0, result=active)
+        )
+    )
+
+    assert result is None
+    assert calls == ["ended"]
+
+
+def test_missing_seed_dataset_emits_an_actionable_warning(monkeypatch, caplog, tmp_path):
+    monkeypatch.setattr(server, "ROOT_DIR", tmp_path)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(server.seed_if_empty())
+
+    assert "Seed dataset unavailable" in caplog.text
+    assert str(tmp_path / "seed" / "seed_data.json") in caplog.text
 
 
 def test_production_refuses_missing_required_unique_indexes(monkeypatch):

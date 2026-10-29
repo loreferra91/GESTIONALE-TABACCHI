@@ -468,6 +468,10 @@ LOTTO_PARAM_BY_CATEGORY = {
 async def seed_if_empty():
     seed_path = ROOT_DIR / "seed" / "seed_data.json"
     if not seed_path.exists():
+        logging.warning(
+            "Seed dataset unavailable at %s; empty databases will not be bootstrapped",
+            seed_path,
+        )
         return
     count = await db.prodotti.count_documents({})
     if count > 0:
@@ -676,17 +680,16 @@ async def _run_transactionally(operation):
             raise RuntimeError("MongoDB non supporta sessioni transazionali") from None
         return await operation(None)
 
-    with_transaction = getattr(session, "with_transaction", None)
-    if with_transaction is None:
-        if _requires_secure_runtime():
-            raise RuntimeError("MongoDB non supporta transazioni multi-documento")
-        return await operation(None)
-
     try:
+        with_transaction = getattr(session, "with_transaction", None)
+        if with_transaction is None:
+            if _requires_secure_runtime():
+                raise RuntimeError("MongoDB non supporta transazioni multi-documento")
+            return await operation(None)
+
         # Motor/PyMongo retries the whole callback for transient transaction
-        # errors and retries uncertain commits.  The write paths also carry
-        # unique idempotency keys, so a retried callback cannot duplicate a
-        # completed business operation.
+        # errors and retries uncertain commits. Callers that expose retries to
+        # clients remain responsible for their business-level idempotency key.
         return await with_transaction(operation)
     except OperationFailure as exc:
         message = str(exc).lower()
@@ -696,6 +699,34 @@ async def _run_transactionally(operation):
                     "MongoDB ha rifiutato una transazione multi-documento fuori dall'ambiente locale"
                 ) from exc
             return await operation(None)
+        has_error_label = getattr(exc, "has_error_label", None)
+        transient = bool(
+            callable(has_error_label)
+            and has_error_label("TransientTransactionError")
+        )
+        commit_unknown = bool(
+            callable(has_error_label)
+            and has_error_label("UnknownTransactionCommitResult")
+        )
+        if transient or commit_unknown:
+            logging.warning(
+                "MongoDB transaction outcome unresolved after driver retries (code=%s, commit_unknown=%s)",
+                exc.code,
+                commit_unknown,
+            )
+            detail = (
+                "Esito del commit non confermato: verificare lo stato prima di riprovare"
+                if commit_unknown
+                else (
+                    "Conflitto transazionale temporaneo: riprovare usando la stessa "
+                    "chiave idempotente, quando prevista"
+                )
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+                headers=None if commit_unknown else {"Retry-After": "1"},
+            ) from exc
         raise
     finally:
         end_session = getattr(session, "end_session", None)

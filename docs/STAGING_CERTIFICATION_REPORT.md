@@ -229,3 +229,11 @@ Verified with real transactions on a real replica set: commit/abort atomicity, c
 5. Confirm the deployed artifact **ships `backend/seed/seed_data.json`** and emits a warning if absent.
 
 Until 1–5 are closed, staging readiness should be described as *application-verified, infrastructure-unverified*.
+
+### Follow-up status — 2026-10-29
+
+Gates 2–5 were completed in the separate Phase 7 resilience certification:
+real application-wrapper SIGKILL, exhausted transient retry handling, three-node
+primary failover, and built-image seed verification all passed. See
+`docs/PHASE7_RESILIENCE_CERTIFICATION.md`. Gate 1, provider snapshot restore,
+remains **NOT VERIFIED** and was not simulated against production.
