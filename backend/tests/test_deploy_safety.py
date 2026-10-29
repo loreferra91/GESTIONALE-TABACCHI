@@ -227,3 +227,151 @@ def test_security_headers_are_present():
     response = client.get("/api/")
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_staging_refuses_missing_credentials(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "staging")
+    monkeypatch.delenv("APP_USERNAME", raising=False)
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    monkeypatch.setenv("CORS_ORIGINS", "https://staging.example.test")
+
+    with pytest.raises(RuntimeError, match="APP_USERNAME"):
+        server._validate_runtime_security()
+
+
+def test_unknown_environment_fails_closed(monkeypatch):
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("APP_USERNAME", raising=False)
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+
+    assert server._requires_secure_runtime() is True
+    with pytest.raises(RuntimeError, match="APP_USERNAME"):
+        server._validate_runtime_security()
+
+
+def test_development_allows_missing_credentials(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.delenv("APP_USERNAME", raising=False)
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+
+    assert server._requires_secure_runtime() is False
+    server._validate_runtime_security()
+
+
+def test_staging_requires_basic_auth_even_when_credentials_exist(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "staging")
+    monkeypatch.setenv("APP_USERNAME", "audit-user")
+    monkeypatch.setenv("APP_PASSWORD", "audit-password")
+    monkeypatch.setenv("CORS_ORIGINS", "https://staging.example.test")
+
+    response = client.get("/api/prodotti")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"].startswith("Basic")
+
+
+def test_non_local_without_credentials_denies_requests(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "staging")
+    monkeypatch.delenv("APP_USERNAME", raising=False)
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+
+    response = client.get("/api/prodotti")
+
+    assert response.status_code == 503
+
+
+def test_non_ascii_credentials_are_rejected_without_server_error(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("APP_USERNAME", "operatore")
+    monkeypatch.setenv("APP_PASSWORD", "password-sicura")
+    token = base64.b64encode("operatore:pässwörd".encode("utf-8")).decode("ascii")
+
+    response = client.get("/api/prodotti", headers={"Authorization": f"Basic {token}"})
+
+    assert response.status_code == 401
+
+
+def test_cross_site_mutation_is_rejected(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("APP_USERNAME", "audit-user")
+    monkeypatch.setenv("APP_PASSWORD", "audit-password")
+    token = base64.b64encode(b"audit-user:audit-password").decode("ascii")
+
+    response = client.post(
+        "/api/",
+        headers={
+            "Authorization": f"Basic {token}",
+            "Origin": "https://evil.example",
+            "Host": "gestionale.example",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_same_origin_mutation_passes_csrf_check(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("APP_USERNAME", "audit-user")
+    monkeypatch.setenv("APP_PASSWORD", "audit-password")
+    token = base64.b64encode(b"audit-user:audit-password").decode("ascii")
+
+    response = client.post(
+        "/api/endpoint-inesistente",
+        headers={
+            "Authorization": f"Basic {token}",
+            "Origin": "https://gestionale.example",
+            "Host": "gestionale.example",
+        },
+    )
+
+    assert response.status_code in {404, 405}
+
+
+def test_health_check_reports_database_failure(monkeypatch):
+    monkeypatch.setattr(server, "_requires_secure_runtime", lambda: True)
+    fake_client = SimpleNamespace(
+        admin=SimpleNamespace(command=AsyncMock(side_effect=RuntimeError("mongo down")))
+    )
+    monkeypatch.setattr(server, "client", fake_client)
+
+    response = client.get("/api/")
+
+    assert response.status_code == 503
+    assert response.json()["database"] == "unavailable"
+
+
+def test_health_check_reports_database_success(monkeypatch):
+    monkeypatch.setattr(server, "_requires_secure_runtime", lambda: True)
+    fake_client = SimpleNamespace(
+        admin=SimpleNamespace(command=AsyncMock(return_value={"ok": 1}))
+    )
+    monkeypatch.setattr(server, "client", fake_client)
+
+    response = client.get("/api/")
+
+    assert response.status_code == 200
+    assert response.json()["database"] == "ok"
+
+
+def test_transaction_wrapper_does_not_swallow_business_attribute_error(monkeypatch):
+    class FakeSession:
+        async def with_transaction(self, callback):
+            return await callback(self)
+
+    fake_client = SimpleNamespace(start_session=AsyncMock(return_value=FakeSession()))
+    monkeypatch.setattr(server, "db", SimpleNamespace(client=fake_client))
+    monkeypatch.setenv("ENVIRONMENT", "test")
+
+    async def operation(_session):
+        raise AttributeError("business bug")
+
+    with pytest.raises(AttributeError, match="business bug"):
+        asyncio.run(server._run_transactionally(operation))
+
+
+def test_transaction_wrapper_fails_closed_without_sessions(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(server, "db", SimpleNamespace(client=SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="sessioni"):
+        asyncio.run(server._run_transactionally(lambda _active: asyncio.sleep(0)))

@@ -4,6 +4,9 @@ PyMongo >=4.11 passes sort=None for bulk updates. mongomock has not yet
 added that optional argument. Never emulate a non-None sort silently.
 """
 import inspect
+import os
+
+os.environ.setdefault("ENVIRONMENT", "test")
 
 import pytest
 from mongomock.collection import BulkOperationBuilder

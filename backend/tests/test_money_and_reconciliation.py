@@ -10,7 +10,7 @@ from mongomock_motor import AsyncMongoMockClient
 from openpyxl import Workbook
 from pydantic import ValidationError
 
-from backend import server
+from backend import operations_router, server
 from backend.money import money, money_decimal, money_product, money_sum, nonnegative_money
 
 
@@ -223,6 +223,23 @@ def test_reconciliation_date_range_is_validated_and_applied(database):
     result = asyncio.run(scenario())
     assert result["intervallo"] == {"da": "2026-10-18", "a": "2026-10-18"}
     assert result["documenti_esaminati"].get("versamenti") == 1
+
+
+def test_data_status_scans_only_the_newest_sales(database, monkeypatch):
+    async def scenario():
+        await database.vendite.insert_many([
+            {"data": "2026-10-01T09:00:00", "created_at": "2026-10-01T09:00:00"},
+            {"data": "2026-10-02T08:00:00", "created_at": "2026-10-02T08:00:00"},
+            {"data": "2026-10-03T18:20:00", "created_at": "2026-10-03T18:20:00"},
+        ])
+        monkeypatch.setattr(operations_router, "DATA_STATUS_SCAN_LIMIT", 2)
+        return await operations_router._latest_sale_documents(database, "vendite")
+
+    documents = asyncio.run(scenario())
+    assert [document["data"] for document in documents] == [
+        "2026-10-03T18:20:00",
+        "2026-10-02T08:00:00",
+    ]
 
 
 def test_reconciliation_case_workflow_is_separate_stable_and_audited(database):

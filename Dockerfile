@@ -6,13 +6,15 @@ RUN corepack enable && yarn install --frozen-lockfile
 
 COPY frontend/ ./
 ENV REACT_APP_BACKEND_URL=
+ENV GENERATE_SOURCEMAP=false
 RUN yarn build
 
 
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    ENVIRONMENT=production
 
 WORKDIR /app
 COPY backend/requirements-prod.txt ./backend/requirements-prod.txt

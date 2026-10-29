@@ -2,6 +2,7 @@
 
 import os
 
+os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_auto_order_local_test")
 os.environ.pop("APP_USERNAME", None)

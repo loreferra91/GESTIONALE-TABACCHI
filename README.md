@@ -162,13 +162,16 @@ Ogni push sul branch collegato genera un nuovo deploy automatico.
 | --- | --- | --- |
 | `MONGO_URL` | sì | URI MongoDB locale o Atlas |
 | `DB_NAME` | sì | nome del database; default Render: `gestionale` |
+| `ENVIRONMENT` | consigliata | `development` in locale; `production`/`staging` richiedono credenziali e CORS espliciti |
 | `CORS_ORIGINS` | no | origini separate da virgola; in produzione l'app usa lo stesso dominio |
 | `APP_USERNAME` | consigliata | abilita Basic Auth se presente insieme alla password |
 | `APP_PASSWORD` | consigliata | password Basic Auth; non salvarla in Git |
 | `PORT` | su Render | assegnata automaticamente dalla piattaforma |
 
-In produzione `APP_USERNAME` e `APP_PASSWORD` sono obbligatorie: se mancano,
-l'avvio viene rifiutato. L'endpoint di health check `/api/` resta intenzionalmente libero.
+In produzione e staging `APP_USERNAME` e `APP_PASSWORD` sono obbligatorie: se
+mancano, l'avvio viene rifiutato. Solo gli ambienti dichiarati
+`development`/`local`/`test` possono funzionare senza credenziali. L'endpoint di
+health check `/api/` resta libero ma verifica anche la connessione MongoDB.
 
 ## Stato attuale e prossimi passi
 

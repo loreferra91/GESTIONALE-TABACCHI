@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Request
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import base64
 import secrets
+from urllib.parse import urlsplit
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
@@ -204,20 +205,36 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 
+LOCAL_ENVIRONMENTS = frozenset({"development", "dev", "local", "test", "testing"})
+
+
+def _environment() -> str:
+    return str(os.environ.get("ENVIRONMENT") or "").strip().lower()
+
+
+def _is_local_environment() -> bool:
+    return _environment() in LOCAL_ENVIRONMENTS
+
+
 def _is_production() -> bool:
-    return str(os.environ.get("ENVIRONMENT") or "development").strip().lower() in {"production", "prod"}
+    return _environment() in {"production", "prod"}
+
+
+def _requires_secure_runtime() -> bool:
+    """Un ambiente non dichiarato localmente deve essere trattato come distribuito."""
+    return not _is_local_environment()
 
 
 def _validate_runtime_security() -> None:
-    """In produzione le credenziali devono essere complete e CORS non può essere aperto."""
-    if not _is_production():
+    """Fuori dall'ambiente locale credenziali e CORS espliciti sono obbligatori."""
+    if not _requires_secure_runtime():
         return
     missing = [name for name in ("APP_USERNAME", "APP_PASSWORD") if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(f"Configurazione produzione incompleta: manca {', '.join(missing)}")
+        raise RuntimeError(f"Configurazione non locale incompleta: manca {', '.join(missing)}")
     origins = [item.strip() for item in os.environ.get("CORS_ORIGINS", "").split(",") if item.strip()]
     if not origins or "*" in origins:
-        raise RuntimeError("CORS_ORIGINS deve contenere solo origini esplicite in produzione")
+        raise RuntimeError("CORS_ORIGINS deve contenere solo origini esplicite fuori dall'ambiente locale")
     agent_enabled = str(os.environ.get("AGENT_INTEGRATION_ENABLED") or "").lower() in {
         "1", "true", "yes", "on",
     }
@@ -238,9 +255,9 @@ async def _verify_transaction_capability() -> Dict[str, Any]:
         and topology in {"replica_set", "sharded"}
     )
     result = {"topology": topology, "transactions": capable}
-    if _is_production() and not capable:
+    if _requires_secure_runtime() and not capable:
         raise RuntimeError(
-            "MongoDB di produzione non supporta transazioni multi-documento: "
+            "MongoDB non supporta transazioni multi-documento fuori dall'ambiente locale: "
             f"topologia rilevata {topology}"
         )
     return result
@@ -275,9 +292,10 @@ audit_router, _record_audit_event, list_audit_events = create_audit_router(
 
 @app.middleware("http")
 async def optional_basic_auth(request: Request, call_next):
-    """Protegge il deployment quando APP_USERNAME/APP_PASSWORD sono configurati."""
+    """Protegge il deployment; fuori dall'ambiente locale le credenziali sono obbligatorie."""
     username = os.environ.get("APP_USERNAME")
     password = os.environ.get("APP_PASSWORD")
+    credentials_configured = bool(username and password)
 
     request_path = request.scope["path"]
     is_agent_service = request.method == "GET" and request_path in AGENT_SERVICE_PATHS
@@ -285,7 +303,17 @@ async def optional_basic_auth(request: Request, call_next):
         request.method == "HEAD" and request_path == "/"
     )
 
-    if not username or not password or is_health_check or is_agent_service:
+    if is_health_check or is_agent_service:
+        request.state.authenticated_user = "operatore-locale"
+        return await call_next(request)
+
+    if not credentials_configured:
+        if _requires_secure_runtime():
+            return PlainTextResponse(
+                "Autenticazione non configurata",
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
         request.state.authenticated_user = "operatore-locale"
         return await call_next(request)
 
@@ -298,8 +326,12 @@ async def optional_basic_auth(request: Request, call_next):
 
         authenticated = (
             scheme.lower() == "basic"
-            and secrets.compare_digest(supplied_username, username)
-            and secrets.compare_digest(supplied_password, password)
+            and secrets.compare_digest(
+                supplied_username.encode("utf-8"), username.encode("utf-8")
+            )
+            and secrets.compare_digest(
+                supplied_password.encode("utf-8"), password.encode("utf-8")
+            )
         )
     except (ValueError, UnicodeDecodeError, base64.binascii.Error):
         authenticated = False
@@ -325,6 +357,39 @@ async def security_headers(request: Request, call_next):
     if request.scope["path"] in AGENT_SERVICE_PATHS:
         response.headers.setdefault("Cache-Control", "no-store")
     return response
+
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+
+def _allowed_mutation_origins() -> set:
+    return {
+        item.strip().rstrip("/")
+        for item in os.environ.get("CORS_ORIGINS", "").split(",")
+        if item.strip() and item.strip() != "*"
+    }
+
+
+@app.middleware("http")
+async def reject_cross_site_mutations(request: Request, call_next):
+    """Rifiuta richieste mutanti cross-site; i client senza Origin restano compatibili."""
+    if request.method in _SAFE_METHODS:
+        return await call_next(request)
+
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        if (request.headers.get("sec-fetch-site") or "").strip().lower() == "cross-site":
+            return PlainTextResponse("Origine non consentita", status_code=403)
+        return await call_next(request)
+
+    if origin in _allowed_mutation_origins():
+        return await call_next(request)
+
+    host = (request.headers.get("host") or "").strip().lower()
+    if host and urlsplit(origin).netloc.lower() == host:
+        return await call_next(request)
+
+    return PlainTextResponse("Origine non consentita", status_code=403)
 
 
 class Parametro(BaseModel):
@@ -588,24 +653,45 @@ async def _run_transactionally(operation):
     database_client = getattr(db, "client", None)
     if database_client is None or "mongomock" in type(database_client).__module__.lower():
         return await operation(None)
-    try:
-        async with await database_client.start_session() as session:
-            # Motor/PyMongo retries the whole callback for transient transaction
-            # errors and retries uncertain commits.  The write paths also carry
-            # unique idempotency keys, so a retried callback cannot duplicate a
-            # completed business operation.
-            return await session.with_transaction(operation)
-    except (AttributeError, NotImplementedError):
+
+    start_session = getattr(database_client, "start_session", None)
+    if start_session is None:
+        if _requires_secure_runtime():
+            raise RuntimeError("MongoDB non espone sessioni transazionali")
         return await operation(None)
+
+    try:
+        session = await start_session()
+    except (AttributeError, NotImplementedError):
+        if _requires_secure_runtime():
+            raise RuntimeError("MongoDB non supporta sessioni transazionali") from None
+        return await operation(None)
+
+    with_transaction = getattr(session, "with_transaction", None)
+    if with_transaction is None:
+        if _requires_secure_runtime():
+            raise RuntimeError("MongoDB non supporta transazioni multi-documento")
+        return await operation(None)
+
+    try:
+        # Motor/PyMongo retries the whole callback for transient transaction
+        # errors and retries uncertain commits.  The write paths also carry
+        # unique idempotency keys, so a retried callback cannot duplicate a
+        # completed business operation.
+        return await with_transaction(operation)
     except OperationFailure as exc:
         message = str(exc).lower()
         if exc.code in {20, 303} or "transaction numbers are only allowed" in message:
-            if _is_production():
+            if _requires_secure_runtime():
                 raise RuntimeError(
-                    "MongoDB di produzione ha rifiutato una transazione multi-documento"
+                    "MongoDB ha rifiutato una transazione multi-documento fuori dall'ambiente locale"
                 ) from exc
             return await operation(None)
         raise
+    finally:
+        end_session = getattr(session, "end_session", None)
+        if end_session is not None:
+            await end_session()
 
 
 def lotto_for(categoria: str, params: Dict[str, float]) -> int:
@@ -642,7 +728,24 @@ def physical_shop_stock_from_excel(
 # ------------------------- Root / Health -------------------------
 @api.get("/")
 async def root():
-    return {"app": "God Services Gestionale Tabacchi", "status": "ok"}
+    if _requires_secure_runtime():
+        try:
+            await asyncio.wait_for(client.admin.command("ping"), timeout=2)
+        except Exception:
+            logging.exception("Health check MongoDB non riuscito")
+            return JSONResponse(
+                {
+                    "app": "God Services Gestionale Tabacchi",
+                    "status": "error",
+                    "database": "unavailable",
+                },
+                status_code=503,
+            )
+    return {
+        "app": "God Services Gestionale Tabacchi",
+        "status": "ok",
+        "database": "ok",
+    }
 
 
 # ------------------------- Prodotti -------------------------
