@@ -223,6 +223,13 @@ def test_production_refuses_missing_required_unique_indexes(monkeypatch):
         server._validate_required_index_results(results)
 
 
+def test_security_headers_include_transport_and_content_policy():
+    response = client.get("/api/")
+
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert response.headers["strict-transport-security"].startswith("max-age=")
+
+
 def test_security_headers_are_present():
     response = client.get("/api/")
     assert response.headers["x-content-type-options"] == "nosniff"
@@ -375,3 +382,68 @@ def test_transaction_wrapper_fails_closed_without_sessions(monkeypatch):
 
     with pytest.raises(RuntimeError, match="sessioni"):
         asyncio.run(server._run_transactionally(lambda _active: asyncio.sleep(0)))
+
+
+def test_data_status_uses_distinct_dates_without_full_scans(monkeypatch):
+    calls = []
+
+    class DistinctCollection:
+        def __init__(self, values):
+            self.values = values
+
+        async def distinct(self, field):
+            calls.append(field)
+            return self.values
+
+        async def count_documents(self, query):
+            return 1
+
+        async def find_one(self, *args, **kwargs):
+            return None
+
+    class Database(dict):
+        def __getattr__(self, name):
+            if name not in self:
+                raise AttributeError(f"collezione inattesa: {name}")
+            return self[name]
+
+        def __getitem__(self, name):
+            if name not in self:
+                raise AssertionError(f"collezione inattesa: {name}")
+            return dict.__getitem__(self, name)
+
+    database = Database({
+        "vendite": DistinctCollection(["2026-10-27", "2026-10-28"]),
+        "db_storico_vend": DistinctCollection(["2026-10-26"]),
+        "import_history": DistinctCollection([]),
+        "backup_snapshots": DistinctCollection([]),
+    })
+    for name in server.BACKUP_COLLECTIONS:
+        if name not in database:
+            database[name] = DistinctCollection([name])
+    monkeypatch.setattr(server, "db", database)
+    operations = server.create_operations_router(
+        get_database=lambda: database,
+        backup_collections=server.BACKUP_COLLECTIONS,
+        parse_sale_date=server._parse_sale_date,
+        latest_sale_date=server._latest_sale_date,
+        query_regex=server._q_regex,
+        vending_stock_by_code=AsyncMock(return_value={}),
+        apply_vending_stock=lambda products, _totals: products,
+        get_current_anomalies=AsyncMock(return_value=[]),
+        get_dashboard=AsyncMock(return_value={}),
+        get_auto_order=AsyncMock(return_value={}),
+        schedule_daily_backup=AsyncMock(return_value={"status": "ok"}),
+    )
+
+    payload = asyncio.run(operations["data_status_payload"]())
+
+    assert calls == ["data", "data"]
+    assert payload["latest_sales_day"] == "2026-10-28"
+
+
+def test_render_blueprint_requires_manual_deploy():
+    blueprint = (server.ROOT_DIR.parent / "render.yaml").read_text(encoding="utf-8")
+
+    assert "autoDeploy: false" in blueprint
+    assert "autoDeploy: true" not in blueprint

@@ -3,25 +3,8 @@ import asyncio
 from datetime import datetime, timezone
 import hashlib
 import logging
-from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
-
-# The data-status payload only reports the newest sales day: it must never
-# pull an unbounded sale history from MongoDB on every status request.
-DATA_STATUS_SCAN_LIMIT = 5000
-
-
-async def _latest_sale_documents(database, collection_name: str) -> List[Dict[str, Any]]:
-    """Return only the most recent sales needed to compute the status payload."""
-    sort_field = "created_at" if collection_name == "vendite" else "data"
-    return await (
-        database[collection_name]
-        .find({}, {"_id": 0, "data": 1})
-        .sort(sort_field, -1)
-        .limit(DATA_STATUS_SCAN_LIMIT)
-        .to_list(DATA_STATUS_SCAN_LIMIT)
-    )
 
 
 def create_operations_router(
@@ -43,8 +26,8 @@ def create_operations_router(
     async def data_status_payload():
         database = get_database()
         app_dates, imported_dates, counts, latest_import, latest_backup = await asyncio.gather(
-            _latest_sale_documents(database, "vendite"),
-            _latest_sale_documents(database, "db_storico_vend"),
+            database.vendite.distinct("data"),
+            database.db_storico_vend.distinct("data"),
             asyncio.gather(*[
                 database[name].count_documents({}) for name in backup_collections
             ]),
@@ -64,8 +47,8 @@ def create_operations_router(
             parsed = parse_sale_date(value)
             return parsed.isoformat() if parsed else str(value)[:10]
 
-        latest_app = latest_sale_date(app_dates)
-        latest_imported = latest_sale_date(imported_dates)
+        latest_app = latest_sale_date([{"data": value} for value in app_dates])
+        latest_imported = latest_sale_date([{"data": value} for value in imported_dates])
         latest_days = [parsed for parsed in (latest_app, latest_imported) if parsed]
         latest_sales_day = max(latest_days).isoformat() if latest_days else None
         delay = None

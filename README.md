@@ -117,10 +117,10 @@ seed, parametri e indici; allo shutdown chiude il client Mongo. La migrazione da
 1. Accedere a [MongoDB Atlas](https://www.mongodb.com/atlas/database) e creare
    un cluster **Free / M0**.
 2. In **Database Access**, creare un utente dedicato all'applicazione.
-3. In **Network Access**, autorizzare `0.0.0.0/0`. Il servizio Render gratuito
-   non ha un IP di uscita statico. Usare credenziali robuste perché questa regola
-   permette la connessione da qualsiasi IP, pur lasciando il database protetto
-   dall'autenticazione Atlas.
+3. In **Network Access**, limitare l'accesso agli intervalli di uscita del
+   servizio Render oppure a un endpoint privato Atlas, se disponibili. Evitare
+   `0.0.0.0/0`: aprirlo espone il database a qualsiasi IP e deve restare solo una
+   misura temporanea, protetta comunque da credenziali dedicate e robuste.
 4. In **Connect > Drivers**, copiare la stringa Python, ad esempio:
 
    ```text
