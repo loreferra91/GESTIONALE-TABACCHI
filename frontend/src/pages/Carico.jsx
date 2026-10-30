@@ -10,6 +10,7 @@ import { defaultLotForCategory } from "../lib/categories";
 export default function Carico() {
   const [prodotti, setProdotti] = useState([]);
   const [smartVenueCodes, setSmartVenueCodes] = useState(new Set());
+  const [smartVenueBarcodes, setSmartVenueBarcodes] = useState(new Map());
   const today = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(today);
   const [sorgente, setSorgente] = useState("carico manuale");
@@ -30,9 +31,14 @@ export default function Carico() {
       api.get("/ordini", { params: { limit: 100 } }),
       api.get("/smart-venue"),
     ]).then(([productsResponse, receiptsResponse, smartVenueResponse]) => {
+      const smartVenueRows = smartVenueResponse.data || [];
       setProdotti(productsResponse.data || []);
       setRecentReceipts((receiptsResponse.data || []).filter(row => row.smart_venue_applicabile));
-      setSmartVenueCodes(new Set((smartVenueResponse.data || []).map(row => row.codice)));
+      setSmartVenueCodes(new Set(smartVenueRows.map(row => row.codice)));
+      setSmartVenueBarcodes(new Map(smartVenueRows.map(row => [
+        row.codice,
+        String(row.barcode || row.barcodes?.[0] || "").trim(),
+      ])));
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -346,14 +352,15 @@ export default function Carico() {
           <p className="mt-1 text-xs text-slate-500">La conferma registra il carico nel saldo Smart Venue esterno; il fisico è già aggiornato al ricevimento.</p>
         </div>
         <div className="overflow-x-auto max-h-[50vh]">
-          <table className="data-table w-full min-w-[760px]">
-            <thead><tr><th>Data</th><th>Prodotto</th><th className="text-right">Quantità caricata</th><th>Sorgente</th><th>Caricato su Smart Venue</th></tr></thead>
+          <table className="data-table w-full min-w-[900px]">
+            <thead><tr><th>Data</th><th>Prodotto</th><th className="text-right">Quantità caricata</th><th>Sorgente</th><th>Barcode</th><th>Caricato su Smart Venue</th></tr></thead>
             <tbody>
               {recentReceipts.map(receipt => <tr key={receipt.id}>
                 <td className="whitespace-nowrap font-mono text-xs">{new Date(receipt.data).toLocaleString("it-IT")}</td>
                 <td><div className="font-semibold">{receipt.descrizione}</div><div className="font-mono text-xs text-slate-500">{receipt.codice}</div></td>
                 <td className="text-right font-mono font-bold">{formatNum(receipt.quantita)}</td>
                 <td className="text-xs text-slate-500">{receipt.file_sorgente}</td>
+                <td data-testid={`carico-smart-barcode-${receipt.codice}`} className="whitespace-nowrap font-mono text-xs text-slate-700">{smartVenueBarcodes.get(receipt.codice) || "—"}</td>
                 <td>
                   {receipt.caricato_smart_venue
                     ? <div><Badge tone="ok">Confermato</Badge><div className="mt-1 text-[11px] text-slate-500">{receipt.caricato_smart_venue_il ? new Date(receipt.caricato_smart_venue_il).toLocaleString("it-IT") : ""}</div></div>
@@ -362,7 +369,7 @@ export default function Carico() {
                       </button>}
                 </td>
               </tr>)}
-              {!recentReceipts.length && <tr><td colSpan="5" className="py-10 text-center text-slate-400">Nessun carico Smart Venue recente da mostrare.</td></tr>}
+              {!recentReceipts.length && <tr><td colSpan="6" className="py-10 text-center text-slate-400">Nessun carico Smart Venue recente da mostrare.</td></tr>}
             </tbody>
           </table>
         </div>
