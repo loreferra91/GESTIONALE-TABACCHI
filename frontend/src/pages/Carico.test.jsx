@@ -27,6 +27,7 @@ const product = {
 
 const smartVenueReceipt = {
   id: "order-1",
+  batch_id: "receipt-1",
   codice: "SIG1",
   descrizione: "Articolo test",
   quantita: 10,
@@ -128,4 +129,18 @@ test("mostra il barcode Smart Venue tra sorgente e conferma del carico", () => {
   expect(barcodeCell.textContent).toBe("0012345678901");
   expect(barcodeCell.previousElementSibling.textContent).toContain("Auto-Order Excel");
   expect(barcodeCell.nextElementSibling.textContent).toContain("Conferma caricamento esterno");
+});
+
+test("annulla in blocco un carico Excel ancora pendente", async () => {
+  const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+  api.post.mockImplementationOnce(() => Promise.resolve({ data: {
+    righe_annullate: 1,
+    pezzi_annullati: 10,
+  } }));
+
+  await act(async () => container.querySelector('[data-testid="carico-annulla-receipt-1"]').click());
+
+  expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("Auto-Order Excel"));
+  expect(api.post).toHaveBeenCalledWith("/ordini/bulk/receipt-1/annulla");
+  confirmSpy.mockRestore();
 });

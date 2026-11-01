@@ -306,6 +306,82 @@ def test_bulk_receipt_creates_pending_smart_venue_movement_without_changing_bala
     assert count_rows_for_code(database.smart_venue.documents, "P2") == 0
 
 
+def test_bulk_receipt_can_be_annulled_before_smart_venue_confirmation(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"codice": "P1", "descrizione": "Prodotto Smart", "acquistati": 10, "giacenza_negozio": 5},
+            {"codice": "P2", "descrizione": "Prodotto normale", "acquistati": 4, "giacenza_negozio": 2},
+        ])
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 8,
+        })
+        receipt = await server.bulk_carico(server.BulkOrdineIn(
+            file_sorgente="Auto-Order Excel · ordine-non-arrivato.xlsx",
+            righe=[
+                {"codice": "P1", "quantita": 3, "prezzo": 5},
+                {"codice": "P2", "quantita": 2, "prezzo": 4},
+            ],
+        ))
+        cancelled = await server.annulla_bulk_carico(receipt["batch_id"])
+        repeated = await server.annulla_bulk_carico(receipt["batch_id"])
+        return (
+            receipt,
+            cancelled,
+            repeated,
+            await database.prodotti.find_one({"codice": "P1"}),
+            await database.prodotti.find_one({"codice": "P2"}),
+            await database.ricezioni_merce.find_one({"id": receipt["batch_id"]}),
+        )
+
+    receipt, cancelled, repeated, smart_product, normal_product, batch = asyncio.run(scenario())
+
+    assert cancelled["righe_annullate"] == 2
+    assert cancelled["pezzi_annullati"] == 5
+    assert repeated["gia_annullato"] is True
+    assert smart_product["giacenza_negozio"] == 5
+    assert smart_product["acquistati"] == 10
+    assert normal_product["giacenza_negozio"] == 2
+    assert normal_product["acquistati"] == 4
+    assert batch["status"] == "annulled"
+    assert awaitable_count(database.storico_ordini.documents, receipt["batch_id"], True) == 2
+    assert database.smart_venue_movimenti.documents[0]["stato"] == "ANNULLATO"
+
+
+def awaitable_count(rows, batch_id, annulled):
+    return sum(
+        1 for row in rows
+        if row.get("batch_id") == batch_id and row.get("annullato") is annulled
+    )
+
+
+def test_bulk_receipt_annulment_is_blocked_after_external_confirmation(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto Smart", "acquistati": 10, "giacenza_negozio": 5,
+        })
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 8,
+        })
+        receipt = await server.bulk_carico(server.BulkOrdineIn(
+            file_sorgente="TEST",
+            righe=[{"codice": "P1", "quantita": 3, "prezzo": 5}],
+        ))
+        await server.conferma_carico_smart_venue(receipt["movimenti"][0]["id"])
+        with pytest.raises(HTTPException) as exc:
+            await server.annulla_bulk_carico(receipt["batch_id"])
+        return exc.value, await database.prodotti.find_one({"codice": "P1"})
+
+    error, product = asyncio.run(scenario())
+
+    assert error.status_code == 409
+    assert "compensazione esterna" in error.detail
+    assert product["giacenza_negozio"] == 8
+
+
 def count_rows_for_code(rows, code):
     return sum(1 for row in rows if row.get("codice") == code)
 

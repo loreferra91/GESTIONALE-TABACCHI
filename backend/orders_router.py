@@ -888,6 +888,194 @@ def create_orders_router(
                 return replay_batch(existing_batch)
             raise HTTPException(409, "Questo carico è già stato inviato")
 
+    @router.post("/ordini/bulk/{batch_id}/annulla")
+    async def annulla_bulk_carico(batch_id: str, request: Request = None):
+        """Annulla un'intera ricezione finché i carichi Smart Venue sono pendenti.
+
+        L'operazione compensa giacenza negozio e acquistati, conserva lo storico
+        per audit e annulla le sole spunte Smart Venue create da quel carico.
+        """
+        database = get_database()
+        batch = await database.ricezioni_merce.find_one(
+            {"id": batch_id}, {"_id": 0}
+        )
+        if not batch:
+            raise HTTPException(404, "Carico non trovato")
+        if batch.get("status") == "annulled":
+            return {
+                **(batch.get("annul_response") or {}),
+                "ok": True,
+                "batch_id": batch_id,
+                "gia_annullato": True,
+            }
+        if batch.get("status") != "completed":
+            raise HTTPException(409, "Il carico non è in uno stato annullabile")
+
+        orders = await database.storico_ordini.find(
+            {"batch_id": batch_id, "annullato": {"$ne": True}}, {"_id": 0}
+        ).to_list(5000)
+        if not orders:
+            raise HTTPException(409, "Il carico non contiene righe attive da annullare")
+        if any(order.get("caricato_smart_venue") is True for order in orders):
+            raise HTTPException(
+                409,
+                "Almeno una riga è già stata caricata su Smart Venue: registra prima la compensazione esterna",
+            )
+
+        quantities = receipt_quantities_by_code(orders)
+        for code, quantity in quantities.items():
+            product = await database.prodotti.find_one(
+                {"codice": code}, {"_id": 0, "giacenza_negozio": 1, "acquistati": 1}
+            )
+            if not product:
+                raise HTTPException(409, f"Prodotto {code} non trovato: annullamento bloccato")
+            if int(product.get("giacenza_negozio", 0) or 0) < quantity:
+                raise HTTPException(
+                    409,
+                    f"Giacenza insufficiente per annullare {code}: servono {quantity} pezzi",
+                )
+            if int(product.get("acquistati", 0) or 0) < quantity:
+                raise HTTPException(
+                    409,
+                    f"Totale acquistati insufficiente per annullare {code}",
+                )
+
+        smart_orders = [order for order in orders if order.get("smart_venue_applicabile")]
+        for order in smart_orders:
+            movement = await database.smart_venue_movimenti.find_one(
+                {"ordine_id": order["id"]}, {"_id": 0, "stato": 1}
+            )
+            if not movement or movement.get("stato") != "PENDENTE":
+                raise HTTPException(
+                    409,
+                    f"La spunta Smart Venue di {order.get('codice')} non è più pendente",
+                )
+
+        backup = await create_backup_snapshot(
+            "Prima dell'annullamento carico merce",
+            "pre-annullamento-carico-merce",
+            ["prodotti", "storico_ordini", "smart_venue_movimenti", "ricezioni_merce"],
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        operator = request_operator(request)
+
+        async def annul(session):
+            kwargs = session_kwargs(session)
+            acquired = await database.ricezioni_merce.update_one(
+                {"id": batch_id, "status": "completed"},
+                {"$set": {"status": "annulling", "annulling_at": now}},
+                **kwargs,
+            )
+            if acquired.matched_count != 1:
+                raise HTTPException(409, "Il carico è cambiato nel frattempo")
+
+            compensated_products = []
+            cancelled_movements = []
+            cancelled_orders = []
+            try:
+                for code, quantity in quantities.items():
+                    changed = await database.prodotti.update_one(
+                        {
+                            "codice": code,
+                            "giacenza_negozio": {"$gte": quantity},
+                            "acquistati": {"$gte": quantity},
+                        },
+                        {"$inc": {"giacenza_negozio": -quantity, "acquistati": -quantity}},
+                        **kwargs,
+                    )
+                    if changed.matched_count != 1:
+                        raise HTTPException(409, f"Il prodotto {code} è cambiato nel frattempo")
+                    compensated_products.append((code, quantity))
+
+                for order in smart_orders:
+                    changed = await database.smart_venue_movimenti.update_one(
+                        {"ordine_id": order["id"], "stato": "PENDENTE"},
+                        {"$set": {"stato": "ANNULLATO", "cancelled_at": now, "operatore": operator}},
+                        **kwargs,
+                    )
+                    if changed.matched_count != 1:
+                        raise HTTPException(409, "Una spunta Smart Venue è cambiata nel frattempo")
+                    cancelled_movements.append(order["id"])
+
+                for order in orders:
+                    changed = await database.storico_ordini.update_one(
+                        {"id": order["id"], "annullato": {"$ne": True}},
+                        {"$set": {
+                            "annullato": True,
+                            "smart_venue_stato": "ANNULLATO",
+                            "annullato_at": now,
+                            "annullato_da": operator,
+                        }},
+                        **kwargs,
+                    )
+                    if changed.matched_count != 1:
+                        raise HTTPException(409, "Una riga del carico è cambiata nel frattempo")
+                    cancelled_orders.append(order)
+
+                response = {
+                    "ok": True,
+                    "batch_id": batch_id,
+                    "gia_annullato": False,
+                    "righe_annullate": len(orders),
+                    "pezzi_annullati": sum(quantities.values()),
+                    "backup_id": backup["id"],
+                }
+                completed = await database.ricezioni_merce.update_one(
+                    {"id": batch_id, "status": "annulling"},
+                    {"$set": {
+                        "status": "annulled",
+                        "annulled_at": now,
+                        "annulled_by": operator,
+                        "annul_response": response,
+                    }},
+                    **kwargs,
+                )
+                if completed.matched_count != 1:
+                    raise HTTPException(409, "Stato del carico cambiato durante l'annullamento")
+                return response
+            except Exception:
+                if session is None:
+                    for order in reversed(cancelled_orders):
+                        await database.storico_ordini.update_one(
+                            {"id": order["id"], "annullato_at": now},
+                            {"$set": {
+                                "annullato": bool(order.get("annullato", False)),
+                                "smart_venue_stato": order.get("smart_venue_stato", smart_state(bool(order.get("smart_venue_applicabile")))),
+                                "annullato_at": order.get("annullato_at"),
+                                "annullato_da": order.get("annullato_da"),
+                            }},
+                        )
+                    for order_id in reversed(cancelled_movements):
+                        await database.smart_venue_movimenti.update_one(
+                            {"ordine_id": order_id, "stato": "ANNULLATO", "cancelled_at": now},
+                            {"$set": {"stato": "PENDENTE", "cancelled_at": None}},
+                        )
+                    for code, quantity in reversed(compensated_products):
+                        await database.prodotti.update_one(
+                            {"codice": code},
+                            {"$inc": {"giacenza_negozio": quantity, "acquistati": quantity}},
+                        )
+                    await database.ricezioni_merce.update_one(
+                        {"id": batch_id, "status": "annulling"},
+                        {"$set": {"status": "completed"}},
+                    )
+                raise
+
+        result = await run_transactionally(annul)
+        await record_audit_event(
+            "ANNULLATO",
+            "CARICO_MERCE_BATCH",
+            batch_id,
+            prima={
+                "file_sorgente": batch.get("file_sorgente"),
+                "data": batch.get("data"),
+                "righe": len(orders),
+                "pezzi": sum(quantities.values()),
+            },
+            dopo=result,
+        )
+        return result
+
     return {
         "router": router,
         "list_ordini": list_ordini,
@@ -895,6 +1083,7 @@ def create_orders_router(
         "conferma_carico_smart_venue": conferma_carico_smart_venue,
         "del_ordine": del_ordine,
         "bulk_carico": bulk_carico,
+        "annulla_bulk_carico": annulla_bulk_carico,
         "preview_auto_order_excel": preview_auto_order_excel,
         "repair_smart_venue_auto_order_2026_10_12": repair_smart_venue_auto_order_2026_10_12,
         "historical_smart_venue_metadata_migration": historical_smart_venue_metadata_migration,
