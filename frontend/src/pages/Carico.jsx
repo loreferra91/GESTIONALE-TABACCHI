@@ -183,9 +183,13 @@ export default function Carico() {
   };
 
   const firstReceiptByBatch = new Map();
+  const confirmedReceiptBatches = new Set();
   recentReceipts.forEach(receipt => {
     if (receipt.batch_id && !firstReceiptByBatch.has(receipt.batch_id)) {
       firstReceiptByBatch.set(receipt.batch_id, receipt.id);
+    }
+    if (receipt.batch_id && receipt.caricato_smart_venue) {
+      confirmedReceiptBatches.add(receipt.batch_id);
     }
   });
 
@@ -392,7 +396,9 @@ export default function Carico() {
                       </button>}
                 </td>
                 <td>
-                  {receipt.batch_id && firstReceiptByBatch.get(receipt.batch_id) === receipt.id ? (
+                  {receipt.batch_id
+                    && !confirmedReceiptBatches.has(receipt.batch_id)
+                    && firstReceiptByBatch.get(receipt.batch_id) === receipt.id ? (
                     <button
                       type="button"
                       data-testid={`carico-annulla-${receipt.batch_id}`}
