@@ -612,7 +612,9 @@ def test_smart_venue_import_uses_column_f_and_preserves_manual_rows(monkeypatch)
 
     result, rows = asyncio.run(seed_and_import())
 
-    assert result["inseriti"] == 2
+    assert result["inseriti"] == 1
+    assert result["aggiornati"] == 0
+    assert result["righe_elaborate"] == 1
     assert rows["AMMS9"]["smart_venue"] == 43
     assert rows["AMMS9"]["barcode"] == "87248265"
     assert rows["AMMS9"]["origine"] == "EXCEL"
@@ -641,6 +643,35 @@ def test_smart_venue_importing_only_column_e_preserves_existing_column_f(monkeyp
 
     assert row["barcode"] == "NUOVO-BARCODE"
     assert row["smart_venue"] == 43
+
+
+def test_smart_venue_barcode_mode_ignores_populated_column_f_and_reads_first_row(monkeypatch):
+    database = isolated_db(monkeypatch)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "(SMART VENUE)"
+    sheet.append(["P1", "Primo prodotto", None, None, "NUOVO-1", 999])
+    sheet.append(["P2", "Secondo prodotto", None, None, "NUOVO-2", 888])
+
+    async def seed_and_import():
+        await database.smart_venue.insert_many([
+            {"id": "smart-venue:P1", "codice": "P1", "descrizione": "Descrizione esistente", "smart_venue": 10, "barcode": "VECCHIO-1"},
+            {"id": "smart-venue:P2", "codice": "P2", "smart_venue": 20, "barcode": "VECCHIO-2"},
+            {"id": "smart-venue:P3", "codice": "P3", "smart_venue": 30, "barcode": "VECCHIO-3"},
+        ])
+        result = await server._import_smart_venue(sheet, "barcode")
+        rows = await database.smart_venue.find({}, {"_id": 0}).to_list(5000)
+        return result, {row["codice"]: row for row in rows}
+
+    result, rows = asyncio.run(seed_and_import())
+
+    assert result["righe_elaborate"] == 2
+    assert rows["P1"]["barcode"] == "NUOVO-1"
+    assert rows["P1"]["smart_venue"] == 10
+    assert rows["P1"]["descrizione"] == "Descrizione esistente"
+    assert rows["P2"]["barcode"] == "NUOVO-2"
+    assert rows["P2"]["smart_venue"] == 20
+    assert rows["P3"]["smart_venue"] == 30
 
 
 def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):

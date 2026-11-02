@@ -40,6 +40,7 @@ export default function SmartVenue() {
   const [productForm, setProductForm] = useState(EMPTY_PRODUCT);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importMode, setImportMode] = useState("barcode");
 
   const load = () => api.get("/smart-venue")
       .then(response => setAllRows(response.data || []))
@@ -190,9 +191,11 @@ export default function SmartVenue() {
     try {
       const data = new FormData();
       data.append("file", file);
+      data.append("modo", importMode);
       const response = await api.post("/smart-venue/import-excel", data);
       await load();
-      toast.success(`${response.data.totali.smart_venue_righe} righe aggiornate dalle celle compilate in E/F`);
+      const labels = { barcode: "colonna E", saldo: "colonna F", entrambi: "colonne E/F" };
+      toast.success(`${response.data.totali.smart_venue_righe} righe elaborate dalla ${labels[importMode]}`);
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile importare SMART VENUE"));
     } finally {
@@ -209,10 +212,17 @@ export default function SmartVenue() {
               <h2 className="font-bold text-slate-900">Aggiungi prodotto</h2>
               <p className="text-xs text-slate-500">Il prodotto viene creato anche nell’anagrafica generale.</p>
             </div>
-            <label className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${importing ? "pointer-events-none opacity-50" : "hover:bg-slate-50"}`}>
-              <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa celle compilate E/F da Excel"}
-              <input data-testid="smart-venue-import" type="file" accept=".xlsx,.xlsm" className="hidden" onChange={importSmartVenue} disabled={importing} />
-            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <select data-testid="smart-venue-import-mode" value={importMode} onChange={event => setImportMode(event.target.value)} disabled={importing} className="rounded-md border px-3 py-2 text-sm">
+                <option value="barcode">Solo colonna E (barcode)</option>
+                <option value="saldo">Solo colonna F (saldo Smart Venue)</option>
+                <option value="entrambi">Colonne E e F</option>
+              </select>
+              <label className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${importing ? "pointer-events-none opacity-50" : "hover:bg-slate-50"}`}>
+                <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa da Excel"}
+                <input data-testid="smart-venue-import" type="file" accept=".xlsx,.xlsm" className="hidden" onChange={importSmartVenue} disabled={importing} />
+              </label>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <input data-testid="smart-venue-new-code" required placeholder="Codice" value={productForm.codice} onChange={event => setProductForm(current => ({ ...current, codice: event.target.value }))} className="rounded-md border px-3 py-2 text-sm font-mono" />

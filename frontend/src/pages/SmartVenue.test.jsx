@@ -130,3 +130,19 @@ test("conferma l'uscita sul nuovo endpoint idempotente con riepilogo", async () 
   );
   expect(api.get).toHaveBeenCalledTimes(2);
 });
+
+test("l'import Excel usa solo la colonna E per impostazione predefinita", async () => {
+  api.post.mockResolvedValueOnce({ data: { totali: { smart_venue_righe: 2 } } });
+  const input = container.querySelector('[data-testid="smart-venue-import"]');
+  const file = new File(["excel"], "smartvenue.xlsx", {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  Object.defineProperty(input, "files", { configurable: true, value: [file] });
+
+  await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+
+  const [path, form] = api.post.mock.calls[0];
+  expect(path).toBe("/smart-venue/import-excel");
+  expect(form.get("file")).toBe(file);
+  expect(form.get("modo")).toBe("barcode");
+});
