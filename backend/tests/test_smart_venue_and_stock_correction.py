@@ -619,6 +619,30 @@ def test_smart_venue_import_uses_column_f_and_preserves_manual_rows(monkeypatch)
     assert rows["MAN1"]["smart_venue"] == 7
 
 
+def test_smart_venue_importing_only_column_e_preserves_existing_column_f(monkeypatch):
+    database = isolated_db(monkeypatch)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "(SMART VENUE)"
+    sheet.append([])
+    sheet.append(["Codice", "Descrizione", "ACQ.", "RIMANENZE", "codice2", "RIMANENZE4"])
+    sheet.append(["AMMS9", "MARLBORO GOLD", None, None, "NUOVO-BARCODE", None])
+
+    async def seed_and_import():
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:AMMS9", "codice": "AMMS9",
+            "descrizione": "MARLBORO GOLD", "smart_venue": 43,
+            "barcode": "VECCHIO-BARCODE", "origine": "EXCEL",
+        })
+        await server._import_smart_venue(sheet)
+        return await database.smart_venue.find_one({"codice": "AMMS9"}, {"_id": 0})
+
+    row = asyncio.run(seed_and_import())
+
+    assert row["barcode"] == "NUOVO-BARCODE"
+    assert row["smart_venue"] == 43
+
+
 def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):
     database = isolated_db(monkeypatch)
 

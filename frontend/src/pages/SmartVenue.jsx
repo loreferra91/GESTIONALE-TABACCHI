@@ -192,7 +192,7 @@ export default function SmartVenue() {
       data.append("file", file);
       const response = await api.post("/smart-venue/import-excel", data);
       await load();
-      toast.success(`${response.data.totali.smart_venue_righe} righe aggiornate dalle colonne E/F`);
+      toast.success(`${response.data.totali.smart_venue_righe} righe aggiornate dalle celle compilate in E/F`);
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile importare SMART VENUE"));
     } finally {
@@ -210,7 +210,7 @@ export default function SmartVenue() {
               <p className="text-xs text-slate-500">Il prodotto viene creato anche nell’anagrafica generale.</p>
             </div>
             <label className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${importing ? "pointer-events-none opacity-50" : "hover:bg-slate-50"}`}>
-              <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa colonne E/F da Excel"}
+              <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa celle compilate E/F da Excel"}
               <input data-testid="smart-venue-import" type="file" accept=".xlsx,.xlsm" className="hidden" onChange={importSmartVenue} disabled={importing} />
             </label>
           </div>

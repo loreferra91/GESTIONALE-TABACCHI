@@ -186,6 +186,11 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
 
     async def import_smart_venue(worksheet) -> Dict[str, int]:
         db = get_database()
+        existing_rows = {
+            str(row.get("codice") or ""): row
+            for row in await db.smart_venue.find({}, {"_id": 0}).to_list(5000)
+            if row.get("codice")
+        }
         rows_by_code: Dict[str, Dict[str, Any]] = {}
         errors = 0
         for row_number, row in enumerate(worksheet.iter_rows(min_row=3, values_only=True), start=3):
@@ -195,11 +200,24 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                 code = product_code_text(row[0])
                 if not code:
                     continue
-                rows_by_code[code] = {"id": f"smart-venue:{code}", "codice": code,
+                existing = existing_rows.get(code, {})
+                smart_venue_cell = row[5] if len(row) > 5 else None
+                barcode_cell = row[4] if len(row) > 4 else None
+                imported = {**existing, "id": f"smart-venue:{code}", "codice": code,
                     "descrizione": str(row[1] or "").strip(),
-                    "smart_venue": int(row[5] or 0) if len(row) > 5 else 0,
-                    "origine": "EXCEL", "barcode": str(row[4] or "").strip() if len(row) > 4 else "",
+                    "origine": "EXCEL",
                     "riga_excel": row_number, "updated_at": datetime.now(timezone.utc).isoformat()}
+                # E e F sono aggiornamenti indipendenti: una cella vuota indica
+                # "non modificare", non il valore vuoto/zero.
+                if barcode_cell is not None and str(barcode_cell).strip():
+                    imported["barcode"] = str(barcode_cell).strip()
+                else:
+                    imported.setdefault("barcode", "")
+                if smart_venue_cell is not None and str(smart_venue_cell).strip():
+                    imported["smart_venue"] = int(smart_venue_cell)
+                else:
+                    imported.setdefault("smart_venue", 0)
+                rows_by_code[code] = imported
             except (TypeError, ValueError):
                 errors += 1
         manual_rows = await db.smart_venue.find({"origine": "MANUALE"}, {"_id": 0}).to_list(5000)
