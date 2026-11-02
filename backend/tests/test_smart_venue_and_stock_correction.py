@@ -151,6 +151,56 @@ def test_smart_venue_save_uses_one_bulk_write(monkeypatch):
     assert bulk_sizes == [(1, 1000)]
 
 
+def test_smart_venue_control_save_preserves_manually_managed_barcodes(monkeypatch):
+    database = AsyncMongoMockClient()["smart_venue_barcode_preservation_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def fake_backup(*_args, **_kwargs):
+        return {"id": "backup-1"}
+
+    async def fake_bulk(collection, operations, batch_size=1000):
+        for operation in operations:
+            await collection.update_one(
+                operation._filter,
+                operation._doc,
+                upsert=operation._upsert,
+            )
+        return {"inseriti": 0, "aggiornati": len(operations), "errori": 0}
+
+    async def fake_history(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(server, "create_backup_snapshot", fake_backup)
+    monkeypatch.setattr(server, "_bulk_upsert", fake_bulk)
+    monkeypatch.setattr(server, "record_import_history", fake_history)
+
+    async def seed_and_save():
+        await database.prodotti.insert_one({
+            "id": "product-1", "codice": "AMMS2982",
+            "descrizione": "BENSON BLUE", "giacenza_negozio": 3,
+        })
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:AMMS2982", "codice": "AMMS2982",
+            "descrizione": "BENSON BLUE", "smart_venue": 2,
+            "barcode": "MANUALE-PRINCIPALE",
+            "barcodes": ["MANUALE-PRINCIPALE", "MANUALE-SECONDARIO"],
+            "origine": "MANUALE",
+        })
+        await server.import_smart_venue_bulk(server.SmartVenueBulkIn(testo=(
+            "BARCODE-DAL-CONTROLLO - BENSON BLUE - 02982 - Sigarette\n"
+            "5.30\n5\n26.50\n"
+        )))
+        return await database.smart_venue.find_one(
+            {"codice": "AMMS2982"}, {"_id": 0}
+        )
+
+    saved = asyncio.run(seed_and_save())
+
+    assert saved["smart_venue"] == 5
+    assert saved["barcode"] == "MANUALE-PRINCIPALE"
+    assert saved["barcodes"] == ["MANUALE-PRINCIPALE", "MANUALE-SECONDARIO"]
+
+
 class FakeCursor:
     def __init__(self, documents):
         self.documents = documents
