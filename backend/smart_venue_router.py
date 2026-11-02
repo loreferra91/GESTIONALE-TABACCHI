@@ -338,7 +338,10 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         if parsed["errori"]: raise HTTPException(422, {"message": "Correggi gli errori prima di salvare", "errori": parsed["errori"]})
         if not parsed["righe"]: raise HTTPException(422, "Nessun prodotto valido")
         resolved = resolve_rows(parsed["righe"], await db.prodotti.find({}, {"_id": 0}).to_list(5000)); backup = await create_backup_snapshot("Prima import testo SmartVenue", "pre-import-smart-venue-bulk", ["smart_venue", "smart_venue_hidden", "smart_venue_values"]); batch_id = str(uuid.uuid4()); now = datetime.now(timezone.utc).isoformat(); codes = [r["codice"] for r in resolved]
-        operations = [UpdateOne({"codice": r["codice"]}, {"$set": {"id": f"smart-venue:{r['codice']}", "codice": r["codice"], "descrizione": r["descrizione"], "smart_venue": r["smart_venue"], "barcode": r["barcodes"][0] if r["barcodes"] else "", "barcodes": r["barcodes"], "origine": "BULK_TESTO", "batch_id": batch_id, "updated_at": now}}, upsert=True) for r in resolved]
+        # Il controllo riconcilia soltanto il saldo SmartVenue. I barcode sono
+        # anagrafica gestita manualmente e non devono essere sovrascritti dai
+        # codici presenti nel testo copiato dal sito esterno.
+        operations = [UpdateOne({"codice": r["codice"]}, {"$set": {"id": f"smart-venue:{r['codice']}", "codice": r["codice"], "descrizione": r["descrizione"], "smart_venue": r["smart_venue"], "origine": "BULK_TESTO", "batch_id": batch_id, "updated_at": now}}, upsert=True) for r in resolved]
         if (await bulk_upsert(db.smart_venue, operations))["errori"]: raise HTTPException(500, "Salvataggio SmartVenue incompleto: riprova")
         await db.smart_venue.delete_many({"origine": "BULK_TESTO", "codice": {"$nin": codes}}); rows = await comparison(resolved)
         response = {"ok": True, "batch_id": batch_id, "backup_id": backup["id"], "created_at": now, "righe": rows, "prodotti": len(rows), "totale_smart_venue": sum(r["smart_venue"] for r in rows), "differenze": sum(r["stato"] != "OK" for r in rows), "errori": []}; await record_import_history("Testo SmartVenue", response, backup["id"]); return response
