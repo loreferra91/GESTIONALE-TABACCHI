@@ -10,6 +10,7 @@ import { defaultLotForCategory } from "../lib/categories";
 export default function Carico() {
   const [prodotti, setProdotti] = useState([]);
   const [smartVenueCodes, setSmartVenueCodes] = useState(new Set());
+  const [smartVenueBarcodes, setSmartVenueBarcodes] = useState(new Map());
   const today = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(today);
   const [sorgente, setSorgente] = useState("carico manuale");
@@ -22,6 +23,7 @@ export default function Carico() {
   const [lastReceipt, setLastReceipt] = useState(null);
   const [recentReceipts, setRecentReceipts] = useState([]);
   const [confirmingReceipt, setConfirmingReceipt] = useState(null);
+  const [cancellingBatch, setCancellingBatch] = useState(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => createIdempotencyKey());
 
   useEffect(() => {
@@ -30,9 +32,14 @@ export default function Carico() {
       api.get("/ordini", { params: { limit: 100 } }),
       api.get("/smart-venue"),
     ]).then(([productsResponse, receiptsResponse, smartVenueResponse]) => {
+      const smartVenueRows = smartVenueResponse.data || [];
       setProdotti(productsResponse.data || []);
       setRecentReceipts((receiptsResponse.data || []).filter(row => row.smart_venue_applicabile));
-      setSmartVenueCodes(new Set((smartVenueResponse.data || []).map(row => row.codice)));
+      setSmartVenueCodes(new Set(smartVenueRows.map(row => row.codice)));
+      setSmartVenueBarcodes(new Map(smartVenueRows.map(row => [
+        row.codice,
+        String(row.barcode || row.barcodes?.[0] || "").trim(),
+      ])));
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -172,6 +179,32 @@ export default function Carico() {
       toast.error(apiErrorMessage(error, "Impossibile confermare il caricamento Smart Venue"));
     } finally {
       setConfirmingReceipt(null);
+    }
+  };
+
+  const firstReceiptByBatch = new Map();
+  const confirmedReceiptBatches = new Set();
+  recentReceipts.forEach(receipt => {
+    if (receipt.batch_id && !firstReceiptByBatch.has(receipt.batch_id)) {
+      firstReceiptByBatch.set(receipt.batch_id, receipt.id);
+    }
+    if (receipt.batch_id && receipt.caricato_smart_venue) {
+      confirmedReceiptBatches.add(receipt.batch_id);
+    }
+  });
+
+  const cancelReceiptBatch = async receipt => {
+    const source = receipt.file_sorgente || "questo carico";
+    if (!window.confirm(`Annullare tutto il carico \"${source}\"? Verranno ripristinati giacenze, acquistati e spunte Smart Venue pendenti.`)) return;
+    setCancellingBatch(receipt.batch_id);
+    try {
+      const response = await api.post(`/ordini/bulk/${encodeURIComponent(receipt.batch_id)}/annulla`);
+      toast.success(`${response.data.righe_annullate} righe e ${response.data.pezzi_annullati} pezzi annullati`);
+      await reloadRecentReceipts();
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile annullare il carico"));
+    } finally {
+      setCancellingBatch(null);
     }
   };
 
@@ -346,14 +379,15 @@ export default function Carico() {
           <p className="mt-1 text-xs text-slate-500">La conferma registra il carico nel saldo Smart Venue esterno; il fisico è già aggiornato al ricevimento.</p>
         </div>
         <div className="overflow-x-auto max-h-[50vh]">
-          <table className="data-table w-full min-w-[760px]">
-            <thead><tr><th>Data</th><th>Prodotto</th><th className="text-right">Quantità caricata</th><th>Sorgente</th><th>Caricato su Smart Venue</th></tr></thead>
+          <table className="data-table w-full min-w-[900px]">
+            <thead><tr><th>Data</th><th>Prodotto</th><th className="text-right">Quantità caricata</th><th>Sorgente</th><th>Barcode</th><th>Caricato su Smart Venue</th><th>Azioni carico</th></tr></thead>
             <tbody>
               {recentReceipts.map(receipt => <tr key={receipt.id}>
                 <td className="whitespace-nowrap font-mono text-xs">{new Date(receipt.data).toLocaleString("it-IT")}</td>
                 <td><div className="font-semibold">{receipt.descrizione}</div><div className="font-mono text-xs text-slate-500">{receipt.codice}</div></td>
                 <td className="text-right font-mono font-bold">{formatNum(receipt.quantita)}</td>
                 <td className="text-xs text-slate-500">{receipt.file_sorgente}</td>
+                <td data-testid={`carico-smart-barcode-${receipt.codice}`} className="whitespace-nowrap font-mono text-xs text-slate-700">{smartVenueBarcodes.get(receipt.codice) || "—"}</td>
                 <td>
                   {receipt.caricato_smart_venue
                     ? <div><Badge tone="ok">Confermato</Badge><div className="mt-1 text-[11px] text-slate-500">{receipt.caricato_smart_venue_il ? new Date(receipt.caricato_smart_venue_il).toLocaleString("it-IT") : ""}</div></div>
@@ -361,8 +395,23 @@ export default function Carico() {
                         {confirmingReceipt === receipt.id ? <Clock size={15} /> : <CheckCircle size={15} weight="bold" />} {confirmingReceipt === receipt.id ? "Conferma…" : "Conferma caricamento esterno"}
                       </button>}
                 </td>
+                <td>
+                  {receipt.batch_id
+                    && !confirmedReceiptBatches.has(receipt.batch_id)
+                    && firstReceiptByBatch.get(receipt.batch_id) === receipt.id ? (
+                    <button
+                      type="button"
+                      data-testid={`carico-annulla-${receipt.batch_id}`}
+                      onClick={() => cancelReceiptBatch(receipt)}
+                      disabled={cancellingBatch === receipt.batch_id}
+                      className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                    >
+                      <Trash size={14} /> {cancellingBatch === receipt.batch_id ? "Annullamento…" : "Annulla intero carico"}
+                    </button>
+                  ) : null}
+                </td>
               </tr>)}
-              {!recentReceipts.length && <tr><td colSpan="5" className="py-10 text-center text-slate-400">Nessun carico Smart Venue recente da mostrare.</td></tr>}
+              {!recentReceipts.length && <tr><td colSpan="7" className="py-10 text-center text-slate-400">Nessun carico Smart Venue recente da mostrare.</td></tr>}
             </tbody>
           </table>
         </div>

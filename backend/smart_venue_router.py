@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from pymongo import UpdateOne
 
@@ -184,33 +184,52 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
             "differenza": movement["differenza_successiva"],
         }
 
-    async def import_smart_venue(worksheet) -> Dict[str, int]:
+    async def import_smart_venue(worksheet, mode: str = "entrambi") -> Dict[str, int]:
         db = get_database()
-        rows_by_code: Dict[str, Dict[str, Any]] = {}
+        if mode not in {"barcode", "saldo", "entrambi"}:
+            raise HTTPException(422, "Modalità import SMART VENUE non valida")
+        existing_rows = {
+            str(row.get("codice") or ""): row
+            for row in await db.smart_venue.find({}, {"_id": 0}).to_list(5000)
+            if row.get("codice")
+        }
+        rows_by_code: Dict[str, Dict[str, Any]] = dict(existing_rows)
+        processed_codes = set()
         errors = 0
-        for row_number, row in enumerate(worksheet.iter_rows(min_row=3, values_only=True), start=3):
+        for row_number, row in enumerate(worksheet.iter_rows(values_only=True), start=1):
             try:
                 if not row or not row[0]:
                     continue
                 code = product_code_text(row[0])
-                if not code:
+                if not code or code.upper() in {"CODICE", "CODE"}:
                     continue
-                rows_by_code[code] = {"id": f"smart-venue:{code}", "codice": code,
-                    "descrizione": str(row[1] or "").strip(),
-                    "smart_venue": int(row[5] or 0) if len(row) > 5 else 0,
-                    "origine": "EXCEL", "barcode": str(row[4] or "").strip() if len(row) > 4 else "",
+                existing = existing_rows.get(code, {})
+                smart_venue_cell = row[5] if len(row) > 5 else None
+                barcode_cell = row[4] if len(row) > 4 else None
+                imported = {**existing, "id": f"smart-venue:{code}", "codice": code,
+                    "descrizione": str(existing.get("descrizione") or row[1] or "").strip(),
+                    "origine": existing.get("origine") or "EXCEL",
                     "riga_excel": row_number, "updated_at": datetime.now(timezone.utc).isoformat()}
+                # E e F sono aggiornamenti indipendenti: una cella vuota indica
+                # "non modificare", non il valore vuoto/zero.
+                if mode in {"barcode", "entrambi"} and barcode_cell is not None and str(barcode_cell).strip():
+                    imported["barcode"] = str(barcode_cell).strip()
+                else:
+                    imported.setdefault("barcode", "")
+                if mode in {"saldo", "entrambi"} and smart_venue_cell is not None and str(smart_venue_cell).strip():
+                    imported["smart_venue"] = int(smart_venue_cell)
+                else:
+                    imported.setdefault("smart_venue", 0)
+                rows_by_code[code] = imported
+                processed_codes.add(code)
             except (TypeError, ValueError):
                 errors += 1
-        manual_rows = await db.smart_venue.find({"origine": "MANUALE"}, {"_id": 0}).to_list(5000)
-        for row in manual_rows:
-            code = str(row.get("codice") or "")
-            if code and code not in rows_by_code:
-                rows_by_code[code] = row
         await db.smart_venue.delete_many({})
         if rows_by_code:
             await db.smart_venue.insert_many(list(rows_by_code.values()))
-        return {"inseriti": len(rows_by_code), "aggiornati": 0, "errori": errors}
+        inserted = sum(code not in existing_rows for code in processed_codes)
+        return {"inseriti": inserted, "aggiornati": len(processed_codes) - inserted,
+                "righe_elaborate": len(processed_codes), "errori": errors}
 
     def parse_bulk_text(text: str) -> Dict[str, Any]:
         lines = [line.strip() for line in str(text or "").replace("\r", "").split("\n") if line.strip()]
@@ -347,13 +366,13 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         response = {"ok": True, "batch_id": batch_id, "backup_id": backup["id"], "created_at": now, "righe": rows, "prodotti": len(rows), "totale_smart_venue": sum(r["smart_venue"] for r in rows), "differenze": sum(r["stato"] != "OK" for r in rows), "errori": []}; await record_import_history("Testo SmartVenue", response, backup["id"]); return response
 
     @router.post("/smart-venue/import-excel")
-    async def import_smart_venue_excel(file: UploadFile = File(...)):
+    async def import_smart_venue_excel(file: UploadFile = File(...), modo: str = Form("entrambi")):
         try: import openpyxl
         except Exception: raise HTTPException(500, "openpyxl non installato")
         try: workbook = openpyxl.load_workbook(io.BytesIO(await read_capped(file)), data_only=True, keep_vba=False)
         except Exception as exc: raise HTTPException(422, f"File non leggibile: {exc}")
         if "(SMART VENUE)" not in workbook.sheetnames: raise HTTPException(422, "Foglio (SMART VENUE) non trovato")
-        backup = await create_backup_snapshot(f"Prima import SMART VENUE {file.filename or 'Excel'}", "pre-import-smart-venue"); result = await import_smart_venue(workbook["(SMART VENUE)"]); response = {"ok": True, "file": file.filename, "backup_id": backup["id"], "tipo_import": "smart_venue", "contabilita_inclusa": False, "fogli_trovati": ["(SMART VENUE)"], "fogli_mancanti": [], "dettaglio": {"(SMART VENUE)": result}, "totali": {"smart_venue_righe": result["inseriti"]}}; await record_import_history(file.filename or "Excel SMART VENUE", response, backup["id"]); return response
+        backup = await create_backup_snapshot(f"Prima import SMART VENUE {file.filename or 'Excel'}", "pre-import-smart-venue"); result = await import_smart_venue(workbook["(SMART VENUE)"], modo); response = {"ok": True, "file": file.filename, "backup_id": backup["id"], "tipo_import": "smart_venue", "modalita": modo, "contabilita_inclusa": False, "fogli_trovati": ["(SMART VENUE)"], "fogli_mancanti": [], "dettaglio": {"(SMART VENUE)": result}, "totali": {"smart_venue_righe": result["righe_elaborate"]}}; await record_import_history(file.filename or "Excel SMART VENUE", response, backup["id"]); return response
 
     @router.get("/smart-venue")
     async def list_smart_venue():

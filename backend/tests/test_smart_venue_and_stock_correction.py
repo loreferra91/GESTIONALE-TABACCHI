@@ -356,6 +356,82 @@ def test_bulk_receipt_creates_pending_smart_venue_movement_without_changing_bala
     assert count_rows_for_code(database.smart_venue.documents, "P2") == 0
 
 
+def test_bulk_receipt_can_be_annulled_before_smart_venue_confirmation(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"codice": "P1", "descrizione": "Prodotto Smart", "acquistati": 10, "giacenza_negozio": 5},
+            {"codice": "P2", "descrizione": "Prodotto normale", "acquistati": 4, "giacenza_negozio": 2},
+        ])
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 8,
+        })
+        receipt = await server.bulk_carico(server.BulkOrdineIn(
+            file_sorgente="Auto-Order Excel · ordine-non-arrivato.xlsx",
+            righe=[
+                {"codice": "P1", "quantita": 3, "prezzo": 5},
+                {"codice": "P2", "quantita": 2, "prezzo": 4},
+            ],
+        ))
+        cancelled = await server.annulla_bulk_carico(receipt["batch_id"])
+        repeated = await server.annulla_bulk_carico(receipt["batch_id"])
+        return (
+            receipt,
+            cancelled,
+            repeated,
+            await database.prodotti.find_one({"codice": "P1"}),
+            await database.prodotti.find_one({"codice": "P2"}),
+            await database.ricezioni_merce.find_one({"id": receipt["batch_id"]}),
+        )
+
+    receipt, cancelled, repeated, smart_product, normal_product, batch = asyncio.run(scenario())
+
+    assert cancelled["righe_annullate"] == 2
+    assert cancelled["pezzi_annullati"] == 5
+    assert repeated["gia_annullato"] is True
+    assert smart_product["giacenza_negozio"] == 5
+    assert smart_product["acquistati"] == 10
+    assert normal_product["giacenza_negozio"] == 2
+    assert normal_product["acquistati"] == 4
+    assert batch["status"] == "annulled"
+    assert awaitable_count(database.storico_ordini.documents, receipt["batch_id"], True) == 2
+    assert database.smart_venue_movimenti.documents[0]["stato"] == "ANNULLATO"
+
+
+def awaitable_count(rows, batch_id, annulled):
+    return sum(
+        1 for row in rows
+        if row.get("batch_id") == batch_id and row.get("annullato") is annulled
+    )
+
+
+def test_bulk_receipt_annulment_is_blocked_after_external_confirmation(monkeypatch):
+    database = isolated_db(monkeypatch)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto Smart", "acquistati": 10, "giacenza_negozio": 5,
+        })
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:P1", "codice": "P1", "smart_venue": 8,
+        })
+        receipt = await server.bulk_carico(server.BulkOrdineIn(
+            file_sorgente="TEST",
+            righe=[{"codice": "P1", "quantita": 3, "prezzo": 5}],
+        ))
+        await server.conferma_carico_smart_venue(receipt["movimenti"][0]["id"])
+        with pytest.raises(HTTPException) as exc:
+            await server.annulla_bulk_carico(receipt["batch_id"])
+        return exc.value, await database.prodotti.find_one({"codice": "P1"})
+
+    error, product = asyncio.run(scenario())
+
+    assert error.status_code == 409
+    assert "compensazione esterna" in error.detail
+    assert product["giacenza_negozio"] == 8
+
+
 def count_rows_for_code(rows, code):
     return sum(1 for row in rows if row.get("codice") == code)
 
@@ -536,11 +612,66 @@ def test_smart_venue_import_uses_column_f_and_preserves_manual_rows(monkeypatch)
 
     result, rows = asyncio.run(seed_and_import())
 
-    assert result["inseriti"] == 2
+    assert result["inseriti"] == 1
+    assert result["aggiornati"] == 0
+    assert result["righe_elaborate"] == 1
     assert rows["AMMS9"]["smart_venue"] == 43
     assert rows["AMMS9"]["barcode"] == "87248265"
     assert rows["AMMS9"]["origine"] == "EXCEL"
     assert rows["MAN1"]["smart_venue"] == 7
+
+
+def test_smart_venue_importing_only_column_e_preserves_existing_column_f(monkeypatch):
+    database = isolated_db(monkeypatch)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "(SMART VENUE)"
+    sheet.append([])
+    sheet.append(["Codice", "Descrizione", "ACQ.", "RIMANENZE", "codice2", "RIMANENZE4"])
+    sheet.append(["AMMS9", "MARLBORO GOLD", None, None, "NUOVO-BARCODE", None])
+
+    async def seed_and_import():
+        await database.smart_venue.insert_one({
+            "id": "smart-venue:AMMS9", "codice": "AMMS9",
+            "descrizione": "MARLBORO GOLD", "smart_venue": 43,
+            "barcode": "VECCHIO-BARCODE", "origine": "EXCEL",
+        })
+        await server._import_smart_venue(sheet)
+        return await database.smart_venue.find_one({"codice": "AMMS9"}, {"_id": 0})
+
+    row = asyncio.run(seed_and_import())
+
+    assert row["barcode"] == "NUOVO-BARCODE"
+    assert row["smart_venue"] == 43
+
+
+def test_smart_venue_barcode_mode_ignores_populated_column_f_and_reads_first_row(monkeypatch):
+    database = isolated_db(monkeypatch)
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "(SMART VENUE)"
+    sheet.append(["P1", "Primo prodotto", None, None, "NUOVO-1", 999])
+    sheet.append(["P2", "Secondo prodotto", None, None, "NUOVO-2", 888])
+
+    async def seed_and_import():
+        await database.smart_venue.insert_many([
+            {"id": "smart-venue:P1", "codice": "P1", "descrizione": "Descrizione esistente", "smart_venue": 10, "barcode": "VECCHIO-1"},
+            {"id": "smart-venue:P2", "codice": "P2", "smart_venue": 20, "barcode": "VECCHIO-2"},
+            {"id": "smart-venue:P3", "codice": "P3", "smart_venue": 30, "barcode": "VECCHIO-3"},
+        ])
+        result = await server._import_smart_venue(sheet, "barcode")
+        rows = await database.smart_venue.find({}, {"_id": 0}).to_list(5000)
+        return result, {row["codice"]: row for row in rows}
+
+    result, rows = asyncio.run(seed_and_import())
+
+    assert result["righe_elaborate"] == 2
+    assert rows["P1"]["barcode"] == "NUOVO-1"
+    assert rows["P1"]["smart_venue"] == 10
+    assert rows["P1"]["descrizione"] == "Descrizione esistente"
+    assert rows["P2"]["barcode"] == "NUOVO-2"
+    assert rows["P2"]["smart_venue"] == 20
+    assert rows["P3"]["smart_venue"] == 30
 
 
 def test_can_add_new_smart_venue_product_with_preset_category(monkeypatch):

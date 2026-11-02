@@ -16,4 +16,12 @@ from backend import server
 mock_client = AsyncMongoMockClient()
 server.client = mock_client
 server.db = mock_client[os.environ["DB_NAME"]]
+
+
+async def _mock_transaction_capability():
+    """Mongomock non implementa il comando MongoDB ``hello``."""
+    return {"topology": "mock", "transactions": False}
+
+
+server._verify_transaction_capability = _mock_transaction_capability
 app = server.app

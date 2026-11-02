@@ -25,6 +25,18 @@ const product = {
   prezzo: 5.5,
 };
 
+const smartVenueReceipt = {
+  id: "order-1",
+  batch_id: "receipt-1",
+  codice: "SIG1",
+  descrizione: "Articolo test",
+  quantita: 10,
+  data: "2026-10-30T01:00:00Z",
+  file_sorgente: "Auto-Order Excel",
+  smart_venue_applicabile: true,
+  caricato_smart_venue: false,
+};
+
 let container;
 let root;
 
@@ -32,8 +44,8 @@ beforeEach(async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   api.get.mockImplementation((path) => {
     if (path === "/prodotti") return Promise.resolve({ data: [product] });
-    if (path === "/ordini") return Promise.resolve({ data: [] });
-    if (path === "/smart-venue") return Promise.resolve({ data: [] });
+    if (path === "/ordini") return Promise.resolve({ data: [smartVenueReceipt] });
+    if (path === "/smart-venue") return Promise.resolve({ data: [{ codice: "SIG1", barcode: "0012345678901" }] });
     return Promise.reject(new Error(`Unexpected GET ${path}`));
   });
   api.post.mockImplementation((path) => {
@@ -108,4 +120,27 @@ test("importa l'Excel Auto-Order, chiede conferma con riepilogo e mostra l'esito
   expect(summary.textContent).toContain("Carico confermato");
   expect(summary.textContent).toContain("receipt-1");
   expect(summary.textContent).toContain("backup-1");
+});
+
+test("mostra il barcode Smart Venue tra sorgente e conferma del carico", () => {
+  const barcodeCell = container.querySelector('[data-testid="carico-smart-barcode-SIG1"]');
+
+  expect(barcodeCell).not.toBeNull();
+  expect(barcodeCell.textContent).toBe("0012345678901");
+  expect(barcodeCell.previousElementSibling.textContent).toContain("Auto-Order Excel");
+  expect(barcodeCell.nextElementSibling.textContent).toContain("Conferma caricamento esterno");
+});
+
+test("annulla in blocco un carico Excel ancora pendente", async () => {
+  const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+  api.post.mockImplementationOnce(() => Promise.resolve({ data: {
+    righe_annullate: 1,
+    pezzi_annullati: 10,
+  } }));
+
+  await act(async () => container.querySelector('[data-testid="carico-annulla-receipt-1"]').click());
+
+  expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("Auto-Order Excel"));
+  expect(api.post).toHaveBeenCalledWith("/ordini/bulk/receipt-1/annulla");
+  confirmSpy.mockRestore();
 });
