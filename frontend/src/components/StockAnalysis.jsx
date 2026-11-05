@@ -17,6 +17,7 @@ import { buildStockAnalysisRows, sortStockAnalysisRows } from "../lib/stockAnaly
 function SummaryCard({ icon: Icon, label, value, tone = "default" }) {
   const tones = {
     default: "text-slate-950 bg-amber-50 text-amber-700",
+    success: "text-emerald-700 bg-emerald-50 text-emerald-700",
     danger: "text-red-600 bg-red-50 text-red-600",
     warning: "text-amber-700 bg-amber-50 text-amber-700",
   };
@@ -36,6 +37,7 @@ function SummaryCard({ icon: Icon, label, value, tone = "default" }) {
 
 export default function StockAnalysis() {
   const [data, setData] = useState(null);
+  const [kpi, setKpi] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -47,9 +49,14 @@ export default function StockAnalysis() {
   useEffect(() => {
     let active = true;
     setLoading(true);
-    api.get("/auto-order", { timeout: 20000 })
-      .then(response => {
-        if (active) setData(response.data);
+    Promise.all([
+      api.get("/auto-order", { timeout: 20000 }),
+      api.get("/dashboard"),
+    ])
+      .then(([autoOrderResponse, dashboardResponse]) => {
+        if (!active) return;
+        setData(autoOrderResponse.data);
+        setKpi(dashboardResponse.data?.kpi || {});
       })
       .catch(requestError => {
         if (active) setError(apiErrorMessage(requestError, "Impossibile calcolare l'analisi scorte"));
@@ -80,7 +87,9 @@ export default function StockAnalysis() {
     }
   };
 
-  const value = rows.reduce((sum, row) => sum + row.valore_scorta, 0);
+  const calculatedStockValue = rows.reduce((sum, row) => sum + row.valore_scorta, 0);
+  const stockValue = kpi?.valore_giacenza ?? calculatedStockValue;
+  const aggioPercent = Number(kpi?.aggio_pct ?? data?.parametri?.AGGIO_PCT ?? 0.10) * 100;
   const reorderCount = rows.filter(row => ["ESAURITO", "SCORTA BASSA"].includes(row.analysisStatus.label)).length;
   const anomalyCount = rows.filter(row => row.analysisStatus.label === "ANOMALIA").length;
   const stationaryCount = rows.filter(row => row.analysisStatus.label === "FERMO").length;
@@ -104,8 +113,14 @@ export default function StockAnalysis() {
     <section aria-labelledby="stock-analysis-title">
       <h2 id="stock-analysis-title" className="sr-only">Analisi scorte</h2>
 
-      <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard icon={Coins} label="Valore scorte" value={formatEur(value)} />
+      <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Riepilogo economico scorte">
+        <SummaryCard icon={ShoppingCart} label={`Totale acquistato (netto aggio ${formatNum(aggioPercent)}%)`} value={formatEur(kpi?.valore_acquistato)} />
+        <SummaryCard icon={Coins} label="Totale venduto attuale" value={formatEur(kpi?.valore_venduto)} tone="success" />
+        <SummaryCard icon={CheckCircle} label="Margine lordo" value={formatEur(kpi?.margine_lordo)} tone={kpi?.margine_lordo >= 0 ? "success" : "danger"} />
+        <SummaryCard icon={Coins} label="Valore scorte attuali" value={formatEur(stockValue)} />
+      </div>
+
+      <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3" aria-label="Indicatori operativi scorte">
         <SummaryCard icon={ShoppingCart} label="Da riordinare" value={formatNum(reorderCount)} tone={reorderCount ? "danger" : "default"} />
         <SummaryCard icon={PauseCircle} label="Prodotti fermi" value={formatNum(stationaryCount)} tone="warning" />
         <SummaryCard icon={Clock} label="Prodotti lenti" value={formatNum(slowCount)} tone="warning" />
