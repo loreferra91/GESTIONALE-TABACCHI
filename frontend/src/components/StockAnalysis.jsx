@@ -14,7 +14,7 @@ import { Badge, Card, formatEur, formatNum } from "./UI";
 import { SearchBar, Th } from "../lib/tableHooks";
 import { buildStockAnalysisRows, sortStockAnalysisRows } from "../lib/stockAnalysis";
 
-function SummaryCard({ icon: Icon, label, value, tone = "default" }) {
+function SummaryCard({ icon: Icon, label, value, detail, tone = "default" }) {
   const tones = {
     default: "text-slate-950 bg-amber-50 text-amber-700",
     success: "text-emerald-700 bg-emerald-50 text-emerald-700",
@@ -30,9 +30,18 @@ function SummaryCard({ icon: Icon, label, value, tone = "default" }) {
       <div className="min-w-0">
         <div className="text-[16px] font-semibold text-slate-600">{label}</div>
         <div className={`mt-1 whitespace-nowrap font-heading text-[clamp(20px,1.7vw,30px)] font-black leading-none tabular-nums ${valueClass}`} title={String(value)}>{value}</div>
+        {detail ? <div className="mt-2 text-xs font-medium text-slate-500">{detail}</div> : null}
       </div>
     </Card>
   );
+}
+
+function formatImportDate(value) {
+  if (!value) return "data non disponibile";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "data non disponibile"
+    : date.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
 export default function StockAnalysis() {
@@ -114,11 +123,39 @@ export default function StockAnalysis() {
       <h2 id="stock-analysis-title" className="sr-only">Analisi scorte</h2>
 
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Riepilogo economico scorte">
-        <SummaryCard icon={ShoppingCart} label={`Totale acquistato (netto aggio ${formatNum(aggioPercent)}%)`} value={formatEur(kpi?.valore_acquistato)} />
+        <SummaryCard icon={ShoppingCart} label={`Totale acquistato (netto aggio ${formatNum(aggioPercent)}%)`} value={formatEur(kpi?.valore_acquistato)} detail="Ultimo Excel + Carico Merce" />
         <SummaryCard icon={Coins} label="Totale venduto attuale" value={formatEur(kpi?.valore_venduto)} tone="success" />
         <SummaryCard icon={CheckCircle} label="Margine lordo" value={formatEur(kpi?.margine_lordo)} tone={kpi?.margine_lordo >= 0 ? "success" : "danger"} />
         <SummaryCard icon={Coins} label="Valore scorte attuali" value={formatEur(stockValue)} />
       </div>
+
+      <Card className="mb-4 border-amber-100 bg-amber-50/40 p-4" aria-label="Composizione totale acquistato">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <h3 className="font-heading text-lg font-black text-slate-900">Composizione totale acquistato</h3>
+          <span className="text-xs font-semibold text-slate-500">Valori netti con aggio {formatNum(aggioPercent)}%</span>
+        </div>
+        <div className="grid gap-3 md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">
+          <div className="rounded-md border border-slate-200 bg-white p-3">
+            <div className="text-sm font-bold text-slate-600">Base ultimo Excel</div>
+            <div className="mt-1 font-heading text-2xl font-black tabular-nums text-slate-950">{formatEur(kpi?.valore_acquistato_base_excel)}</div>
+            <div className="mt-1 text-xs text-slate-500">
+              {formatNum(kpi?.acquistati_base_excel_pezzi)} pezzi · {kpi?.acquisti_excel_file || "ultimo import"} · {formatImportDate(kpi?.acquisti_excel_data)}
+            </div>
+          </div>
+          <div className="hidden font-heading text-2xl font-black text-amber-600 md:block" aria-hidden="true">+</div>
+          <div className="rounded-md border border-slate-200 bg-white p-3">
+            <div className="text-sm font-bold text-slate-600">Carico Merce successivo</div>
+            <div className="mt-1 font-heading text-2xl font-black tabular-nums text-slate-950">{formatEur(kpi?.valore_acquistato_carico_merce)}</div>
+            <div className="mt-1 text-xs text-slate-500">{formatNum(kpi?.acquistati_carico_merce_pezzi)} pezzi · esclusi i carichi annullati</div>
+          </div>
+          <div className="hidden font-heading text-2xl font-black text-amber-600 md:block" aria-hidden="true">=</div>
+          <div className="rounded-md border border-amber-300 bg-white p-3">
+            <div className="text-sm font-bold text-slate-600">Totale acquistato netto</div>
+            <div className="mt-1 font-heading text-2xl font-black tabular-nums text-amber-700">{formatEur(kpi?.valore_acquistato)}</div>
+            <div className="mt-1 text-xs text-slate-500">Ricostruito senza duplicare i carichi</div>
+          </div>
+        </div>
+      </Card>
 
       <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3" aria-label="Indicatori operativi scorte">
         <SummaryCard icon={ShoppingCart} label="Da riordinare" value={formatNum(reorderCount)} tone={reorderCount ? "danger" : "default"} />

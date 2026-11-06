@@ -66,6 +66,12 @@ test("mostra i KPI economici della dashboard prima degli indicatori operativi", 
         margine_lordo: 250,
         valore_giacenza: 45,
         aggio_pct: 0.10,
+        valore_acquistato_base_excel: 900,
+        valore_acquistato_carico_merce: 100,
+        acquistati_base_excel_pezzi: 180,
+        acquistati_carico_merce_pezzi: 20,
+        acquisti_excel_data: "2026-10-02T09:47:09+00:00",
+        acquisti_excel_file: "GODSERVICES38.xlsm",
       } } });
     }
     return Promise.reject(new Error(`Unexpected GET ${path}`));
@@ -80,6 +86,13 @@ test("mostra i KPI economici della dashboard prima degli indicatori operativi", 
   expect(api.get).toHaveBeenCalledWith("/dashboard");
   expect(container.textContent).toContain("Totale acquistato (netto aggio 10%)");
   expect(container.textContent).toContain("1000,00 €");
+  expect(container.textContent).toContain("Base ultimo Excel");
+  expect(container.textContent).toContain("900,00 €");
+  expect(container.textContent).toContain("GODSERVICES38.xlsm");
+  expect(container.textContent).toContain("02/10/2026");
+  expect(container.textContent).toContain("Carico Merce successivo");
+  expect(container.textContent).toContain("100,00 €");
+  expect(container.textContent).toContain("20 pezzi · esclusi i carichi annullati");
   expect(container.textContent).toContain("Totale venduto attuale");
   expect(container.textContent).toContain("1250,00 €");
   expect(container.textContent).toContain("Margine lordo");
