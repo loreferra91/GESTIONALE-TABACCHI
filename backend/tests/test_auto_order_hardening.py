@@ -154,13 +154,14 @@ def test_zero_params_are_not_replaced_by_defaults(monkeypatch):
     assert row["qta_da_ordinare"] == 14
 
 
-def test_short_only_weight_falls_back_to_significant_long_demand(monkeypatch):
+def test_short_only_weight_falls_back_to_any_long_demand(monkeypatch):
     result = run_auto_order(
         monkeypatch,
         [product("AMMS451", categoria="SIGARETTE", giacenza_negozio=0)],
         params=base_params(
             AUTO_ORDER_FINESTRA_BREVE_GG=7,
             AUTO_ORDER_PESO_BREVE=1,
+            AUTO_ORDER_MIN_VENDUTO_LUNGO=999,
             AUTO_ORDER_FATTORE_SICUREZZA=1.3,
         ),
         imported_sales=[[], [{"_id": "AMMS451", "tot": 36}]],
@@ -174,6 +175,46 @@ def test_short_only_weight_falls_back_to_significant_long_demand(monkeypatch):
     assert row["copertura_gg"] == 0
     assert row["qta_da_ordinare"] == 30
     assert "DOMANDA DA 30GG" in row["motivo"]
+
+
+@pytest.mark.parametrize("stock", [0, 9])
+def test_no_sales_below_order_lot_requires_manual_check(monkeypatch, stock):
+    result = run_auto_order(
+        monkeypatch,
+        [product("NO_SALES", categoria="SIGARETTE", giacenza_negozio=stock)],
+    )
+
+    row = next(r for r in result["esclusi"] if r["codice"] == "NO_SALES")
+    assert row["stato"] == "CONTROLLO MANUALE"
+    assert row["qta_da_ordinare"] == 0
+    assert "NESSUNA VENDITA" in row["motivo"]
+    assert "LOTTO 10" in row["motivo"]
+
+
+def test_no_sales_at_order_lot_does_not_require_manual_check(monkeypatch):
+    result = run_auto_order(
+        monkeypatch,
+        [product("NO_SALES_OK", categoria="SIGARETTE", giacenza_negozio=10)],
+    )
+
+    row = next(r for r in result["esclusi"] if r["codice"] == "NO_SALES_OK")
+    assert row["stato"] == "NESSUN ORDINE"
+    assert row["qta_da_ordinare"] == 0
+
+
+def test_single_long_sale_is_analyzed_even_below_legacy_threshold(monkeypatch):
+    result = run_auto_order(
+        monkeypatch,
+        [product("ONE_SALE", categoria="SIGARETTE", giacenza_negozio=0)],
+        params=base_params(AUTO_ORDER_PESO_BREVE=1, AUTO_ORDER_MIN_VENDUTO_LUNGO=999),
+        app_sales=[[], [{"_id": "ONE_SALE", "tot": 1}]],
+    )
+
+    row = next(r for r in result["righe"] if r["codice"] == "ONE_SALE")
+    assert row["venduto_lungo"] == 1
+    assert row["domanda_gg"] > 0
+    assert row["stato"] == "ORDINA ORA"
+    assert row["qta_da_ordinare"] == 10
 
 
 def test_anomaly_with_sufficient_sales_is_excluded(monkeypatch):

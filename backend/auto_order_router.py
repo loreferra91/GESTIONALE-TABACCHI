@@ -82,9 +82,6 @@ def create_auto_order_router(
         )
         peso_breve = max(0.0, min(1.0, float(param_value(params, "AUTO_ORDER_PESO_BREVE", 0.70))))
         peso_lungo = 1.0 - peso_breve
-        min_venduto_breve = max(0, int(param_value(params, "AUTO_ORDER_MIN_VENDUTO_BREVE", 2)))
-        min_venduto_lungo = max(0, int(param_value(params, "AUTO_ORDER_MIN_VENDUTO_LUNGO", 4)))
-
         latest_app, latest_imported = await asyncio.gather(
             db.vendite.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
             db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
@@ -186,11 +183,10 @@ def create_auto_order_router(
             domanda_breve_gg = venduto_breve / float(finestra_breve)
             domanda_lunga_gg = venduto_lungo / float(finestra_lunga)
             domanda_gg = (domanda_breve_gg * peso_breve) + (domanda_lunga_gg * peso_lungo)
-            movimento_sufficiente = venduto_breve >= min_venduto_breve or venduto_lungo >= min_venduto_lungo
             domanda_fallback_lunga = False
-            if domanda_gg <= 0 and venduto_lungo >= min_venduto_lungo and domanda_lunga_gg > 0:
+            if domanda_gg <= 0 and domanda_lunga_gg > 0:
                 # Un peso breve del 100% non deve azzerare il fabbisogno di un
-                # articolo esaurito che ha ancora un movimento mensile rilevante.
+                # articolo che ha avuto almeno una vendita nella finestra lunga.
                 domanda_gg = domanda_lunga_gg
                 domanda_fallback_lunga = True
             lotto = lot_for(prodotto.get("categoria", "ACCESSORI"), params)
@@ -204,18 +200,15 @@ def create_auto_order_router(
             if anomalia:
                 stato = "ANOMALIA"
                 motivo = f"STOCK NEGOZIO FISICO NEGATIVO ({giac_negozio}) · VERIFICARE IMPORT/MOVIMENTI"
-            elif not movimento_sufficiente:
-                if magazzino_reale == 0 and venduto_lungo > 0:
+            elif venduto_lungo <= 0:
+                if magazzino_reale < lotto:
                     stato = "CONTROLLO MANUALE"
                     motivo = (
-                        f"SCORTA ZERO MA MOVIMENTO BASSO ({venduto_breve}/{venduto_lungo} "
-                        f"in {finestra_breve}/{finestra_lunga}gg)"
+                        f"SCORTA {magazzino_reale} SOTTO LOTTO {lotto} · "
+                        f"NESSUNA VENDITA IN {finestra_lunga}GG"
                     )
-                elif venduto_lungo > 0:
-                    motivo = (
-                        f"MOVIMENTO BASSO ({venduto_breve}/{venduto_lungo} "
-                        f"in {finestra_breve}/{finestra_lunga}gg)"
-                    )
+                else:
+                    motivo = f"NESSUNA VENDITA NEGLI ULTIMI {finestra_lunga}GG"
             elif copertura_gg is not None and copertura_gg < gg_min:
                 stato = "ORDINA ORA"
                 motivo = f"COPERTURA {copertura_gg:.2f}gg < {int(gg_min)}gg"

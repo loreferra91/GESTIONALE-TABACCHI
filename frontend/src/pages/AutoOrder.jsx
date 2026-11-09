@@ -240,6 +240,7 @@ export default function AutoOrder() {
       <div data-testid="ao-calculation-note" className={`mb-4 rounded-md border px-4 py-3 text-sm ${data?.giorni_ritardo_dati > 2 ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
         Il magazzino reale è la <b>giacenza negozio fisica libera</b> normalizzata dall'import. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
+        Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale.
         {data?.giorni_ritardo_dati > 2 ? <span className="block mt-1 font-semibold">Attenzione: l'ultima vendita importata risale a {data.giorni_ritardo_dati} giorni fa. Importa il file Excel aggiornato per un ordine più preciso.</span> : null}
       </div>
 
