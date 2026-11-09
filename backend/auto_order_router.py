@@ -46,7 +46,6 @@ def relevant_auto_order_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "AUTO_ORDER_FINESTRA_BREVE_GG", "AUTO_ORDER_FINESTRA_LUNGA_GG",
         "AUTO_ORDER_PESO_BREVE", "AUTO_ORDER_FATTORE_SICUREZZA",
         "AUTO_ORDER_LEAD_TIME_GG", "AUTO_ORDER_REVIEW_PERIOD_GG",
-        "AUTO_ORDER_MAX_ETA_IMPORT_GG",
         "FAST_VENDUTO30_MIN", "SLOW_VENDUTO30_MAX",
         "SCORTA_MINIMA_NEGOZIO_VENDING",
     }
@@ -167,10 +166,9 @@ def create_auto_order_router(
         )
         peso_breve = max(0.0, min(1.0, float(param_value(params, "AUTO_ORDER_PESO_BREVE", 0.70))))
         peso_lungo = 1.0 - peso_breve
-        latest_app, latest_imported, latest_csv = await asyncio.gather(
-            db.vendite.find_one({"sorgente": {"$ne": "CSV_VENDING"}}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
-            db.db_storico_vend.find_one({}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
-            db.vendite.find_one({"sorgente": "CSV_VENDING"}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+        latest_app, latest_csv = await asyncio.gather(
+            db.vendite.find_one({"sorgente": {"$ne": "CSV_VENDING"}, "data": {"$regex": r"^\d{4}-\d{2}-\d{2}"}}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
+            db.vendite.find_one({"sorgente": "CSV_VENDING", "data": {"$regex": r"^\d{4}-\d{2}-\d{2}"}}, {"_id": 0, "data": 1}, sort=[("data", -1)]),
         )
 
         def parsed_date(document: Optional[Dict[str, Any]]) -> Optional[datetime]:
@@ -184,9 +182,9 @@ def create_auto_order_router(
             except ValueError:
                 return None
 
-        available_dates = [date for date in (parsed_date(latest_app), parsed_date(latest_imported), parsed_date(latest_csv)) if date]
-        reference_date = max(available_dates, key=commercial_day) if available_dates else datetime.now(ROME)
-        reference_day = commercial_day(reference_date)
+        available_dates = [value for value in (parsed_date(latest_app), parsed_date(latest_csv)) if value]
+        latest_sale_day = max((commercial_day(value) for value in available_dates), default=None)
+        reference_day = datetime.now(ROME).date()
 
         def sales_pipeline(days: int) -> List[Dict[str, Any]]:
             first_day = reference_day - timedelta(days=days - 1)
@@ -202,7 +200,11 @@ def create_auto_order_router(
         first_day = reference_day - timedelta(days=finestra_lunga - 1)
         daily_pipeline = [
             # One-day margins retain aware timestamps that cross a Rome day boundary.
-            {"$match": {"data": {"$gte": (first_day - timedelta(days=1)).isoformat(), "$lt": (reference_day + timedelta(days=2)).isoformat()}}},
+            {"$match": {"$or": [
+                {"data": {"$gte": (first_day - timedelta(days=1)).isoformat(), "$lt": (reference_day + timedelta(days=2)).isoformat()}},
+                # Older native records can still use the Italian date format.
+                {"data": {"$regex": r"^\d{2}[/\-]\d{2}[/\-]\d{4}"}},
+            ]}},
             {"$group": {"_id": {"codice": "$codice", "day": "$data",
                                  "canale": "$canale", "sorgente": "$sorgente"},
                          "tot": {"$sum": "$quantita"}}},
@@ -221,22 +223,16 @@ def create_auto_order_router(
             prodotti,
             vendite_app_breve,
             vendite_app_lunga,
-            vendite_importate_breve,
-            vendite_importate_lunga,
             storico_ordini,
             vending_totals,
             app_daily,
-            imported_daily,
         ) = await asyncio.gather(
             db.prodotti.find({}, {"_id": 0}).to_list(None),
             db.vendite.aggregate(pipeline_breve).to_list(None),
             db.vendite.aggregate(pipeline_lunga).to_list(None),
-            db.db_storico_vend.aggregate(pipeline_breve).to_list(None),
-            db.db_storico_vend.aggregate(pipeline_lunga).to_list(None),
             db.storico_ordini.aggregate(storico_pipeline).to_list(None),
             vending_stock_by_code(),
             db.vendite.aggregate(daily_pipeline).to_list(None),
-            db.db_storico_vend.aggregate(daily_pipeline).to_list(None),
         )
         apply_vending_stock(prodotti, vending_totals)
 
@@ -245,13 +241,8 @@ def create_auto_order_router(
 
         vendite_app_breve_per_codice = totals(vendite_app_breve)
         vendite_app_lunga_per_codice = totals(vendite_app_lunga)
-        vendite_importate_breve_per_codice = totals(vendite_importate_breve)
-        vendite_importate_lunga_per_codice = totals(vendite_importate_lunga)
         storico_per_codice = {row["_id"]: row for row in storico_ordini if row.get("_id") is not None}
-        reconciled = reconcile_sales(app_daily, imported_daily, reference_day, finestra_breve, finestra_lunga)
-        latest_import = await db.import_history.find_one({"fogli_trovati": "DB_STORICO_VEND"}, {"_id": 0, "created_at": 1}, sort=[("created_at", -1)]) if hasattr(db, "import_history") else None
-        latest_stock_import = await db.import_history.find_one({"$or": [{"fogli_trovati": "RIEP_VENDITA"}, {"tipo_import": "giacenze"}]}, {"_id": 0, "created_at": 1}, sort=[("created_at", -1)]) if hasattr(db, "import_history") else None
-        import_state = await db.auto_order_import_state.find_one({"_id": "excel-full"}, {"_id": 0}) if hasattr(db, "auto_order_import_state") else None
+        reconciled = reconcile_sales(app_daily, reference_day, finestra_breve, finestra_lunga)
         latest_receipt = await db.ricezioni_merce.find_one({"status": "completed"}, {"_id": 0, "completed_at": 1}, sort=[("completed_at", -1)]) if hasattr(db, "ricezioni_merce") else None
 
         fatt = max(1.0, float(param_value(params, "AUTO_ORDER_FATTORE_SICUREZZA", 1.15)))
@@ -295,14 +286,10 @@ def create_auto_order_router(
                 venduto_breve = sales["venduto_breve"]
                 venduto_lungo = sales["venduto_lungo"]
                 fonte_domanda = sales["fonte_prevalente"]
-            elif codice in vendite_importate_lunga_per_codice:
-                venduto_breve = vendite_importate_breve_per_codice.get(codice, 0)
-                venduto_lungo = vendite_importate_lunga_per_codice.get(codice, 0)
-                fonte_domanda = "DB_STORICO_VEND"
             else:
                 venduto_breve = vendite_app_breve_per_codice.get(codice, 0)
                 venduto_lungo = vendite_app_lunga_per_codice.get(codice, 0)
-                fonte_domanda = "VENDITE_APP"
+                fonte_domanda = "VENDITE" if venduto_lungo else "NESSUNA"
 
             storico = storico_per_codice.get(codice, {})
             n_ord = int(storico.get("n_ord", 0) or 0)
@@ -324,6 +311,18 @@ def create_auto_order_router(
                 # articolo che ha avuto almeno una vendita nella finestra lunga.
                 domanda_gg = domanda_lunga_gg
                 domanda_fallback_lunga = True
+            if sales and sales["venduto_totale"] > 0 and sales["venduto_negozio"] is not None:
+                if domanda_fallback_lunga:
+                    domanda_negozio_gg = sales["venduto_negozio"] / float(finestra_lunga)
+                    domanda_vending_gg = sales["venduto_vending"] / float(finestra_lunga)
+                else:
+                    domanda_negozio_gg = (sales["venduto_negozio_breve"] / float(finestra_breve) * peso_breve
+                                          + sales["venduto_negozio"] / float(finestra_lunga) * peso_lungo)
+                    domanda_vending_gg = (sales["venduto_vending_breve"] / float(finestra_breve) * peso_breve
+                                          + sales["venduto_vending"] / float(finestra_lunga) * peso_lungo)
+            else:
+                domanda_negozio_gg = domanda_gg
+                domanda_vending_gg = 0.0
             lotto = lot_for(prodotto.get("categoria", "ACCESSORI"), params)
             reserve = max(0, int(params.get("SCORTA_MINIMA_NEGOZIO_VENDING", 2) or 0)) if giac_vending > 0 or prodotto.get("colonna_vending") else 0
             supply = pending.get(codice, {})
@@ -332,7 +331,10 @@ def create_auto_order_router(
             incoming = int(supply.get("quantita_in_arrivo", 0))
             undated = int(supply.get("quantita_senza_data", 0))
             receipts = supply.get("ricezioni", [])
-            copertura_gg = magazzino_reale / domanda_gg if domanda_gg > 0 else None
+            copertura_negozio_gg = magazzino_reale / domanda_negozio_gg if domanda_negozio_gg > 0 else None
+            copertura_vending_gg = giac_vending / domanda_vending_gg if domanda_vending_gg > 0 else None
+            coperture = [value for value in (copertura_negozio_gg, copertura_vending_gg) if value is not None]
+            copertura_gg = min(coperture) if coperture else None
             target_days = planning_days if lead_time > 0 else gg_target
             target_scorta = math.ceil(domanda_gg * target_days * fatt) + reserve if domanda_gg > 0 else 0
             scorta_sicurezza = max(0, target_scorta - reserve - math.ceil(domanda_gg * target_days))
@@ -341,7 +343,8 @@ def create_auto_order_router(
             inventory_position = giac_tot + incoming
             fabbisogno_grezzo = max(0, target_scorta - inventory_position)
             shortage_day = projected_shortage(giac_tot, domanda_gg, receipts, planning_today, int(target_days)) if domanda_gg > 0 else None
-            shop_shortage_day = projected_shortage(giac_negozio, domanda_gg, receipts, planning_today, int(target_days)) if domanda_gg > 0 else None
+            shop_shortage_day = projected_shortage(giac_negozio, domanda_negozio_gg, receipts, planning_today, int(target_days)) if domanda_negozio_gg > 0 else None
+            vending_shortage_day = projected_shortage(giac_vending, domanda_vending_gg, [], planning_today, int(target_days)) if domanda_vending_gg > 0 else None
 
             stato = "NESSUN ORDINE"
             motivo = "NESSUNA VENDITA RECENTE"
@@ -370,9 +373,12 @@ def create_auto_order_router(
             elif incoming and shortage_day and fabbisogno_grezzo == 0:
                 stato = "CONTROLLO MANUALE"
                 motivo = f"FORNITURA GIÀ ORDINATA MA STOCK IN ESAURIMENTO IL {shortage_day} · SOLLECITARE CONSEGNA"
-            elif copertura_gg is not None and copertura_gg < gg_min and fabbisogno_grezzo == 0 and giac_vending > 0 and not incoming:
+            elif copertura_negozio_gg is not None and copertura_negozio_gg < gg_min and fabbisogno_grezzo == 0 and giac_vending > 0 and not incoming:
                 stato = "CONTROLLO MANUALE"
                 motivo = "NEGOZIO SOTTO SOGLIA; SCORTA VENDING NON DISPONIBILE DIRETTAMENTE IN NEGOZIO"
+            elif copertura_vending_gg is not None and copertura_vending_gg < gg_min and fabbisogno_grezzo == 0 and giac_negozio > reserve:
+                stato = "CONTROLLO MANUALE"
+                motivo = "VENDING SOTTO SOGLIA; VERIFICARE RICARICA DAL NEGOZIO"
             elif fabbisogno_grezzo > 0 and ((lead_time > 0 and inventory_position < punto_riordino) or (lead_time == 0 and copertura_gg is not None and copertura_gg < gg_min)):
                 stato = "ORDINA ORA"
                 motivo = (f"POSIZIONE {inventory_position} < PUNTO RIORDINO {punto_riordino}" if lead_time > 0 else f"COPERTURA {copertura_gg:.2f}gg < {int(gg_min)}gg") + f" · ARRIVO {incoming} · FABBISOGNO {fabbisogno_grezzo}"
@@ -391,6 +397,8 @@ def create_auto_order_router(
                 motivo += f" · RISCHIO ESAURIMENTO IL {shortage_day} PRIMA DELLA CONSEGNA"
             if shop_shortage_day and receipts and shop_shortage_day != shortage_day:
                 motivo += f" · RISCHIO NEGOZIO IL {shop_shortage_day}"
+            if vending_shortage_day and vending_shortage_day != shortage_day:
+                motivo += f" · RISCHIO VENDING IL {vending_shortage_day}"
             if anomalia_domanda:
                 motivo += " · DOMANDA IN FORTE AUMENTO: VERIFICARE"
 
@@ -422,18 +430,20 @@ def create_auto_order_router(
                 "fonte_prevalente": fonte_domanda,
                 "fonti_utilizzate": (sales or {}).get("fonti_utilizzate", [fonte_domanda]),
                 "periodo_coperto": (sales or {}).get("periodo_coperto"),
-                "qualita_dati": (sales or {}).get("qualita_dati", "DATI_PARZIALI"),
+                "qualita_dati": (sales or {}).get("qualita_dati", "DATI_AFFIDABILI"),
                 "anomalie_riconciliazione": (sales or {}).get("anomalie_riconciliazione", []),
                 "domanda_gg_10": round(domanda_breve_gg, 3),
                 "domanda_gg_30": round(domanda_lunga_gg, 3),
                 "domanda_precedente_gg": round(domanda_precedente_gg, 3) if domanda_precedente_gg is not None else None,
                 "domanda_gg": round(domanda_gg, 3),
-                "domanda_negozio_gg": round(domanda_gg * (sales["venduto_negozio"] / sales["venduto_totale"]), 3) if sales and sales["venduto_negozio"] is not None and sales["venduto_totale"] else None,
-                "domanda_vending_gg": round(domanda_gg * (sales["venduto_vending"] / sales["venduto_totale"]), 3) if sales and sales["venduto_vending"] is not None and sales["venduto_totale"] else None,
+                "domanda_negozio_gg": round(domanda_negozio_gg, 3),
+                "domanda_vending_gg": round(domanda_vending_gg, 3),
                 "domanda_fallback_lunga": domanda_fallback_lunga,
                 "classe_rotazione": classe_rotazione,
                 "anomalia_domanda": anomalia_domanda,
                 "copertura_gg": round(copertura_gg, 2) if copertura_gg is not None else None,
+                "copertura_negozio_gg": round(copertura_negozio_gg, 2) if copertura_negozio_gg is not None else None,
+                "copertura_vending_gg": round(copertura_vending_gg, 2) if copertura_vending_gg is not None else None,
                 "target_scorta": target_scorta,
                 "punto_riordino": punto_riordino,
                 "scorta_sicurezza": scorta_sicurezza,
@@ -445,6 +455,7 @@ def create_auto_order_router(
                 "posizione_inventariale": inventory_position,
                 "data_rischio_esaurimento": shortage_day,
                 "data_rischio_esaurimento_negozio": shop_shortage_day,
+                "data_rischio_esaurimento_vending": vending_shortage_day,
                 "modalita_pianificazione": "LEAD_TIME" if lead_time > 0 else "LEGACY",
                 "media_ordini_storico": media_ord,
                 "n_ordini_storici": n_ord,
@@ -470,19 +481,14 @@ def create_auto_order_router(
         n_anomalie_stock = sum(1 for row in [*proposte, *esclusi] if row["giacenza_negozio"] < 0)
         n_anomalie_forniture = sum(1 for row in [*proposte, *esclusi] if row["anomalie_forniture"])
         watermarks = {
-            "ultima_vendita_app": (latest_app or {}).get("data"),
-            "ultimo_import_excel": (latest_import or {}).get("created_at"),
-            "ultimo_import_vending": (latest_csv or {}).get("data"),
-            "ultimo_aggiornamento_giacenze": max(filter(None, [(latest_receipt or {}).get("completed_at"), (latest_stock_import or {}).get("created_at")]), default=None),
+            "ultima_vendita_nativa": (latest_app or {}).get("data"),
+            "ultima_vendita_csv_vending": (latest_csv or {}).get("data"),
+            "ultima_ricezione_merce": (latest_receipt or {}).get("completed_at"),
             "ultima_riconciliazione": datetime.now(timezone.utc).isoformat(),
         }
-        max_import_age = int(params.get("AUTO_ORDER_MAX_ETA_IMPORT_GG") or 0)
-        import_day = commercial_day(watermarks["ultimo_import_excel"])
-        if n_anomalie_forniture or (import_state and import_state.get("status") in {"PROCESSING", "FAILED"}):
+        if n_anomalie_forniture:
             data_quality = "DATI_INCOERENTI"
-        elif max_import_age and (not import_day or (datetime.now(ROME).date() - import_day).days > max_import_age):
-            data_quality = "DATI_OBSOLETI"
-        elif not latest_import or any(row.get("qualita_dati") == "DATI_PARZIALI" for row in [*proposte, *esclusi]):
+        elif not latest_sale_day or (reference_day - latest_sale_day).days >= finestra_lunga or any(row.get("qualita_dati") == "DATI_PARZIALI" for row in [*proposte, *esclusi]):
             data_quality = "DATI_PARZIALI"
         else:
             data_quality = "DATI_AFFIDABILI"
@@ -516,7 +522,7 @@ def create_auto_order_router(
             "peso_lungo": peso_lungo,
             "fattore_sicurezza": fatt,
             "data_riferimento_domanda": reference_day.isoformat(),
-            "giorni_ritardo_dati": max(0, (datetime.now(ROME).date() - reference_day).days),
+            "giorni_ritardo_dati": max(0, (reference_day - latest_sale_day).days) if latest_sale_day else None,
         }
         response["snapshot_key"] = auto_order_snapshot_key(response)
         return response
@@ -618,8 +624,8 @@ def create_auto_order_router(
             if existing:
                 return replay(existing)
         ao = await get_auto_order()
-        if ao.get("data_quality") in {"DATI_INCOERENTI", "DATI_OBSOLETI"}:
-            raise HTTPException(409, "Dati Auto-Order non affidabili: completare l'import o aggiornare le fonti prima di confermare")
+        if ao.get("data_quality") == "DATI_INCOERENTI":
+            raise HTTPException(409, "Dati Auto-Order incoerenti: correggere le anomalie prima di confermare")
         if supplied_snapshot and supplied_snapshot != ao["snapshot_key"]:
             raise HTTPException(409, "I dati di magazzino o vendita sono cambiati. Ricalcola Auto-Order prima di confermare.")
         righe = auto_order_selected_rows(ao, requested_rows)

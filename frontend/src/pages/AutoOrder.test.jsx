@@ -97,6 +97,14 @@ afterEach(async () => {
   delete global.IS_REACT_ACT_ENVIRONMENT;
 });
 
+test("presenta il ciclo operativo senza import Excel obbligatorio", () => {
+  expect(container.textContent).toContain("Registra le vendite in negozio");
+  expect(container.textContent).toContain("Collega la ricezione all’ordine");
+  expect(container.textContent).not.toContain("Import Excel");
+  expect(container.querySelector('[data-testid="ao-pdf"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="ao-excel"]')).not.toBeNull();
+});
+
 test("cerca un prodotto per descrizione e lo aggiunge alla bozza con il lotto corretto", async () => {
   const search = container.querySelector('[data-testid="ao-add-product"]');
   await write(search, "manuale test");

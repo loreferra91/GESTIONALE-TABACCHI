@@ -2,17 +2,23 @@
 
 ## Flusso e fonti
 
-`DB_STORICO_VEND` contiene vendite Excel aggregate senza ID transazione e senza
-canale affidabile. `vendite` contiene vendite app; le righe con
-`sorgente=CSV_VENDING` sono il flusso CSV vending. Le date sono lette come
-giorni commerciali `Europe/Rome`. La riconciliazione raggruppa per prodotto,
-giorno, canale e sorgente. Nei giorni con storico Excel, il valore Excel ha
-precedenza e la possibile sovrapposizione con l'app viene segnalata; le vendite
-app dei giorni successivi restano incluse. Un giorno sovrapposto non viene mai
-sommato due volte. Due registrazioni vending CSV/app potenzialmente sovrapposte
-sono segnalate e non danno luogo a una proposta automatica. Lo storico Excel non
-consente la ripartizione negozio/vending: i relativi campi sono `null`, mentre
-il totale rimane disponibile con qualità `DATI_PARZIALI`.
+`vendite` è la sola fonte delle vendite per Auto-Order. Le righe
+`sorgente=CSV_VENDING` sono l'integrazione attiva del distributore e rimangono
+nella stessa collezione, con `canale=VENDING`; le altre vendite native distinguono
+`NEGOZIO` e `VENDING`. I giorni commerciali usano `Europe/Rome`. La finestra
+breve e quella lunga terminano nel giorno corrente, anche se non ci sono state
+vendite oggi. Una vendita con canale assente o sconosciuto rende la riga
+parziale; registrazioni vending CSV e manuali nello stesso giorno/prodotto
+richiedono verifica per possibile sovrapposizione. L'ingestione CSV usa chiavi
+evento stabili per evitare la duplicazione dello stesso evento.
+
+`db_storico_vend` è uno storico legacy già conservato in MongoDB: Auto-Order non
+lo legge, non gli attribuisce precedenza e non lo somma alle vendite native.
+Non viene richiesta alcuna cartella di lavoro per fare una proposta o ricevere
+un ordine. La data effettiva di passaggio a WebApp non è attestata da un marker
+di migrazione: vedere la verifica documentale in `WEBAPP_AUTONOMIA.md`. Finché
+non c'è una prova esterna, non si inventa una data di cutover e non si migra
+automaticamente lo storico legacy nella collezione `vendite`.
 
 Le scorte fisiche provengono da `prodotti.giacenza_negozio` e dalla somma delle
 colonne `vending.giacenza`. Una ricarica vending resta un trasferimento
@@ -60,9 +66,14 @@ quantità proposta = ceil(fabbisogno netto / lotto) × lotto
 
 Con lead time configurato si ordina quando la posizione utilizzabile è sotto
 il punto di riordino; in modalità legacy resta la soglia di copertura 7 giorni.
-La copertura immediata (`copertura_gg`) usa lo stock negozio, senza trattare
-la vending come disponibile al banco. La proiezione giornaliera delle rotture
-usa solo lo stock fisico fino alla data prevista di arrivo. Le forniture senza
+La domanda è ripartita tra negozio e vending in base ai canali delle vendite
+native. `copertura_negozio_gg` e `copertura_vending_gg` usano ciascuna la
+propria domanda e giacenza; `copertura_gg` è la minore copertura disponibile.
+Lo stock vending non diventa disponibile al banco: se è il solo stock rimasto
+e il negozio è sotto soglia, occorre controllo manuale. Se la vending è sotto
+soglia ma il negozio ha stock trasferibile, si verifica una ricarica prima di
+ordinare dal fornitore. La proiezione giornaliera delle rotture usa solo lo
+stock fisico fino alla data prevista di arrivo. Le forniture senza
 data futura affidabile, incluse quelle scadute, non entrano nella posizione
 utilizzabile: un possibile acquisto duplicato passa a `CONTROLLO MANUALE`.
 Una fornitura che arriva dopo la data prevista di esaurimento viene segnalata.
@@ -124,14 +135,14 @@ disponibile. La chiave idempotente con contenuto diverso dà 409; un batch
 `PROCESSING` non è mai restituito come completato. In ambiente locale senza
 transazioni, la compensazione elimina solo testata/righe possedute dal batch.
 
-L'import Excel completo marca `auto_order_import_state` come `PROCESSING` prima
-delle modifiche; se il processo si interrompe, la conferma resta bloccata. Un
-rollback riuscito marca `ROLLED_BACK`, un import riuscito `COMPLETED`.
-`AUTO_ORDER_MAX_ETA_IMPORT_GG=0` disabilita il limite temporale finché
-l'azienda non ne definisce uno. Una giornata senza vendite non è da sola una
-prova di dati obsoleti. I livelli esposti sono `DATI_AFFIDABILI`,
-`DATI_PARZIALI`, `DATI_OBSOLETI` e `DATI_INCOERENTI`; gli ultimi due bloccano
-la conferma.
+La qualità della proposta dipende dai dati nativi e dalle anomalie delle
+forniture. La presenza, assenza, data o stato di un import Excel non cambia la
+domanda e non invalida lo snapshot. Un canale vendita sconosciuto, una possibile
+sovrapposizione vending o l'assenza di vendite native recenti espone
+`DATI_PARZIALI`; residui ordine incoerenti espongono `DATI_INCOERENTI` e
+bloccano la conferma. `AUTO_ORDER_MAX_ETA_IMPORT_GG` è un parametro legacy
+ignorato da Auto-Order. Una giornata senza vendite non viene interpretata da
+sola come un errore di sincronizzazione.
 
 ## Esportazione e compatibilità
 
@@ -142,6 +153,11 @@ colonne dell'Excel restano `CODICE`, `ARTICOLO`, `QTA`, `TOTALE` nella riga 4,
 compatibili con `/api/ordini/import-auto-order/preview`. I metadati sono in un
 foglio separato e tutte le celle testuali da input sono protette da formula
 injection.
+
+L'export PDF/Excel è facoltativo. In Carico Merce si può usare direttamente
+**Precompila da Auto-Order** oppure inserire righe manualmente; l'import del
+file Excel dell'ordine resta solo una comodità legacy, con anteprima e
+conferma esplicita.
 
 ## Migrazione e rollback
 
@@ -158,9 +174,10 @@ valutare i carichi avvenuti dopo il deploy.
 
 - Nessuna data di consegna viene inventata; non c'è un calendario per giorno
   della settimana o per fornitore, né un'ottimizzazione del capitale disponibile.
-- Il canale dello storico Excel non è ricostruibile; i giorni sovrapposti
-  richiedono revisione manuale. La riconciliazione legacy delle ricezioni
-  necessita di prove esterne e non è automatizzata.
+- La data effettiva della migrazione e la completezza di tutti i dati storici
+  non sono certificate dalla sola presenza di righe nel database. Lo storico
+  legacy resta separato; la riconciliazione legacy delle ricezioni necessita
+  di prove esterne e non è automatizzata.
 - La sicurezza si basa su impronte, CAS e transazioni Mongo. La suite locale
   usa Mongo simulato; la verifica di conflitti su Atlas reale e di import
   interrotti da crash richiede uno staging isolato.

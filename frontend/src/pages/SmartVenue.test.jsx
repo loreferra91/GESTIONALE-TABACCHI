@@ -132,6 +132,7 @@ test("conferma l'uscita sul nuovo endpoint idempotente con riepilogo", async () 
 });
 
 test("l'import Excel usa solo la colonna E per impostazione predefinita", async () => {
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
   api.post.mockResolvedValueOnce({ data: { totali: { smart_venue_righe: 2 } } });
   const input = container.querySelector('[data-testid="smart-venue-import"]');
   const file = new File(["excel"], "smartvenue.xlsx", {
@@ -141,8 +142,10 @@ test("l'import Excel usa solo la colonna E per impostazione predefinita", async 
 
   await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
 
-  const [path, form] = api.post.mock.calls[0];
+  const [path, form, options] = api.post.mock.calls[0];
   expect(path).toBe("/smart-venue/import-excel");
   expect(form.get("file")).toBe(file);
   expect(form.get("modo")).toBe("barcode");
+  expect(options.headers["X-Legacy-Import-Confirmed"]).toBe("confermo-import-legacy");
+  confirm.mockRestore();
 });

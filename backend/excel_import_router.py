@@ -10,6 +10,11 @@ from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
 
+try:
+    from .legacy_excel_import import require_legacy_excel_import
+except ImportError:  # pragma: no cover
+    from legacy_excel_import import require_legacy_excel_import
+
 
 ELECTRONIC_INHALATION_CATEGORY = "PRODOTTI DA INALAZIONE SENZA COMBUSTIONE ELETTRONICA"
 ELECTRONIC_INHALATION_BRANDS = (
@@ -504,46 +509,7 @@ def create_excel_import_router(
 
     @router.post("/import/excel")
     async def import_excel(file: UploadFile = File(...)):
-        try:
-            import openpyxl
-        except Exception:
-            raise HTTPException(500, "openpyxl non installato")
-        content = await read_capped(file)
-        workbook = openpyxl.load_workbook(io.BytesIO(content), data_only=True, keep_vba=False)
-        inserted = updated = 0
-        if "RIEP_VENDITA" in workbook.sheetnames:
-            worksheet = workbook["RIEP_VENDITA"]
-            for row in worksheet.iter_rows(min_row=3, values_only=True):
-                code = row[0]
-                if not code:
-                    continue
-                description = row[1] or ""
-                data = {
-                    "codice": str(code).strip(),
-                    "descrizione": str(description).strip(),
-                    "acquistati": int(row[2] or 0),
-                    "venduti_negozio": int(row[3] or 0),
-                    "prezzo": normalize_nonnegative_money(row[7] or 0),
-                    "giacenza_vending": int(row[13] or 0),
-                    "venduti_vending": int(row[17] or 0),
-                }
-                data["giacenza_negozio"] = physical_shop_stock_from_excel(
-                    row[6], data["giacenza_vending"], data["venduti_vending"]
-                )
-                insert_defaults = product_model(
-                    codice=data["codice"], descrizione=data["descrizione"]
-                ).model_dump()
-                insert_defaults = {key: value for key, value in insert_defaults.items() if key not in data}
-                result = await get_database().prodotti.update_one(
-                    {"codice": data["codice"]},
-                    {"$set": data, "$setOnInsert": insert_defaults},
-                    upsert=True,
-                )
-                if result.upserted_id:
-                    inserted += 1
-                else:
-                    updated += 1
-        return {"ok": True, "inseriti": inserted, "aggiornati": updated}
+        raise HTTPException(410, "Import diretto dismesso: usare solo la procedura legacy controllata")
 
     @router.get("/import/excel-full/status/{job_id}")
     async def import_excel_full_status(job_id: str):
@@ -556,7 +522,9 @@ def create_excel_import_router(
     async def import_excel_full(
         file: UploadFile = File(...),
         import_job_id: Optional[str] = Header(None, alias="X-Import-Job-ID"),
+        legacy_confirmation: Optional[str] = Header(None, alias="X-Legacy-Import-Confirmed"),
     ):
+        require_legacy_excel_import(legacy_confirmation)
         try:
             import openpyxl
         except Exception:

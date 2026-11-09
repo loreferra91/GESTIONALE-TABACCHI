@@ -517,7 +517,7 @@ def test_data_status_uses_distinct_dates_without_full_scans(monkeypatch):
 
     database = Database({
         "vendite": DistinctCollection(["2026-10-27", "2026-10-28"]),
-        "db_storico_vend": DistinctCollection(["2026-10-26"]),
+        "db_storico_vend": DistinctCollection(["2026-12-31"]),
         "import_history": DistinctCollection([]),
         "backup_snapshots": DistinctCollection([]),
     })
@@ -543,6 +543,7 @@ def test_data_status_uses_distinct_dates_without_full_scans(monkeypatch):
 
     assert calls == ["data", "data"]
     assert payload["latest_sales_day"] == "2026-10-28"
+    assert payload["latest_imported_sale"] == "2026-12-31"
 
 
 def test_render_blueprint_requires_manual_deploy():

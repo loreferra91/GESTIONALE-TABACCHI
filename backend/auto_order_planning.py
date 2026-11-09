@@ -22,73 +22,65 @@ def commercial_day(value):
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             return commercial_day(parsed)
         except ValueError:
+            for date_format in ("%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(str(value)[:10], date_format).date()
+                except ValueError:
+                    continue
             return None
     return None
 
 
-def reconcile_sales(app_rows, imported_rows, reference_day, short_days, long_days):
-    """Choose the authoritative daily source; never add potentially overlapping feeds.
-
-    Imported DB_STORICO_VEND rows do not identify a channel or transaction, so an
-    imported product/day supersedes app entries on that day. App entries on other
-    days remain usable. Overlap is explicitly marked ambiguous.
-    """
-    daily = defaultdict(lambda: defaultdict(dict))
-    for source, rows in (("DB_STORICO_VEND", imported_rows), ("VENDITE_APP", app_rows)):
-        for row in rows:
-            key = row.get("_id") or {}
-            if not isinstance(key, dict):
-                continue
-            code = str(key.get("codice") or "").strip()
-            day = commercial_day(key.get("day"))
-            if not code or day is None or not (reference_day - timedelta(days=long_days - 1) <= day <= reference_day):
-                continue
-            channel = str(key.get("canale") or "NEGOZIO").upper()
-            quantity = int(row.get("tot") or 0)
-            source_key = "CSV_VENDING" if source == "VENDITE_APP" and key.get("sorgente") == "CSV_VENDING" else source
-            daily[code][day].setdefault(source_key, defaultdict(int))[channel] += quantity
+def reconcile_sales(native_rows, reference_day, short_days, long_days):
+    """Count only persisted native sales, retaining channel and source evidence."""
+    daily = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    for row in native_rows:
+        key = row.get("_id") or {}
+        if not isinstance(key, dict):
+            continue
+        code = str(key.get("codice") or "").strip()
+        day = commercial_day(key.get("day"))
+        if not code or day is None or not (reference_day - timedelta(days=long_days - 1) <= day <= reference_day):
+            continue
+        channel = str(key.get("canale") or "").upper()
+        source = "CSV_VENDING" if str(key.get("sorgente") or "").upper() == "CSV_VENDING" else "VENDITE"
+        daily[code][day][(channel, source)] += int(row.get("tot") or 0)
     result = {}
     for code, days in daily.items():
-        short = long = shop = vending = 0
+        short = long = shop = vending = shop_short = vending_short = 0
         unknown_channel = False
         sources, anomalies = set(), set()
         for day, feeds in days.items():
-            if "DB_STORICO_VEND" in feeds:
-                chosen = feeds["DB_STORICO_VEND"]
-                sources.add("DB_STORICO_VEND")
-                if len(feeds) > 1:
-                    anomalies.add("SOVRAPPOSIZIONE_FONTI_SENZA_ID_EVENTO")
-            else:
-                chosen = defaultdict(int)
-                app_channels = feeds.get("VENDITE_APP", {})
-                csv_channels = feeds.get("CSV_VENDING", {})
-                sources.update(feeds)
-                for channel, quantity in app_channels.items():
-                    if channel == "VENDING" and channel in csv_channels:
-                        anomalies.add("VENDING_APP_CSV_POTENZIALMENTE_SOVRAPPOSTE")
-                        continue
-                    chosen[channel] += quantity
-                for channel, quantity in csv_channels.items():
-                    chosen[channel] += quantity
-            amount = sum(chosen.values())
+            if ("VENDING", "VENDITE") in feeds and ("VENDING", "CSV_VENDING") in feeds:
+                anomalies.add("VENDING_APP_CSV_POTENZIALMENTE_SOVRAPPOSTE")
+            amount = sum(feeds.values())
             if amount < 0:
                 anomalies.add("VENDITE_NEGATIVE_O_RETTIFICHE")
             long += amount
             if day >= reference_day - timedelta(days=short_days - 1):
                 short += amount
-            if "DB_STORICO_VEND" in feeds:
-                # The imported aggregate has no reliable channel information.
-                unknown_channel = True
-            else:
-                vending += chosen.get("VENDING", 0)
-                shop += sum(value for channel, value in chosen.items() if channel != "VENDING")
+            for (channel, source), quantity in feeds.items():
+                sources.add(source)
+                if channel == "VENDING":
+                    vending += quantity
+                    if day >= reference_day - timedelta(days=short_days - 1):
+                        vending_short += quantity
+                elif channel == "NEGOZIO":
+                    shop += quantity
+                    if day >= reference_day - timedelta(days=short_days - 1):
+                        shop_short += quantity
+                else:
+                    unknown_channel = True
+                    anomalies.add("CANALE_VENDITA_NON_RICONOSCIUTO")
         result[code] = {
             "venduto_breve": max(0, short), "venduto_lungo": max(0, long),
             "venduto_negozio": None if unknown_channel else max(0, shop),
             "venduto_vending": None if unknown_channel else max(0, vending),
+            "venduto_negozio_breve": None if unknown_channel else max(0, shop_short),
+            "venduto_vending_breve": None if unknown_channel else max(0, vending_short),
             "venduto_totale": max(0, long),
             "fonti_utilizzate": sorted(sources),
-            "fonte_prevalente": "DB_STORICO_VEND" if "DB_STORICO_VEND" in sources else ("VENDITE_APP" if sources else "NESSUNA"),
+            "fonte_prevalente": "VENDITE" if sources else "NESSUNA",
             "qualita_dati": "DATI_PARZIALI" if anomalies or unknown_channel else "DATI_AFFIDABILI",
             "anomalie_riconciliazione": sorted(anomalies),
             "periodo_coperto": {"dal": min(days).isoformat(), "al": max(days).isoformat()},

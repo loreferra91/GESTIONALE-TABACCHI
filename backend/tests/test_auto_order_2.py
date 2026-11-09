@@ -24,16 +24,34 @@ def daily(code, day, quantity, channel=None, source=None):
     return {"_id": {"codice": code, "day": day, "canale": channel, "sorgente": source}, "tot": quantity}
 
 
-def test_sales_overlap_is_not_doubled_and_later_app_days_are_kept():
+def test_native_sales_keep_shop_and_vending_separate():
     result = reconcile_sales(
-        [daily("P", "2026-11-10", 30, "NEGOZIO"), daily("P", "2026-11-12", 5, "NEGOZIO")],
-        [daily("P", "2026-11-10", 30)],
+        [daily("P", "2026-11-10", 30, "NEGOZIO", "BULK"),
+         daily("P", "2026-11-10", 4, "VENDING", "CSV_VENDING"),
+         daily("P", "2026-11-12", 5, "NEGOZIO", "MANUALE")],
         date(2026, 11, 12), 10, 30,
     )["P"]
-    assert result["venduto_lungo"] == 35
-    assert result["venduto_breve"] == 35
-    assert result["qualita_dati"] == "DATI_PARZIALI"
-    assert result["anomalie_riconciliazione"] == ["SOVRAPPOSIZIONE_FONTI_SENZA_ID_EVENTO"]
+    assert result["venduto_lungo"] == result["venduto_breve"] == 39
+    assert result["venduto_negozio"] == 35
+    assert result["venduto_vending"] == 4
+    assert result["venduto_negozio_breve"] == 35
+    assert result["venduto_vending_breve"] == 4
+    assert result["qualita_dati"] == "DATI_AFFIDABILI"
+    assert result["fonti_utilizzate"] == ["CSV_VENDING", "VENDITE"]
+
+
+def test_native_sales_keep_short_and_long_channel_windows_distinct():
+    result = reconcile_sales(
+        [daily("P", "2026-10-20", 30, "VENDING", "CSV_VENDING"),
+         daily("P", "2026-11-09", 6, "NEGOZIO", "MANUALE")],
+        date(2026, 11, 9), 10, 30,
+    )["P"]
+    assert result["venduto_breve"] == 6
+    assert result["venduto_lungo"] == 36
+    assert result["venduto_negozio_breve"] == 6
+    assert result["venduto_vending_breve"] == 0
+    assert result["venduto_negozio"] == 6
+    assert result["venduto_vending"] == 30
 
 
 def test_pending_uses_residual_and_delivery_horizon():
@@ -71,6 +89,7 @@ def test_commercial_days_follow_rome_dst():
     assert commercial_day("2026-03-29T22:30:00Z") == date(2026, 3, 30)
     assert commercial_day("2026-10-25T23:30:00Z") == date(2026, 10, 26)
     assert commercial_day("2026-10-25T10:00:00") == date(2026, 10, 25)
+    assert commercial_day("25/10/2026") == date(2026, 10, 25)
 
 
 def test_schema_migration_is_idempotent_and_preserves_legacy_orders():
@@ -86,7 +105,7 @@ def test_schema_migration_is_idempotent_and_preserves_legacy_orders():
 
 def test_reconciliation_handles_more_than_5000_product_groups():
     rows = [daily(f"P{index:05d}", "2026-11-09", 1, "NEGOZIO", "MANUALE") for index in range(6001)]
-    result = reconcile_sales(rows, [], date(2026, 11, 9), 10, 30)
+    result = reconcile_sales(rows, date(2026, 11, 9), 10, 30)
     assert len(result) == 6001
     assert result["P06000"]["venduto_lungo"] == 1
 
@@ -173,6 +192,126 @@ def test_auto_order_counts_dated_pending_and_has_stable_snapshot(isolated_databa
     assert row["qta_da_ordinare"] == 0
     assert row["posizione_inventariale"] == 60
     assert first["snapshot_key"] == second["snapshot_key"]
+
+
+def test_excel_history_presence_and_changes_do_not_affect_native_sales(isolated_database):
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def scenario():
+        await db.prodotti.insert_one({
+            "id": "product", "codice": "P", "descrizione": "P", "categoria": "ACCESSORI",
+            "giacenza_negozio": 3, "giacenza_vending": 999,
+        })
+        await db.vending.insert_one({"id": "column", "codice": "P", "giacenza": 4})
+        await db.vendite.insert_many([
+            {"id": "shop", "codice": "P", "data": today.isoformat() + "T10:00:00", "quantita": 18,
+             "canale": "NEGOZIO", "sorgente": "BULK"},
+            {"id": "vending", "codice": "P", "data": today.isoformat() + "T11:00:00", "quantita": 6,
+             "canale": "VENDING", "sorgente": "CSV_VENDING", "csv_event_key": "event-1"},
+        ])
+        absent = await server.auto_order()
+        await db.db_storico_vend.insert_one({"data": today.isoformat(), "codice": "P", "quantita": 400})
+        present = await server.auto_order()
+        await db.db_storico_vend.update_one({"codice": "P"}, {"$set": {"quantita": 900}})
+        changed = await server.auto_order()
+        return absent, present, changed
+
+    absent, present, changed = asyncio.run(scenario())
+    assert absent["snapshot_key"] == present["snapshot_key"] == changed["snapshot_key"]
+    for proposal in (absent, present, changed):
+        row = next(row for row in [*proposal["righe"], *proposal["esclusi"]] if row["codice"] == "P")
+        assert row["venduto_lungo"] == 24
+        assert row["venduto_negozio"] == 18
+        assert row["venduto_vending"] == 6
+        assert row["giacenza_negozio"] == 3
+        assert row["giacenza_vending"] == 4
+        assert row["domanda_negozio_gg"] > row["domanda_vending_gg"] > 0
+        assert row["copertura_gg"] == row["copertura_negozio_gg"]
+        assert row["copertura_vending_gg"] > row["copertura_negozio_gg"]
+        assert row["fonte_domanda"] == "VENDITE"
+        assert "ultimo_import_excel" not in proposal["source_watermarks"]
+
+
+def test_native_italian_dates_are_counted_in_configured_long_window(isolated_database):
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+    older = today - timedelta(days=45)
+
+    async def scenario():
+        await db.parametri.insert_one({"nome": "AUTO_ORDER_FINESTRA_LUNGA_GG", "valore": 90})
+        await db.prodotti.insert_one({"id": "product", "codice": "P", "descrizione": "P", "categoria": "ACCESSORI", "giacenza_negozio": 1})
+        await db.vendite.insert_one({"id": "older-native", "codice": "P", "data": older.strftime("%d/%m/%Y"),
+                                    "quantita": 9, "canale": "NEGOZIO", "sorgente": "MANUALE"})
+        proposal = await server.auto_order()
+        return next(row for row in [*proposal["righe"], *proposal["esclusi"]] if row["codice"] == "P")
+
+    row = asyncio.run(scenario())
+    assert row["venduto_breve"] == 0
+    assert row["venduto_lungo"] == row["venduto_negozio"] == 9
+
+
+def test_vending_demand_uses_vending_stock_and_suggests_restock(isolated_database):
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def scenario():
+        await db.prodotti.insert_one({"id": "product", "codice": "P", "descrizione": "P", "categoria": "ACCESSORI", "giacenza_negozio": 40})
+        await db.vending.insert_one({"id": "column", "codice": "P", "giacenza": 1})
+        await db.vendite.insert_one({"id": "vending-sale", "codice": "P", "data": today.isoformat() + "T12:00:00",
+                                     "quantita": 10, "canale": "VENDING", "sorgente": "CSV_VENDING", "csv_event_key": "event-1"})
+        proposal = await server.auto_order()
+        return next(row for row in [*proposal["righe"], *proposal["esclusi"]] if row["codice"] == "P")
+
+    row = asyncio.run(scenario())
+    assert row["domanda_negozio_gg"] == 0
+    assert row["domanda_vending_gg"] > 0
+    assert row["copertura_negozio_gg"] is None
+    assert row["copertura_gg"] == row["copertura_vending_gg"]
+    assert row["stato"] == "CONTROLLO MANUALE"
+    assert "RICARICA" in row["motivo"]
+
+
+def test_native_sale_order_and_linked_receipt_complete_without_excel(isolated_database):
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def scenario():
+        await db.prodotti.insert_one({
+            "id": "product", "codice": "P", "descrizione": "P", "categoria": "ACCESSORI",
+            "giacenza_negozio": 40, "venduti_negozio": 0, "acquistati": 0, "prezzo": 1,
+        })
+        await server.add_vendita(server.VenditaIn(
+            data=today.isoformat() + "T12:00:00", codice="P", quantita=35, canale="NEGOZIO",
+        ), idempotency_key="native-sale-cycle-001")
+        after_sale = await db.prodotti.find_one({"codice": "P"})
+        proposal = await server.auto_order()
+        row = next(row for row in proposal["righe"] if row["codice"] == "P")
+        order = await server.conferma_auto_order(server.AutoOrderConfermaIn(
+            snapshot_key=proposal["snapshot_key"], idempotency_key="native-order-cycle-001",
+            data_consegna_prevista=today + timedelta(days=5),
+            righe=[server.AutoOrderRigaIn(codice="P", quantita=row["qta_da_ordinare"])],
+        ))
+        receipt = await server.bulk_carico(server.BulkOrdineIn(
+            data=today.isoformat(), idempotency_key="native-receipt-cycle-001",
+            supplier_order_batch_key=order["batch_key"],
+            righe=[{"codice": "P", "quantita": row["qta_da_ordinare"], "prezzo": 1}],
+        ))
+        after_receipt = await db.prodotti.find_one({"codice": "P"})
+        order_line = await db.ordini_fornitore_righe.find_one({"batch_key": order["batch_key"]})
+        refreshed = await server.auto_order()
+        return after_sale, row, order, receipt, after_receipt, order_line, refreshed
+
+    after_sale, row, order, receipt, after_receipt, order_line, refreshed = asyncio.run(scenario())
+    assert after_sale["giacenza_negozio"] == 5
+    assert after_sale["venduti_negozio"] == 35
+    assert row["venduto_negozio"] == row["venduto_lungo"] == 35
+    assert row["qta_da_ordinare"] > 0
+    assert order["status"] == "COMPLETED"
+    assert receipt["caricate"] == 1
+    assert order_line["quantita_ricevuta"] == row["qta_da_ordinare"]
+    assert after_receipt["giacenza_negozio"] == 5 + row["qta_da_ordinare"]
+    assert refreshed["snapshot_key"] != order["snapshot_key"]
 
 
 def test_linked_receipt_undo_restores_order_residual(isolated_database):
@@ -286,26 +425,35 @@ def test_confirmed_excel_uses_saved_quantities_and_imports_reference(isolated_da
     assert preview["righe"][0]["quantita"] == 20
 
 
-def test_interrupted_import_blocks_confirmation(isolated_database):
+def test_legacy_import_state_does_not_change_native_demand(isolated_database):
     db = isolated_database
     async def scenario():
+        today = datetime.now(ZoneInfo("Europe/Rome")).date()
+        await db.prodotti.insert_one({"id": "product", "codice": "P", "descrizione": "P", "categoria": "ACCESSORI", "giacenza_negozio": 0})
+        await db.vendite.insert_one({"id": "sale", "codice": "P", "data": today.isoformat() + "T12:00:00", "quantita": 20, "canale": "NEGOZIO", "sorgente": "MANUALE"})
+        baseline = await server.auto_order()
         await db.auto_order_import_state.insert_one({"_id": "excel-full", "status": "PROCESSING"})
         proposal = await server.auto_order()
-        with pytest.raises(HTTPException) as blocked:
-            await server.conferma_auto_order(server.AutoOrderConfermaIn(snapshot_key=proposal["snapshot_key"]))
-        return proposal["data_quality"], blocked.value.status_code
-    assert asyncio.run(scenario()) == ("DATI_INCOERENTI", 409)
+        return baseline, proposal
+    baseline, proposal = asyncio.run(scenario())
+    assert proposal["data_quality"] == "DATI_AFFIDABILI"
+    assert proposal["snapshot_key"] == baseline["snapshot_key"]
+    assert proposal["righe"][0]["venduto_lungo"] == 20
 
 
-def test_configured_import_freshness_blocks_missing_source(isolated_database):
+def test_excel_import_freshness_setting_is_ignored_by_native_planning(isolated_database):
     db = isolated_database
     async def scenario():
+        today = datetime.now(ZoneInfo("Europe/Rome")).date()
+        await db.prodotti.insert_one({"id": "product", "codice": "P", "descrizione": "P", "categoria": "ACCESSORI", "giacenza_negozio": 0})
+        await db.vendite.insert_one({"id": "sale", "codice": "P", "data": today.isoformat() + "T12:00:00", "quantita": 20, "canale": "NEGOZIO", "sorgente": "MANUALE"})
+        baseline = await server.auto_order()
         await db.parametri.insert_one({"nome": "AUTO_ORDER_MAX_ETA_IMPORT_GG", "valore": 2})
         proposal = await server.auto_order()
-        with pytest.raises(HTTPException) as blocked:
-            await server.conferma_auto_order(server.AutoOrderConfermaIn(snapshot_key=proposal["snapshot_key"]))
-        return proposal["data_quality"], blocked.value.status_code
-    assert asyncio.run(scenario()) == ("DATI_OBSOLETI", 409)
+        return baseline, proposal
+    baseline, proposal = asyncio.run(scenario())
+    assert proposal["data_quality"] == "DATI_AFFIDABILI"
+    assert proposal["snapshot_key"] == baseline["snapshot_key"]
 
 
 def test_two_distinct_confirmations_from_one_snapshot_conflict(isolated_database):

@@ -187,12 +187,13 @@ export default function SmartVenue() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    if (!window.confirm(`Import Excel legacy Smart Venue: il file ${file.name} può sostituire saldi o barcode. Hai verificato il backup e vuoi procedere?`)) return;
     setImporting(true);
     try {
       const data = new FormData();
       data.append("file", file);
       data.append("modo", importMode);
-      const response = await api.post("/smart-venue/import-excel", data);
+      const response = await api.post("/smart-venue/import-excel", data, { headers: { "X-Legacy-Import-Confirmed": "confermo-import-legacy" } });
       await load();
       const labels = { barcode: "colonna E", saldo: "colonna F", entrambi: "colonne E/F" };
       toast.success(`${response.data.totali.smart_venue_righe} righe elaborate dalla ${labels[importMode]}`);
@@ -219,7 +220,7 @@ export default function SmartVenue() {
                 <option value="entrambi">Colonne E e F</option>
               </select>
               <label className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${importing ? "pointer-events-none opacity-50" : "hover:bg-slate-50"}`}>
-                <UploadSimple size={17} /> {importing ? "Importazione…" : "Importa da Excel"}
+                <UploadSimple size={17} /> {importing ? "Importazione…" : "Import Excel legacy"}
                 <input data-testid="smart-venue-import" type="file" accept=".xlsx,.xlsm" className="hidden" onChange={importSmartVenue} disabled={importing} />
               </label>
             </div>

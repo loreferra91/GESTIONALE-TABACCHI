@@ -4,6 +4,10 @@ La progettazione, le formule, le API e le procedure di Auto-Order 2.0 sono in
 [`docs/AUTO_ORDER_2.md`](docs/AUTO_ORDER_2.md).
 
 Gestionale full stack per prodotti, magazzino, vending, vendite, ordini e cassa.
+La WebApp e MongoDB sono la fonte operativa: Auto-Order usa solo le vendite
+native e le scorte correnti. Excel è un archivio e uno strumento di import
+legacy controllato; gli export PDF/Excel sono facoltativi. La verifica della
+copertura storica è in [`docs/WEBAPP_AUTONOMIA.md`](docs/WEBAPP_AUTONOMIA.md).
 
 - **Frontend:** React, installato e compilato con Yarn 1.22.22
 - **API:** FastAPI + Uvicorn
@@ -69,9 +73,9 @@ Il frontend locale sarà disponibile su `http://localhost:3000`.
 ## Semantica magazzino e ordini
 
 `giacenza_negozio` indica lo stock fisico libero in negozio/magazzino, cioe i
-pezzi realmente disponibili per vendita o ricarica. Nei file Excel la colonna
-`RIMANENZE` e invece aggregata: durante l'import viene convertita una sola volta
-in stock fisico libero sottraendo giacenza vending e venduto vending. Auto-Order
+pezzi realmente disponibili per vendita o ricarica. Nei vecchi file Excel la
+colonna `RIMANENZE` era aggregata: solo nell'import legacy controllato viene
+convertita una volta in stock fisico libero. Auto-Order
 usa lo stock negozio per la copertura immediata al banco e la somma negozio +
 vending per il fabbisogno complessivo. Una ricarica vending `-negozio/+vending`
 non cambia il totale fisico e non e una vendita.
@@ -112,6 +116,12 @@ lunga viene analizzato in base ai giorni di copertura, senza una soglia minima
 di venduto. Se non ha vendite nella finestra lunga e la giacenza negozio e
 inferiore al lotto d'ordine, viene segnalato come `CONTROLLO MANUALE` senza
 generare automaticamente una quantita da acquistare.
+
+Un nuovo operatore può usare il ciclo completo senza file Excel: registra le
+vendite nella WebApp, acquisisce il CSV del distributore quando disponibile,
+controlla le giacenze, salva l'ordine in Auto-Order e collega il carico merce
+all'ordine quando arriva la fornitura. PDF ed Excel servono soltanto per
+esportare o consultare una copia dell'ordine.
 
 Il ciclo di vita FastAPI usa un `lifespan` asincrono: allo startup inizializza
 seed, parametri e indici; allo shutdown chiude il client Mongo. La migrazione da

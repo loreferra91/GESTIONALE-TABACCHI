@@ -318,7 +318,7 @@ export default function Carico() {
               </tr>
             </thead>
             <tbody>
-              {righe.length === 0 && <tr><td colSpan={7} className="text-center py-12 text-slate-400">Nessuna riga — importa l'Excel Auto-Order, cerca un prodotto o aggiungi una riga vuota.</td></tr>}
+              {righe.length === 0 && <tr><td colSpan={7} className="text-center py-12 text-slate-400">Nessuna riga — precompila da Auto-Order, cerca un prodotto o aggiungi una riga vuota.</td></tr>}
               {righe.map((r, i) => {
                 const known = r.codice && prodMap.has(r.codice.trim());
                 return (

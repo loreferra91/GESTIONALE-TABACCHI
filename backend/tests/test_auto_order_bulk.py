@@ -1,7 +1,9 @@
 import asyncio
 import io
 import os
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
@@ -44,8 +46,7 @@ class FakeAggregateCollection:
         self.pipelines.append(pipeline)
         match = pipeline[0].get("$match") if pipeline else None
         if match:
-            since = match["data"]["$gte"]
-            return FakeCursor(self.short_documents if since.startswith("2026-09-10") else self.documents)
+            return FakeCursor(self.short_documents if len(self.pipelines) == 1 else self.documents)
         return FakeCursor(self.documents)
 
     async def find_one(self, *_args, **_kwargs):
@@ -158,12 +159,13 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
 
     assert products.find_calls == 1
     assert sales.find_one_calls == 2  # latest sale and latest CSV vending import
-    assert imported_sales.find_one_calls == 1
+    assert imported_sales.find_one_calls == 0
     assert len(sales.pipelines) == 3
-    assert len(imported_sales.pipelines) == 3
+    assert len(imported_sales.pipelines) == 0
     assert len(orders.pipelines) == 1
     assert sales.pipelines[0][0]["$match"]["data"]["$gte"]
-    assert sales.pipelines[0][0]["$match"]["data"]["$gte"].startswith("2026-09-10")
+    expected_start = datetime.now(ZoneInfo("Europe/Rome")).date() - timedelta(days=9)
+    assert sales.pipelines[0][0]["$match"]["data"]["$gte"].startswith(expected_start.isoformat())
     assert sales.pipelines[0][1]["$group"]["_id"] == "$codice"
     assert orders.pipelines[0][0]["$group"]["_id"] == "$codice"
 
@@ -177,18 +179,18 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     assert not any(row["codice"] == "P3" for row in result["righe"])
     assert next(row for row in result["esclusi"] if row["codice"] == "P3")["stato"] == "ANOMALIA"
 
-    p4 = next(row for row in result["esclusi"] if row["codice"] == "P4")
-    assert p4["venduto_10gg"] == 2
-    assert p4["venduto_30gg"] == 5
-    assert p4["fonte_domanda"] == "DB_STORICO_VEND"
+    p4 = next(row for row in [*result["righe"], *result["esclusi"]] if row["codice"] == "P4")
+    assert p4["venduto_10gg"] == 50
+    assert p4["venduto_30gg"] == 99
+    assert p4["fonte_domanda"] == "VENDITE"
     assert p4["magazzino_reale"] == 1
     assert p4["magazzino_reale_lordo"] == 1
-    assert p4["copertura_gg"] == 5.26
-    assert p4["qta_da_ordinare"] == 0
+    assert p4["copertura_gg"] < 1
+    assert p4["qta_da_ordinare"] > 0
     p5 = next(row for row in result["righe"] if row["codice"] == "P5")
     assert p5["stato"] == "ORDINA ORA"
     assert p5["qta_da_ordinare"] == 2
-    assert result["data_riferimento_domanda"] == "2026-09-19"
+    assert result["data_riferimento_domanda"] == datetime.now(ZoneInfo("Europe/Rome")).date().isoformat()
 
 
 def test_auto_order_pdf_filters_selected_category(monkeypatch):

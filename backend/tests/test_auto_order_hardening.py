@@ -173,7 +173,7 @@ def test_short_only_weight_falls_back_to_any_long_demand(monkeypatch):
             AUTO_ORDER_MIN_VENDUTO_LUNGO=999,
             AUTO_ORDER_FATTORE_SICUREZZA=1.3,
         ),
-        imported_sales=[[], [{"_id": "AMMS451", "tot": 36}]],
+        app_sales=[[], [{"_id": "AMMS451", "tot": 36}]],
     )
 
     row = next(r for r in result["righe"] if r["codice"] == "AMMS451")
@@ -254,7 +254,7 @@ def test_restock_then_auto_order_does_not_double_subtract_vending(monkeypatch):
     assert row["posizione_inventariale"] == 11
 
 
-def test_imported_source_overlaps_app_and_long_only_sales_order(monkeypatch):
+def test_excel_history_never_overrides_native_sales(monkeypatch):
     result = run_auto_order(
         monkeypatch,
         [product("SRC", giacenza_negozio=0)],
@@ -263,11 +263,10 @@ def test_imported_source_overlaps_app_and_long_only_sales_order(monkeypatch):
         imported_sales=[[], [{"_id": "SRC", "tot": 30}]],
     )
 
-    row = next(r for r in result["righe"] if r["codice"] == "SRC")
-    assert row["fonte_domanda"] == "DB_STORICO_VEND"
-    assert row["venduto_breve"] == 0
-    assert row["venduto_lungo"] == 30
-    assert row["qta_da_ordinare"] == 14
+    row = next(r for r in [*result["righe"], *result["esclusi"]] if r["codice"] == "SRC")
+    assert row["fonte_domanda"] == "VENDITE"
+    assert row["venduto_breve"] == 99
+    assert row["venduto_lungo"] == 99
 
 
 def test_configurable_windows_and_compat_fields(monkeypatch):

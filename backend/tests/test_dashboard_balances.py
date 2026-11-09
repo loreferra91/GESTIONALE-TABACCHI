@@ -501,7 +501,7 @@ def test_latest_sale_date_compares_mixed_formats_chronologically():
     assert result.isoformat() == "2026-10-03"
 
 
-def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monkeypatch):
+def test_dashboard_sales_trend_uses_only_native_sales(monkeypatch):
     monkeypatch.setattr(
         server,
         "db",
@@ -518,12 +518,11 @@ def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monk
 
     result = asyncio.run(server._dashboard_sales_trend())
 
-    assert result["ultimo_giorno"] == "2026-10-01"
-    assert result["totale_ultimo_giorno"] == 20
-    assert result["totale_periodo"] == 35
+    assert result["ultimo_giorno"] == "2026-09-30"
+    assert result["totale_ultimo_giorno"] == 5
+    assert result["totale_periodo"] == 5
     assert len(result["serie"]) == 30
-    assert result["serie"][-2] == {"data": "2026-09-30", "importo": 15.0}
-    assert result["serie"][-1] == {"data": "2026-10-01", "importo": 20.0}
+    assert result["serie"][-1] == {"data": "2026-09-30", "importo": 5.0}
 
 
 def test_dashboard_sales_trend_handles_empty_sources(monkeypatch):
@@ -593,11 +592,11 @@ def test_sales_period_report_splits_channels_payments_and_compares_periods(monke
 
     assert result["data_da"] == "2026-10-13"
     assert result["data_a"] == "2026-10-19"
-    assert result["totale"] == 23.75
-    assert result["totale_precedente"] == 10
-    assert result["variazione_pct"] == 137.5
-    assert result["pezzi"] == 4
-    assert result["giorni_con_vendite"] == 3
+    assert result["totale"] == 17.5
+    assert result["totale_precedente"] == 0
+    assert result["variazione_pct"] is None
+    assert result["pezzi"] == 3
+    assert result["giorni_con_vendite"] == 2
     assert len(result["serie"]) == 7
     assert result["serie"][-1] == {
         "data": "2026-10-19",
@@ -606,15 +605,15 @@ def test_sales_period_report_splits_channels_payments_and_compares_periods(monke
         "vending": 0.0,
     }
     assert result["canali"] == [
-        {"nome": "NEGOZIO", "importo": 18.75, "pezzi": 3},
+        {"nome": "NEGOZIO", "importo": 12.5, "pezzi": 2},
         {"nome": "VENDING", "importo": 5.0, "pezzi": 1},
     ]
     assert result["pagamenti"][0]["nome"] == "POS"
     assert result["prodotti"][0] == {
         "codice": "A1",
         "descrizione": "Prodotto A",
-        "importo": 18.75,
-        "pezzi": 3,
+        "importo": 12.5,
+        "pezzi": 2,
     }
 
 
@@ -637,7 +636,7 @@ def test_sales_period_report_empty_sources(monkeypatch):
     assert result["prodotti"] == []
 
 
-def test_sales_period_report_excludes_app_sales_already_captured_by_latest_import(monkeypatch):
+def test_sales_period_report_ignores_legacy_history_and_import_cutoff(monkeypatch):
     monkeypatch.setattr(
         server,
         "db",
@@ -674,5 +673,5 @@ def test_sales_period_report_excludes_app_sales_already_captured_by_latest_impor
 
     result = asyncio.run(server._sales_period_report(7))
 
-    assert result["totale"] == 15
+    assert result["totale"] == 104
     assert [product["codice"] for product in result["prodotti"]] == ["A1", "B2"]

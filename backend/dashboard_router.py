@@ -430,12 +430,9 @@ def create_dashboard_router(
 
     async def dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
         db = get_database()
-        app_sales, imported_sales = await asyncio.gather(
-            db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-            db.db_storico_vend.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-        )
+        app_sales = await db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None)
         totals_by_date: Dict[Any, Decimal] = {}
-        for sale in [*imported_sales, *app_sales]:
+        for sale in app_sales:
             parsed_day = parse_sale_date(sale.get("data"))
             if parsed_day is None:
                 continue
@@ -484,70 +481,44 @@ def create_dashboard_router(
             raise HTTPException(422, "Il periodo deve essere di 7, 30 o 365 giorni")
 
         db = get_database()
-        app_sales, imported_sales, latest_import = await asyncio.gather(
-            db.vendite.find(
-                {},
-                {
-                    "_id": 0,
-                    "data": 1,
-                    "codice": 1,
-                    "descrizione": 1,
-                    "quantita": 1,
-                    "importo": 1,
-                    "canale": 1,
-                    "pagamento": 1,
-                    "created_at": 1,
-                },
-            ).to_list(None),
-            db.db_storico_vend.find(
-                {},
-                {
-                    "_id": 0,
-                    "data": 1,
-                    "codice": 1,
-                    "descrizione": 1,
-                    "quantita": 1,
-                    "importo": 1,
-                },
-            ).to_list(None),
-            get_latest_accounting_import(),
-        )
-        latest_imported_sale = latest_sale_date(imported_sales)
-        if imported_sales:
-            app_sales = [
-                sale
-                for sale in app_sales
-                if is_sale_after_excel_import(
-                    sale,
-                    latest_imported_sale,
-                    (latest_import or {}).get("created_at"),
-                )
-            ]
+        app_sales = await db.vendite.find(
+            {},
+            {
+                "_id": 0,
+                "data": 1,
+                "codice": 1,
+                "descrizione": 1,
+                "quantita": 1,
+                "importo": 1,
+                "canale": 1,
+                "pagamento": 1,
+                "created_at": 1,
+            },
+        ).to_list(None)
         parsed_sales = []
-        for source, documents in (("APP", app_sales), ("STORICO", imported_sales)):
-            for sale in documents:
-                parsed_day = parse_sale_date(sale.get("data"))
-                if parsed_day is None:
-                    continue
-                try:
-                    amount = decimal_money(sale.get("importo") or 0)
-                    quantity = int(sale.get("quantita") or 0)
-                except (TypeError, ValueError):
-                    continue
-                channel = str(sale.get("canale") or "NEGOZIO").strip().upper()
-                if channel not in {"NEGOZIO", "VENDING"}:
-                    channel = "ALTRO"
-                payment = str(sale.get("pagamento") or "NON DISPONIBILE").strip().upper()
-                parsed_sales.append({
-                    "data": parsed_day,
-                    "codice": str(sale.get("codice") or "").strip(),
-                    "descrizione": str(sale.get("descrizione") or "").strip(),
-                    "quantita": quantity,
-                    "importo": amount,
-                    "canale": channel,
-                    "pagamento": payment,
-                    "fonte": source,
-                })
+        for sale in app_sales:
+            parsed_day = parse_sale_date(sale.get("data"))
+            if parsed_day is None:
+                continue
+            try:
+                amount = decimal_money(sale.get("importo") or 0)
+                quantity = int(sale.get("quantita") or 0)
+            except (TypeError, ValueError):
+                continue
+            channel = str(sale.get("canale") or "NEGOZIO").strip().upper()
+            if channel not in {"NEGOZIO", "VENDING"}:
+                channel = "ALTRO"
+            payment = str(sale.get("pagamento") or "NON DISPONIBILE").strip().upper()
+            parsed_sales.append({
+                "data": parsed_day,
+                "codice": str(sale.get("codice") or "").strip(),
+                "descrizione": str(sale.get("descrizione") or "").strip(),
+                "quantita": quantity,
+                "importo": amount,
+                "canale": channel,
+                "pagamento": payment,
+                "fonte": "VENDITE",
+            })
 
         if not parsed_sales:
             return {

@@ -200,10 +200,10 @@ export default function AutoOrder() {
   return (
     <Layout title="Auto-Order" subtitle="fabbisogno reale basato sulle vendite recenti">
       <div className="mb-5 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 text-sm md:grid-cols-4">
-        <div><b>1. Import Excel</b><br/><span className="text-slate-500">Aggiorna dati in Parametri.</span></div>
-        <div><b>2. Anomalie</b><br/><span className="text-slate-500">Controlla stock e codici.</span></div>
-        <div><b>3. Ordine</b><br/><span className="text-slate-500">PDF, Excel o conferma fornitore.</span></div>
-        <div><b>4. Carico</b><br/><span className="text-slate-500">Aggiorna magazzino quando arriva.</span></div>
+        <div><b>1. Vendite</b><br/><span className="text-slate-500">Registra le vendite in negozio e acquisisci il CSV vending.</span></div>
+        <div><b>2. Giacenze</b><br/><span className="text-slate-500">Controlla le scorte operative e le anomalie.</span></div>
+        <div><b>3. Ordine</b><br/><span className="text-slate-500">Salva l’ordine fornitore; PDF ed Excel sono facoltativi.</span></div>
+        <div><b>4. Carico</b><br/><span className="text-slate-500">Collega la ricezione all’ordine e aggiorna il magazzino.</span></div>
       </div>
       {savedBatchKey && <p className="mb-4 rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">Ordine fornitore confermato. Riferimento per Carico Merce: <code className="break-all select-all">{savedBatchKey}</code></p>}
 
@@ -223,7 +223,7 @@ export default function AutoOrder() {
         <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel {categoria ? "selezione" : "fornitore"}
         </button>
-        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || ["DATI_INCOERENTI", "DATI_OBSOLETI"].includes(data?.data_quality)} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica delle forniture" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica delle forniture" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Salvataggio..." : alreadyConfirmed ? "Ordine fornitore salvato" : "Salva ordine fornitore"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
@@ -232,7 +232,8 @@ export default function AutoOrder() {
       </div>
       {invalidRows.length > 0 && <p role="alert" className="mb-4 text-sm font-semibold text-red-700">Quantità non valide: {invalidRows.map(row => `${row.codice} (lotto ${row.lotto_ordine || 1})`).join(", ")}. Inserisci multipli interi del lotto.</p>}
       {supplierChanged && <p role="alert" className="mb-4 text-sm font-semibold text-amber-800">Fornitura modificata: ricalcola Auto-Order per aggiornare la proposta.</p>}
-      {data?.data_quality && <p className={`mb-4 rounded border p-3 text-sm ${data.data_quality === "DATI_AFFIDABILI" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}>Qualità dati: <b>{data.data_quality.replaceAll("_", " ")}</b>. {data.data_quality === "DATI_INCOERENTI" ? "Import Excel in corso o interrotto: conferma bloccata." : data.data_quality === "DATI_OBSOLETI" ? "Import oltre la soglia configurata: conferma bloccata." : data.data_quality === "DATI_PARZIALI" ? "Verifica le fonti e gli articoli segnalati prima di procedere." : "Fonti aggiornate secondo la configurazione corrente."}</p>}
+      {data?.data_quality && <p className={`mb-4 rounded border p-3 text-sm ${data.data_quality === "DATI_AFFIDABILI" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}>Qualità dati: <b>{data.data_quality.replaceAll("_", " ")}</b>. {data.data_quality === "DATI_INCOERENTI" ? "Correggi le anomalie di forniture prima di confermare." : data.data_quality === "DATI_PARZIALI" ? "Verifica le vendite native e gli articoli segnalati prima di procedere." : "Vendite e giacenze operative disponibili nel database."}</p>}
+      {data?.giorni_ritardo_dati > 1 && <p className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Ultima vendita nativa registrata {data.giorni_ritardo_dati} giorni fa. Verifica che le vendite siano aggiornate prima di confermare.</p>}
 
       {pendingOrders.length > 0 && <Card className="mb-4 p-4">
         <h2 className="mb-2 text-base font-bold">Forniture pendenti ({pendingOrders.length})</h2>
@@ -309,12 +310,11 @@ export default function AutoOrder() {
         </div>
       )}
 
-      <div data-testid="ao-calculation-note" className={`mb-4 rounded-md border px-4 py-3 text-sm ${data?.data_quality === "DATI_OBSOLETI" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+      <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
-        Il magazzino reale è la <b>giacenza negozio fisica libera</b> normalizzata dall'import. Il fabbisogno complessivo considera anche vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
+        Il magazzino reale è la <b>giacenza negozio fisica</b> registrata nella WebApp. Il fabbisogno complessivo considera separatamente vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
         Le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
         Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale.
-        {data?.data_quality === "DATI_OBSOLETI" ? <span className="block mt-1 font-semibold">L'ultimo import supera la soglia configurata. Aggiorna le fonti prima di confermare.</span> : null}
       </div>
 
       <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">
@@ -344,7 +344,7 @@ export default function AutoOrder() {
                 <Th sortKey="venduto_breve" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. {breveGg}gg</Th>
                 <Th sortKey="venduto_lungo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Vend. {lungoGg}gg</Th>
                 <Th sortKey="domanda_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Dom./gg</Th>
-                <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. (gg)</Th>
+                <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. min. (gg)</Th>
                 <Th sortKey="quantita_in_arrivo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">In arrivo</Th>
                 <Th sortKey="target_scorta" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Target</Th>
                 <Th sortKey="lotto_ordine" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Lotto</Th>
@@ -369,7 +369,7 @@ export default function AutoOrder() {
                   <td className="font-mono text-right">{formatNum(r.venduto_breve ?? r.venduto_10gg)}</td>
                   <td className="font-mono text-right">{formatNum(r.venduto_lungo ?? r.venduto_30gg)}</td>
                   <td className="font-mono text-right">{formatNum(r.domanda_gg, 2)}</td>
-                  <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
+                  <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`} title={`Negozio: ${r.copertura_negozio_gg ?? '∞'} gg · Vending: ${r.copertura_vending_gg ?? '∞'} gg`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
