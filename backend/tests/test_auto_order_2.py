@@ -15,7 +15,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 from backend import server
-from backend.auto_order_planning import commercial_day, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
+from backend.auto_order_planning import commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
 from backend.auto_order_migrations import AUTO_ORDER_2_SCHEMA_ID, migrate_auto_order_2_schema
 from backend.orders_router import parse_auto_order_excel
 
@@ -52,6 +52,32 @@ def test_native_sales_keep_short_and_long_channel_windows_distinct():
     assert result["venduto_vending_breve"] == 0
     assert result["venduto_negozio"] == 6
     assert result["venduto_vending"] == 30
+
+
+def test_accounting_change_entries_are_not_orderable(isolated_database):
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date().isoformat()
+
+    async def scenario():
+        await db.prodotti.insert_many([
+            {"id": "change-1", "codice": "0000001", "descrizione": "resto non erogato", "categoria": "SIGARETTE", "prezzo": 1, "giacenza_negozio": 0},
+            {"id": "change-2", "codice": "11223344", "descrizione": "Resti non erogati", "categoria": "SIGARETTE", "prezzo": 80.2, "giacenza_negozio": 0},
+            {"id": "real", "codice": "AMMS338", "descrizione": "WINSTON BLUE", "categoria": "SIGARETTE", "prezzo": 5.8, "giacenza_negozio": 0},
+        ])
+        await db.vendite.insert_many([
+            {"id": code, "codice": code, "data": today + "T12:00:00", "quantita": 1, "canale": "NEGOZIO", "sorgente": "MANUALE"}
+            for code in ("0000001", "11223344", "AMMS338")
+        ])
+        return await server.auto_order()
+
+    proposal = asyncio.run(scenario())
+    codes = {row["codice"] for row in [*proposal["righe"], *proposal["esclusi"]]}
+    assert codes == {"AMMS338"}
+    with pytest.raises(HTTPException) as error:
+        server._auto_order_selected_rows(proposal, [server.AutoOrderRigaIn(codice="11223344", quantita=10)])
+    assert error.value.status_code == 422
+    assert not is_orderable_product({"descrizione": "resto non erogato"})
+    assert not is_orderable_product({"descrizione": "vendibile", "ordinabile_auto_order": False})
 
 
 def test_pending_uses_residual_and_delivery_horizon():

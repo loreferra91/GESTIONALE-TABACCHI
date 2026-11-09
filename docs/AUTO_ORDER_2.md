@@ -25,6 +25,10 @@ colonne `vending.giacenza`. Una ricarica vending resta un trasferimento
 `-negozio/+vending`; non crea una vendita. `storico_ordini` è lo storico dei
 carichi effettivi. `ordini_fornitore` e `ordini_fornitore_righe` sono invece
 impegni verso il fornitore e non caricano il magazzino.
+Le voci contabili denominate `resto non erogato` o `resti non erogati` restano
+nel database ma sono escluse dalle proposte e dalla selezione manuale
+Auto-Order: non sono merce acquistabile. Un prodotto può inoltre essere
+escluso esplicitamente con `ordinabile_auto_order=false`.
 
 ## Formule e decisioni
 

@@ -6,10 +6,19 @@ The legacy policy remains active until a lead time is configured.
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 import math
+import re
 from zoneinfo import ZoneInfo
 
 ROME = ZoneInfo("Europe/Rome")
 PENDING_STATES = {"CREATO", "CONFERMATO", "INVIATO", "PARZIALMENTE_RICEVUTO"}
+
+
+def is_orderable_product(product):
+    """Keep accounting-only change entries out of supplier orders."""
+    if product.get("ordinabile_auto_order") is False:
+        return False
+    name = re.sub(r"[^a-z0-9]+", " ", str(product.get("descrizione") or "").casefold()).strip()
+    return name not in {"resto non erogato", "resti non erogati"}
 
 
 def commercial_day(value):

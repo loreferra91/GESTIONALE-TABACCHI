@@ -15,9 +15,9 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 try:
-    from .auto_order_planning import ROME, commercial_day, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
+    from .auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
 except ImportError:  # pragma: no cover
-    from auto_order_planning import ROME, commercial_day, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
+    from auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -272,6 +272,8 @@ def create_auto_order_router(
         proposte = []
         esclusi = []
         for prodotto in prodotti:
+            if not is_orderable_product(prodotto):
+                continue
             codice = prodotto["codice"]
             giac_negozio = int(prodotto.get("giacenza_negozio", 0) or 0)
             giac_vending = int(prodotto.get("giacenza_vending", 0) or 0)
