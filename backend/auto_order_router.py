@@ -265,7 +265,7 @@ def create_auto_order_router(
             if any(int(line.get("quantita_ricevuta", 0) or 0) for line in lines):
                 raise HTTPException(409, "Ordine già parzialmente ricevuto: annullamento automatico non consentito")
         if body.data_consegna_prevista and body.data_consegna_prevista <= datetime.now(ROME).date():
-            raise HTTPException(422, "La data prevista deve essere futura; una consegna scaduta richiede verifica manuale")
+            raise HTTPException(422, "Questa è una previsione futura. Se la merce è già arrivata, collega il carico registrato con la sua data effettiva")
         changes = {"stato": target}
         if body.data_consegna_prevista:
             changes["data_consegna_prevista"] = body.data_consegna_prevista.isoformat()

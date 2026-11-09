@@ -7,6 +7,11 @@ import { toast } from "sonner";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { Plus, Trash2 } from "lucide-react";
 
+const receiptDateLabel = value => {
+  const day = String(value || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day.split("-").reverse().join("/") : "data non disponibile";
+};
+
 export default function AutoOrder() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -116,7 +121,7 @@ export default function AutoOrder() {
       const payload = { version: batch.version || 0 };
       if (state) payload.stato = state;
       const delivery = deliveryDrafts[batch.batch_key] ?? batch.data_consegna_prevista;
-      if (delivery && state !== "ANNULLATO") payload.data_consegna_prevista = delivery;
+      if (delivery && !state) payload.data_consegna_prevista = delivery;
       const response = await api.patch(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}`, payload);
       setPendingOrders(rows => state === "ANNULLATO" ? rows.filter(row => row.batch_key !== batch.batch_key) : rows.map(row => row.batch_key === batch.batch_key ? { ...response.data, righe: row.righe } : row));
       setSupplierChanged(true);
@@ -138,7 +143,7 @@ export default function AutoOrder() {
   const closeWithExistingReceipt = async (batch, receipt) => {
     const missing = Object.entries(receipt.mancanti || {}).map(([code, qty]) => `${code}: ${qty}`).join(", ") || "nessuno";
     const extra = Object.entries(receipt.extra || {}).map(([code, qty]) => `${code}: ${qty}`).join(", ") || "nessuno";
-    if (!window.confirm(`Ordine ${batch.batch_key} (${(batch.righe || []).reduce((sum, row) => sum + Number(row.quantita_ordinata ?? row.quantita ?? 0), 0)} pezzi)\nCarico ${receipt.file_sorgente || receipt.ricezione_id} del ${receipt.data || "data non disponibile"} (${receipt.pezzi_caricati} pezzi)\nMancanti: ${missing}\nExtra: ${extra}\nConfermi che sono lo stesso ordine? Il magazzino non sarà caricato nuovamente.`)) return;
+    if (!window.confirm(`Ordine ${batch.batch_key} (${(batch.righe || []).reduce((sum, row) => sum + Number(row.quantita_ordinata ?? row.quantita ?? 0), 0)} pezzi)\nCarico ${receipt.file_sorgente || receipt.ricezione_id} del ${receiptDateLabel(receipt.data)} (${receipt.pezzi_caricati} pezzi)\nMancanti: ${missing}\nExtra: ${extra}\nConfermi che sono lo stesso ordine? Il magazzino non sarà caricato nuovamente.`)) return;
     try {
       await api.post(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}/chiudi-con-carico/${encodeURIComponent(receipt.ricezione_id)}`, {
         version: batch.version || 0,
@@ -264,17 +269,18 @@ export default function AutoOrder() {
 
       {pendingOrders.length > 0 && <Card className="mb-4 p-4">
         <h2 className="mb-2 text-base font-bold">Forniture pendenti ({pendingOrders.length})</h2>
+        <p className="mb-3 text-xs text-slate-600">L’arrivo previsto indica solo una consegna futura. Se la merce è già arrivata, cerca il carico registrato: la sua data effettiva verrà conservata senza aggiornare di nuovo il magazzino.</p>
         <div className="space-y-3">
           {pendingOrders.map(batch => <div key={batch.batch_key} className="grid gap-2 rounded border border-slate-200 p-3 text-sm md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-center">
             <div className="min-w-0"><div className="font-mono text-xs break-all">{batch.batch_key}</div><div className="text-slate-500">{batch.stato} · {(batch.righe || []).reduce((sum, row) => sum + Math.max(0, Number(row.quantita_ordinata ?? row.quantita ?? 0) - Number(row.quantita_ricevuta || 0)), 0)} pezzi residui</div></div>
-            <label className="text-xs text-slate-600">Consegna prevista <input type="date" aria-label={`Consegna prevista ${batch.batch_key}`} value={deliveryDrafts[batch.batch_key] ?? batch.data_consegna_prevista ?? ""} onChange={event => setDeliveryDrafts(current => ({ ...current, [batch.batch_key]: event.target.value }))} className="ml-2 rounded border px-2 py-1 text-sm" /></label>
-            <button type="button" onClick={() => updateSupply(batch)} disabled={!deliveryDrafts[batch.batch_key]} className="rounded border border-slate-300 px-3 py-2 disabled:opacity-40">Salva data</button>
+            <label className="text-xs text-slate-600">Arrivo previsto (futuro) <input type="date" aria-label={`Arrivo previsto ${batch.batch_key}`} value={deliveryDrafts[batch.batch_key] ?? batch.data_consegna_prevista ?? ""} onChange={event => setDeliveryDrafts(current => ({ ...current, [batch.batch_key]: event.target.value }))} className="ml-2 rounded border px-2 py-1 text-sm" /></label>
+            <button type="button" onClick={() => updateSupply(batch)} disabled={!deliveryDrafts[batch.batch_key]} className="rounded border border-slate-300 px-3 py-2 disabled:opacity-40">Salva previsione</button>
             {batch.stato === "CONFERMATO" || batch.stato === "CREATO" ? <button type="button" onClick={() => updateSupply(batch, "INVIATO")} className="rounded bg-slate-900 px-3 py-2 text-white">Segna inviato</button> : <span />}
             <div className="flex flex-wrap gap-2 md:col-span-4">
-              <button type="button" onClick={() => findExistingReceipts(batch)} className="rounded border border-slate-300 px-3 py-2">Cerca carico già registrato</button>
+              <button type="button" onClick={() => findExistingReceipts(batch)} className="rounded border border-slate-300 px-3 py-2">Merce già arrivata? Cerca carico</button>
               {["CREATO", "CONFERMATO", "INVIATO"].includes(batch.stato) && <button type="button" onClick={() => window.confirm(`Confermi che la fornitura ${batch.batch_key} non è da considerare pendente? Verifica prima che non sia stata effettivamente consegnata senza collegamento. Resterà nello storico come annullata.`) && updateSupply(batch, "ANNULLATO")} className="rounded border border-red-300 px-3 py-2 text-red-700">Annulla fornitura</button>}
               {(receiptCandidates[batch.batch_key] || []).map(receipt => <div key={receipt.ricezione_id} className="w-full rounded bg-amber-50 p-2 text-xs text-amber-950">
-                <div><b>{receipt.file_sorgente || "Carico esistente"}</b> · {receipt.data || "data non disponibile"} · {receipt.righe_coincidenti}/{receipt.righe_ordine} codici · {receipt.pezzi_caricati}/{receipt.pezzi_ordinati} pezzi</div>
+                <div><b>{receipt.file_sorgente || "Carico esistente"}</b> · ricevuto il {receiptDateLabel(receipt.data)} · {receipt.righe_coincidenti}/{receipt.righe_ordine} codici · {receipt.pezzi_caricati}/{receipt.pezzi_ordinati} pezzi</div>
                 <div>Mancanti: {Object.entries(receipt.mancanti || {}).map(([code, qty]) => `${code} ${qty}`).join(", ") || "nessuno"} · Extra: {Object.entries(receipt.extra || {}).map(([code, qty]) => `${code} ${qty}`).join(", ") || "nessuno"}</div>
                 <div>Verifica il documento fornitore prima di collegare: un carico simile può comparire su più ordini.</div>
                 <button type="button" onClick={() => closeWithExistingReceipt(batch, receipt)} className="mt-1 rounded bg-amber-900 px-2 py-1 text-white">Collega e chiudi senza nuovo carico</button>

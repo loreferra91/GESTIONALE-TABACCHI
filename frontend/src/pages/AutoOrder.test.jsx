@@ -185,12 +185,14 @@ test("la conferma invia lo snapshot usato per la proposta", async () => {
 
 test("mostra il carico esistente e richiede conferma delle differenze prima di collegarlo", async () => {
   const batch = { batch_key: "order-key", stato: "CREATO", version: 0, righe: [{ codice: "A", quantita: 10 }] };
-  const receipt = { ricezione_id: "receipt-1", data: "2026-11-06", file_sorgente: "ordine.xlsx", righe_coincidenti: 1, righe_ordine: 1, pezzi_caricati: 9, pezzi_ordinati: 10, mancanti: { A: 1 }, extra: {} };
+  const receipt = { ricezione_id: "receipt-1", data: "2026-11-06T00:00:00.000Z", file_sorgente: "ordine.xlsx", righe_coincidenti: 1, righe_ordine: 1, pezzi_caricati: 9, pezzi_ordinati: 10, mancanti: { A: 1 }, extra: {} };
   api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? response : url === "/auto-order/forniture" ? [batch] : { carichi: [receipt] } }));
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
-  const find = [...container.querySelectorAll("button")].find(button => button.textContent === "Cerca carico già registrato");
+  expect(container.textContent).toContain("L’arrivo previsto indica solo una consegna futura");
+  const find = [...container.querySelectorAll("button")].find(button => button.textContent === "Merce già arrivata? Cerca carico");
   await act(async () => find.click());
   expect(container.textContent).toContain("ordine.xlsx");
+  expect(container.textContent).toContain("ricevuto il 06/11/2026");
   expect(container.textContent).toContain("Mancanti: A 1");
   const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
   const link = [...container.querySelectorAll("button")].find(button => button.textContent === "Collega e chiudi senza nuovo carico");
