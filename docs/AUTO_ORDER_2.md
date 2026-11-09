@@ -119,8 +119,9 @@ Per una ricezione storica priva di riferimento, conservare il movimento
 originale. Confrontare documenti del fornitore, ordine confermato e
 `storico_ordini.id`; verificare prodotto, quantità, data e assenza di
 annullamenti o associazioni precedenti. La pagina Auto-Order consente di
-annullare una bozza `CREATO` solo con conferma esplicita; il documento resta
-nello storico. Per un ordine effettivamente ricevuto, **Cerca carico già
+annullare con conferma esplicita una fornitura ancora aperta anche se segnata
+`INVIATO` per errore; il documento resta nello storico. Per un ordine
+effettivamente ricevuto, **Cerca carico già
 registrato** elenca i carichi completati e non collegati con almeno l'80% dei
 codici dell'ordine in comune. La somiglianza è solo un filtro: lo stesso carico
 può risultare compatibile con più ordini. L'operatore verifica il documento del

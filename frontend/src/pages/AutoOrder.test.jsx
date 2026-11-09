@@ -201,15 +201,15 @@ test("mostra il carico esistente e richiede conferma delle differenze prima di c
   confirm.mockRestore();
 });
 
-test("annulla una bozza solo dopo conferma e la rimuove dalle forniture pendenti", async () => {
-  const batch = { batch_key: "draft-key", stato: "CREATO", version: 2, righe: [{ codice: "A", quantita: 10 }] };
+test("annulla una fornitura segnata inviata solo dopo conferma e la rimuove dalle pendenti", async () => {
+  const batch = { batch_key: "draft-key", stato: "INVIATO", version: 2, righe: [{ codice: "A", quantita: 10 }] };
   api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? response : [batch] }));
   api.patch.mockResolvedValue({ data: { ...batch, stato: "ANNULLATO", version: 3 } });
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
   const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
-  const cancel = [...container.querySelectorAll("button")].find(button => button.textContent === "Annulla bozza");
+  const cancel = [...container.querySelectorAll("button")].find(button => button.textContent === "Annulla fornitura");
   await act(async () => cancel.click());
-  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("soltanto una bozza"));
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("non è da considerare pendente"));
   expect(api.patch).toHaveBeenCalledWith("/auto-order/forniture/draft-key", { version: 2, stato: "ANNULLATO" });
   expect(container.textContent).not.toContain("Forniture pendenti");
   confirm.mockRestore();
