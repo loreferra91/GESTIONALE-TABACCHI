@@ -102,12 +102,14 @@ def test_pivot_rounds_discounted_lines_and_sums_displayed_values(database):
     async def scenario():
         await database.parametri.insert_one({"nome": "AGGIO_PCT", "valore": 0.1})
         await database.prodotti.insert_many([
-            {"codice": code, "prezzo": 0.05, "acquistati": 1, "giacenza_negozio": 1}
+            {"codice": code, "prezzo": 0.05, "acquistati": 1, "giacenza_negozio": 1,
+             "presente_ultimo_import": code == "A"}
             for code in ("A", "B")
         ])
         return await server.pivot()
     result = asyncio.run(scenario())
     assert [row["tot_acquistato"] for row in result["righe"]] == [0.05, 0.05]
+    assert {row["codice"] for row in result["righe"]} == {"A", "B"}
     assert result["kpi"]["valore_acquistato"] == 0.1
     assert result["kpi"]["valore_giacenza"] == 0.1
     json.dumps(result, allow_nan=False)

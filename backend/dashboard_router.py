@@ -71,7 +71,7 @@ def calculate_purchase_breakdown(
     normalize_money: Callable[[Any], float],
     decimal_money: Callable[[Any], Decimal],
 ) -> Dict[str, Any]:
-    """Split cumulative purchases into the last Excel base and later receipts.
+    """Split cumulative purchases into the migrated base and later receipts.
 
     Product ``acquistati`` already contains both portions. We therefore
     subtract post-import receipt quantities to reconstruct the Excel base,
@@ -80,18 +80,6 @@ def calculate_purchase_breakdown(
     kpi = pivot_result.get("kpi") or {}
     rows = pivot_result.get("righe") or []
     import_created_at = (latest_import or {}).get("created_at")
-    if not import_created_at:
-        return {
-            "valore_acquistato_base_excel": normalize_money(kpi.get("valore_acquistato") or 0),
-            "valore_acquistato_carico_merce": 0.0,
-            "valore_acquistato": normalize_money(kpi.get("valore_acquistato") or 0),
-            "acquistati_base_excel_pezzi": sum(int(row.get("acq") or 0) for row in rows),
-            "acquistati_carico_merce_pezzi": 0,
-            "acquisti_excel_data": None,
-            "acquisti_excel_file": None,
-            "acquisti_ricostruzione_anomalie": 0,
-        }
-
     aggio = Decimal(str(kpi.get("aggio_pct", 0.10) or 0))
     cost_factor = max(Decimal(0), Decimal(1) - aggio)
     rows_by_code = {str(row.get("codice") or ""): row for row in rows}
@@ -668,8 +656,8 @@ def create_dashboard_router(
         import_cutoff = parse_utc_datetime(import_created_at)
         ordini_successivi = [
             order for order in storico_ordini
-            if import_cutoff
-            and (parse_utc_datetime(order.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc))
+            if not import_cutoff
+            or (parse_utc_datetime(order.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc))
             > import_cutoff
         ]
         purchase_breakdown = calculate_purchase_breakdown(
@@ -685,14 +673,12 @@ def create_dashboard_router(
         venduto_negozio_excel = normalize_money(import_totali.get("valore_venduto_negozio_excel") or 0)
         venduto_vending_excel = normalize_money(import_totali.get("valore_venduto_vending_excel") or 0)
         venduto_totale_excel = normalize_money(import_totali.get("valore_venduto_totale_excel") or 0)
-        if venduto_totale_excel:
-            pivot_result["kpi"]["valore_venduto"] = round(venduto_totale_excel, 2)
-            pivot_result["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
-            pivot_result["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
-            pivot_result["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
-            pivot_result["kpi"]["margine_lordo"] = sum_money(
-                [venduto_totale_excel, -(pivot_result["kpi"].get("valore_acquistato") or 0)]
-            )
+        pivot_result["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
+        pivot_result["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
+        pivot_result["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
+        pivot_result["kpi"]["margine_lordo"] = sum_money(
+            [pivot_result["kpi"].get("valore_venduto") or 0, -(pivot_result["kpi"].get("valore_acquistato") or 0)]
+        )
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_sales = {"tot": Decimal(0), "pezzi": 0}

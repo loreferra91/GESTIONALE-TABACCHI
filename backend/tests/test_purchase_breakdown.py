@@ -36,7 +36,7 @@ def test_splits_excel_base_from_later_receipts_without_double_counting():
     }
 
 
-def test_preserves_existing_total_when_there_is_no_excel_baseline():
+def test_native_receipts_are_visible_without_an_excel_baseline():
     result = calculate_purchase_breakdown(
         {
             "kpi": {"valore_acquistato": 25.2, "aggio_pct": 0.10},
@@ -49,5 +49,6 @@ def test_preserves_existing_total_when_there_is_no_excel_baseline():
     )
 
     assert result["valore_acquistato"] == 25.2
-    assert result["valore_acquistato_base_excel"] == 25.2
-    assert result["valore_acquistato_carico_merce"] == 0
+    assert result["valore_acquistato_base_excel"] == 12.6
+    assert result["valore_acquistato_carico_merce"] == 12.6
+    assert result["acquisti_excel_file"] is None

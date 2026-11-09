@@ -123,7 +123,7 @@ export default function StockAnalysis() {
       <h2 id="stock-analysis-title" className="sr-only">Analisi scorte</h2>
 
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Riepilogo economico scorte">
-        <SummaryCard icon={ShoppingCart} label={`Totale acquistato (netto aggio ${formatNum(aggioPercent)}%)`} value={formatEur(kpi?.valore_acquistato)} detail="Ultimo Excel + Carico Merce" />
+        <SummaryCard icon={ShoppingCart} label={`Totale acquistato (netto aggio ${formatNum(aggioPercent)}%)`} value={formatEur(kpi?.valore_acquistato)} detail="Base registrata + Carico Merce" />
         <SummaryCard icon={Coins} label="Totale venduto attuale" value={formatEur(kpi?.valore_venduto)} tone="success" />
         <SummaryCard icon={CheckCircle} label="Margine lordo" value={formatEur(kpi?.margine_lordo)} tone={kpi?.margine_lordo >= 0 ? "success" : "danger"} />
         <SummaryCard icon={Coins} label="Valore scorte attuali" value={formatEur(stockValue)} />
@@ -136,10 +136,10 @@ export default function StockAnalysis() {
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_auto_1fr_auto_1fr] md:items-center">
           <div className="rounded-md border border-slate-200 bg-white p-3">
-            <div className="text-sm font-bold text-slate-600">Base ultimo Excel</div>
+            <div className="text-sm font-bold text-slate-600">Base registrata</div>
             <div className="mt-1 font-heading text-2xl font-black tabular-nums text-slate-950">{formatEur(kpi?.valore_acquistato_base_excel)}</div>
             <div className="mt-1 text-xs text-slate-500">
-              {formatNum(kpi?.acquistati_base_excel_pezzi)} pezzi · {kpi?.acquisti_excel_file || "ultimo import"} · {formatImportDate(kpi?.acquisti_excel_data)}
+              {formatNum(kpi?.acquistati_base_excel_pezzi)} pezzi{kpi?.acquisti_excel_file ? ` · storico migrato: ${kpi.acquisti_excel_file} · ${formatImportDate(kpi.acquisti_excel_data)}` : " · nessun import richiesto"}
             </div>
           </div>
           <div className="hidden font-heading text-2xl font-black text-amber-600 md:block" aria-hidden="true">+</div>
@@ -186,7 +186,7 @@ export default function StockAnalysis() {
 
       <div className="mb-3 flex items-start gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-900">
         <CheckCircle size={18} className="mt-0.5 shrink-0 text-blue-600" />
-        <span>La copertura usa la giacenza del negozio; il valore scorte include negozio e vending.</span>
+        <span>La copertura considera separatamente negozio e vending; il valore scorte li include entrambi.</span>
       </div>
 
       <Card className="overflow-hidden">

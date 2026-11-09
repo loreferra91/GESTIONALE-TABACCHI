@@ -14,6 +14,11 @@
 - `db_storico_vend` resta in MongoDB come archivio legacy. Non partecipa a
   domanda, qualità dati, snapshot o conferma Auto-Order, né ai report delle
   vendite correnti e all'indicatore dell'ultima vendita WebApp.
+- Il pivot economico include tutti i prodotti presenti nel database e usa i
+  contatori operativi `venduti_negozio`, `venduti_vending` e `acquistati`.
+  L'ultimo import Excel non sostituisce più il totale venduto corrente. Una
+  base storica già migrata resta disponibile nella composizione degli acquisti
+  e dei saldi di cassa, senza richiedere nuovi file Excel.
 
 ## Data di migrazione e copertura verificabile
 
