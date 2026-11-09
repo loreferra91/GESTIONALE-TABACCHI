@@ -104,7 +104,11 @@ differenza negativa da correggere manualmente.
 Le finestre Auto-Order sono configurabili con `AUTO_ORDER_FINESTRA_BREVE_GG` e
 `AUTO_ORDER_FINESTRA_LUNGA_GG`. Le API espongono i campi generici
 `venduto_breve` e `venduto_lungo`; `venduto_10gg` e `venduto_30gg` restano
-presenti per compatibilita.
+presenti per compatibilita. Ogni prodotto con almeno una vendita nella finestra
+lunga viene analizzato in base ai giorni di copertura, senza una soglia minima
+di venduto. Se non ha vendite nella finestra lunga e la giacenza negozio e
+inferiore al lotto d'ordine, viene segnalato come `CONTROLLO MANUALE` senza
+generare automaticamente una quantita da acquistare.
 
 Il ciclo di vita FastAPI usa un `lifespan` asincrono: allo startup inizializza
 seed, parametri e indici; allo shutdown chiude il client Mongo. La migrazione da

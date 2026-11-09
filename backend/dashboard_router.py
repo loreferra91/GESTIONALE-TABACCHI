@@ -64,6 +64,82 @@ def is_cash_payment(payment_method: Any) -> bool:
     return not normalized or "CONTANT" in normalized
 
 
+def calculate_purchase_breakdown(
+    pivot_result: Dict[str, Any],
+    post_import_orders: List[Dict[str, Any]],
+    latest_import: Dict[str, Any] | None,
+    normalize_money: Callable[[Any], float],
+    decimal_money: Callable[[Any], Decimal],
+) -> Dict[str, Any]:
+    """Split cumulative purchases into the last Excel base and later receipts.
+
+    Product ``acquistati`` already contains both portions. We therefore
+    subtract post-import receipt quantities to reconstruct the Excel base,
+    then value those receipts with the price stored on each movement.
+    """
+    kpi = pivot_result.get("kpi") or {}
+    rows = pivot_result.get("righe") or []
+    import_created_at = (latest_import or {}).get("created_at")
+    if not import_created_at:
+        return {
+            "valore_acquistato_base_excel": normalize_money(kpi.get("valore_acquistato") or 0),
+            "valore_acquistato_carico_merce": 0.0,
+            "valore_acquistato": normalize_money(kpi.get("valore_acquistato") or 0),
+            "acquistati_base_excel_pezzi": sum(int(row.get("acq") or 0) for row in rows),
+            "acquistati_carico_merce_pezzi": 0,
+            "acquisti_excel_data": None,
+            "acquisti_excel_file": None,
+            "acquisti_ricostruzione_anomalie": 0,
+        }
+
+    aggio = Decimal(str(kpi.get("aggio_pct", 0.10) or 0))
+    cost_factor = max(Decimal(0), Decimal(1) - aggio)
+    rows_by_code = {str(row.get("codice") or ""): row for row in rows}
+    receipt_quantities: Dict[str, int] = {}
+    receipt_value = Decimal(0)
+    receipt_units = 0
+
+    for order in post_import_orders:
+        if order.get("annullato") is True:
+            continue
+        code = str(order.get("codice") or "").strip()
+        quantity = int(order.get("quantita") or 0)
+        if not code or quantity <= 0:
+            continue
+        receipt_quantities[code] = receipt_quantities.get(code, 0) + quantity
+        receipt_units += quantity
+        recorded_price = decimal_money(order.get("prezzo") or 0)
+        if recorded_price <= 0:
+            recorded_price = decimal_money((rows_by_code.get(code) or {}).get("prezzo") or 0)
+        receipt_value += decimal_money(Decimal(quantity) * recorded_price * cost_factor)
+
+    base_value = Decimal(0)
+    base_units = 0
+    anomalies = 0
+    for row in rows:
+        code = str(row.get("codice") or "")
+        current_quantity = int(row.get("acq") or 0)
+        base_quantity = current_quantity - receipt_quantities.get(code, 0)
+        if base_quantity < 0:
+            anomalies += 1
+            base_quantity = 0
+        base_units += base_quantity
+        price = decimal_money(row.get("prezzo") or 0)
+        base_value += decimal_money(Decimal(base_quantity) * price * cost_factor)
+
+    total_value = base_value + receipt_value
+    return {
+        "valore_acquistato_base_excel": normalize_money(base_value),
+        "valore_acquistato_carico_merce": normalize_money(receipt_value),
+        "valore_acquistato": normalize_money(total_value),
+        "acquistati_base_excel_pezzi": base_units,
+        "acquistati_carico_merce_pezzi": receipt_units,
+        "acquisti_excel_data": import_created_at,
+        "acquisti_excel_file": (latest_import or {}).get("file"),
+        "acquisti_ricostruzione_anomalie": anomalies,
+    }
+
+
 def vending_payment_bucket(payment_method: Any) -> str:
     normalized = (
         unicodedata.normalize("NFKD", str(payment_method or ""))
@@ -602,10 +678,37 @@ def create_dashboard_router(
     async def dashboard():
         db = get_database()
         pivot_result = await get_pivot()
-        ultimo_import_contabile, date_vendite_importate = await asyncio.gather(
+        ultimo_import_contabile, date_vendite_importate, storico_ordini = await asyncio.gather(
             get_latest_accounting_import(),
             db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
+            db.storico_ordini.find(
+                {"annullato": {"$ne": True}},
+                {
+                    "_id": 0,
+                    "codice": 1,
+                    "quantita": 1,
+                    "prezzo": 1,
+                    "created_at": 1,
+                    "annullato": 1,
+                },
+            ).to_list(5000),
         )
+        import_created_at = (ultimo_import_contabile or {}).get("created_at")
+        import_cutoff = parse_utc_datetime(import_created_at)
+        ordini_successivi = [
+            order for order in storico_ordini
+            if import_cutoff
+            and (parse_utc_datetime(order.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc))
+            > import_cutoff
+        ]
+        purchase_breakdown = calculate_purchase_breakdown(
+            pivot_result,
+            ordini_successivi,
+            ultimo_import_contabile,
+            normalize_money,
+            decimal_money,
+        )
+        pivot_result["kpi"].update(purchase_breakdown)
         ultima_vendita_importata = latest_sale_date(date_vendite_importate)
         import_totali = (ultimo_import_contabile or {}).get("totali", {})
         venduto_negozio_excel = normalize_money(import_totali.get("valore_venduto_negozio_excel") or 0)

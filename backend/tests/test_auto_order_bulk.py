@@ -101,7 +101,7 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
         },
         {
             "codice": "P5",
-            "descrizione": "Movimento insufficiente senza scorta",
+            "descrizione": "Movimento minimo senza scorta",
             "categoria": "ACCESSORI",
             "prezzo": 1,
             "giacenza_negozio": 0,
@@ -185,9 +185,9 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     assert p4["magazzino_reale_lordo"] == 1
     assert p4["copertura_gg"] == 5.26
     assert p4["qta_da_ordinare"] == 3
-    p5 = next(row for row in result["esclusi"] if row["codice"] == "P5")
-    assert p5["stato"] == "CONTROLLO MANUALE"
-    assert p5["qta_da_ordinare"] == 0
+    p5 = next(row for row in result["righe"] if row["codice"] == "P5")
+    assert p5["stato"] == "ORDINA ORA"
+    assert p5["qta_da_ordinare"] == 2
     assert result["data_riferimento_domanda"] == "2026-09-19"
 
 
