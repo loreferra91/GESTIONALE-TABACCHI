@@ -316,6 +316,56 @@ def test_restore_lock_rejects_concurrent_restore(monkeypatch):
     assert error.status_code == 409
 
 
+def test_restore_uses_selected_backup_even_when_pre_restore_prunes_it(monkeypatch):
+    database = AsyncMongoMockClient()["restore_retention"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        snapshots = []
+        for index in range(3):
+            await database.prodotti.delete_many({})
+            await database.prodotti.insert_one({"id": f"product-{index}"})
+            snapshots.append(await server.create_backup_snapshot(f"Backup {index}"))
+        await database.app_migrations.insert_one({"id": server.BACKUP_RETENTION_POLICY_ID})
+
+        result = await server.backup_restore(snapshots[0]["id"])
+        products = await database.prodotti.find({}, {"_id": 0}).to_list(None)
+        selected = await database.backup_snapshots.find_one({"id": snapshots[0]["id"]})
+        return result, products, selected
+
+    result, products, selected = asyncio.run(scenario())
+    assert result["ok"] is True
+    assert products == [{"id": "product-0"}]
+    assert selected["status"] == "PRUNED"
+
+
+def test_restore_rejects_missing_snapshot_items_before_changing_data(monkeypatch):
+    database = AsyncMongoMockClient()["restore_incomplete"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({"id": "old-product"})
+        snapshot = await server.create_backup_snapshot("Backup originale")
+        await database.prodotti.delete_many({})
+        await database.prodotti.insert_one({"id": "current-product"})
+        await database.backup_snapshot_items.delete_many({
+            "snapshot_id": snapshot["id"], "collection": "prodotti",
+        })
+        with pytest.raises(HTTPException) as caught:
+            await server.backup_restore(snapshot["id"])
+        products = await database.prodotti.find({}, {"_id": 0}).to_list(None)
+        pre_restore_count = await database.backup_snapshots.count_documents({
+            "reason": "pre-restore",
+        })
+        return caught.value, products, pre_restore_count
+
+    error, products, pre_restore_count = asyncio.run(scenario())
+    assert error.status_code == 409
+    assert "prodotti" in error.detail
+    assert products == [{"id": "current-product"}]
+    assert pre_restore_count == 0
+
+
 def test_restore_collections_compensates_standalone_failure(monkeypatch):
     database = AsyncMongoMockClient()["restore_compensation"]
 
