@@ -186,9 +186,15 @@ def create_auto_order_router(
             domanda_breve_gg = venduto_breve / float(finestra_breve)
             domanda_lunga_gg = venduto_lungo / float(finestra_lunga)
             domanda_gg = (domanda_breve_gg * peso_breve) + (domanda_lunga_gg * peso_lungo)
+            movimento_sufficiente = venduto_breve >= min_venduto_breve or venduto_lungo >= min_venduto_lungo
+            domanda_fallback_lunga = False
+            if domanda_gg <= 0 and venduto_lungo >= min_venduto_lungo and domanda_lunga_gg > 0:
+                # Un peso breve del 100% non deve azzerare il fabbisogno di un
+                # articolo esaurito che ha ancora un movimento mensile rilevante.
+                domanda_gg = domanda_lunga_gg
+                domanda_fallback_lunga = True
             lotto = lot_for(prodotto.get("categoria", "ACCESSORI"), params)
             copertura_gg = magazzino_reale / domanda_gg if domanda_gg > 0 else None
-            movimento_sufficiente = venduto_breve >= min_venduto_breve or venduto_lungo >= min_venduto_lungo
             target_scorta = math.ceil(domanda_gg * gg_target * fatt) if domanda_gg > 0 else 0
             fabbisogno_grezzo = max(0, target_scorta - magazzino_reale)
 
@@ -220,6 +226,8 @@ def create_auto_order_router(
                 motivo = f"COPERTURA {copertura_gg:.2f}gg TRA {int(gg_min)} E {int(gg_target)}gg"
             elif copertura_gg is not None:
                 motivo = f"COPERTURA SUFFICIENTE ({copertura_gg:.2f}gg)"
+            if domanda_fallback_lunga and not anomalia:
+                motivo += f" · DOMANDA DA {finestra_lunga}GG"
 
             row = {
                 "codice": codice,
@@ -244,6 +252,7 @@ def create_auto_order_router(
                 "domanda_gg_10": round(domanda_breve_gg, 3),
                 "domanda_gg_30": round(domanda_lunga_gg, 3),
                 "domanda_gg": round(domanda_gg, 3),
+                "domanda_fallback_lunga": domanda_fallback_lunga,
                 "copertura_gg": round(copertura_gg, 2) if copertura_gg is not None else None,
                 "target_scorta": target_scorta,
                 "fabbisogno_grezzo": fabbisogno_grezzo,

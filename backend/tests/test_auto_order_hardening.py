@@ -154,6 +154,28 @@ def test_zero_params_are_not_replaced_by_defaults(monkeypatch):
     assert row["qta_da_ordinare"] == 14
 
 
+def test_short_only_weight_falls_back_to_significant_long_demand(monkeypatch):
+    result = run_auto_order(
+        monkeypatch,
+        [product("AMMS451", categoria="SIGARETTE", giacenza_negozio=0)],
+        params=base_params(
+            AUTO_ORDER_FINESTRA_BREVE_GG=7,
+            AUTO_ORDER_PESO_BREVE=1,
+            AUTO_ORDER_FATTORE_SICUREZZA=1.3,
+        ),
+        imported_sales=[[], [{"_id": "AMMS451", "tot": 36}]],
+    )
+
+    row = next(r for r in result["righe"] if r["codice"] == "AMMS451")
+    assert row["venduto_breve"] == 0
+    assert row["venduto_lungo"] == 36
+    assert row["domanda_gg"] == 1.2
+    assert row["domanda_fallback_lunga"] is True
+    assert row["copertura_gg"] == 0
+    assert row["qta_da_ordinare"] == 30
+    assert "DOMANDA DA 30GG" in row["motivo"]
+
+
 def test_anomaly_with_sufficient_sales_is_excluded(monkeypatch):
     result = run_auto_order(
         monkeypatch,
