@@ -2,6 +2,14 @@
 
 ## Gestionale Tabacchi
 
+- Dal 2026-11-09 Auto-Order 2.0 è in sviluppo sul branch `feature/auto-order-2`
+  (base `6fc9ca1`), senza deploy o merge in `main`. Le vendite Excel prive di
+  ID evento/canale non vengono sommate alle vendite app sovrapposte; i giorni
+  ambigui richiedono controllo manuale. Le forniture pendenti entrano nel
+  fabbisogno solo con data futura affidabile, e i carichi riducono il residuo
+  solo con riferimento ordine esplicito. Costi acquisto e prezzi vendita
+  restano separati. Il dettaglio è in `docs/AUTO_ORDER_2.md`.
+
 - Dal 2026-10-24 la contabilità vending resta invariata e costituisce la fonte
   autorevole del contante fisico: `giacenza iniziale + vendite in contanti -
   prelievi lordi`. Una migrazione idempotente riallinea soltanto

@@ -7,7 +7,7 @@ jest.mock("../components/Layout", () => ({ children, title }) => (
 
 jest.mock("../lib/api", () => ({
   API: "/api",
-  api: { get: jest.fn(), post: jest.fn() },
+  api: { get: jest.fn(), post: jest.fn(), patch: jest.fn() },
   apiErrorMessage: (_error, fallback) => fallback,
 }));
 
@@ -45,6 +45,7 @@ const automaticProduct = {
   codice: "AUTO1",
   descrizione: "Prodotto automatico",
   stato: "ORDINA ORA",
+  lotto_ordine: 1,
   motivo: "COPERTURA 2gg < 7gg",
   qta_da_ordinare: 5,
   totale: 25,
@@ -132,4 +133,44 @@ test("premendo Invio aggiunge il primo risultato e non duplica articoli già pre
   await write(search, "AMMS100");
   expect(container.querySelector('[data-testid="ao-product-result-AMMS100"]')).toBeNull();
   expect(container.querySelector('[data-testid="ao-product-no-results"]')).not.toBeNull();
+});
+
+test("non propone all'aggiunta un articolo con fornitura da verificare", async () => {
+  const search = container.querySelector('[data-testid="ao-add-product"]');
+  await act(async () => {
+    api.get.mockResolvedValueOnce({ data: {
+      ...response,
+      esclusi: [{ ...excludedProduct, codice: "PENDING", descrizione: "Fornitura da verificare", stato: "CONTROLLO MANUALE" }],
+    } });
+    container.querySelector('[data-testid="ao-refresh"]').click();
+  });
+  await write(search, "Fornitura da verificare");
+  expect(container.querySelector('[data-testid="ao-product-result-PENDING"]')).toBeNull();
+});
+
+test("Ricalcola chiede prima di sostituire una bozza modificata", async () => {
+  await act(async () => container.querySelector('[data-testid="ao-remove-AUTO1"]').click());
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(false);
+  const calls = api.get.mock.calls.length;
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  expect(confirm).toHaveBeenCalled();
+  expect(api.get.mock.calls.length).toBe(calls);
+  confirm.mockRestore();
+});
+
+test("una quantità frazionaria blocca la conferma senza arrotondamenti silenziosi", async () => {
+  await write(container.querySelector('[data-testid="ao-quantity-AUTO1"]'), "1.5");
+  expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("1.5");
+  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(true);
+  expect(container.querySelector('[role="alert"]').textContent).toContain("Quantità non valide");
+});
+
+test("la conferma invia lo snapshot usato per la proposta", async () => {
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  await act(async () => confirm.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    snapshot_key: "snapshot-1",
+    righe: [{ codice: "AUTO1", quantita: 5 }],
+  }));
 });

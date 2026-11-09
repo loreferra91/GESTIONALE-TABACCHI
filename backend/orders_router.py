@@ -27,6 +27,7 @@ class OrdineStorico(BaseModel):
     quantita: int
     prezzo: NonNegativeMoney = 0
     batch_id: Optional[str] = None
+    supplier_order_batch_key: Optional[str] = None
     smart_venue_applicabile: bool = False
     caricato_smart_venue: Optional[bool] = None
     caricato_smart_venue_il: Optional[str] = None
@@ -55,6 +56,7 @@ class BulkOrdineIn(BaseModel):
     file_sorgente: str = "carico manuale"
     data: Optional[str] = None
     idempotency_key: Optional[str] = None
+    supplier_order_batch_key: Optional[str] = None
     righe: List[Dict[str, Any]]
 
 
@@ -167,12 +169,20 @@ def parse_auto_order_excel(content: bytes, filename: str = "") -> Dict[str, Any]
     raw_date = worksheet["D2"].value
     if hasattr(raw_date, "isoformat"):
         raw_date = raw_date.isoformat()
+    supplier_batch_key = ""
+    if "Metadati Auto-Order" in workbook.sheetnames:
+        metadata = workbook["Metadati Auto-Order"]
+        for label, value in metadata.iter_rows(min_row=2, max_col=2, values_only=True):
+            if label == "batch_key":
+                supplier_batch_key = str(value or "").lstrip("'").strip()
+                break
     return {
         "ok": True,
         "file": filename or "ordine_auto_order.xlsx",
         "fornitore": str(worksheet["B2"].value or "").lstrip("'").strip(),
         "data_ordine": str(raw_date or ""),
         "selezione": str(worksheet["B3"].value or "").lstrip("'").strip(),
+        "supplier_order_batch_key": supplier_batch_key,
         "righe": rows,
         "riepilogo": {
             "prodotti": len(rows),
@@ -698,6 +708,7 @@ def create_orders_router(
         request_fingerprint = _canonical_fingerprint({
             "data": data,
             "file_sorgente": body.file_sorgente,
+            "supplier_order_batch_key": body.supplier_order_batch_key,
             "righe": [{
                 "codice": row["codice"], "quantita": row["quantita"],
                 "prezzo": str(row["prezzo"]), "descrizione": row["descrizione"],
@@ -717,13 +728,31 @@ def create_orders_router(
         if existing_batch:
             return replay_batch(existing_batch)
 
+        supplier_batch = None
+        supplier_lines = {}
+        if body.supplier_order_batch_key:
+            supplier_batch = await database.ordini_fornitore.find_one(
+                {"batch_key": body.supplier_order_batch_key}, {"_id": 0}
+            )
+            if not supplier_batch or supplier_batch.get("status", "COMPLETED") != "COMPLETED" or supplier_batch.get("stato") in {"BOZZA", "ANNULLATO", "RICEVUTO"}:
+                raise HTTPException(409, "Ordine fornitore non disponibile per il carico")
+            lines = await database.ordini_fornitore_righe.find(
+                {"batch_key": body.supplier_order_batch_key}, {"_id": 0}
+            ).to_list(None)
+            supplier_lines = {line["codice"]: line for line in lines if line.get("codice")}
+            requested_quantities = receipt_quantities_by_code(prepared)
+            for code, quantity in requested_quantities.items():
+                line = supplier_lines.get(code)
+                if not line or line.get("stato") in {"ANNULLATO", "RICEVUTO"} or quantity > max(0, int(line.get("quantita_ordinata", line.get("quantita", 0)) or 0) - int(line.get("quantita_ricevuta", 0) or 0)):
+                    raise HTTPException(422, f"Quantità ricevuta oltre il residuo dell'ordine per {code}")
+
         batch_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         operator = request_operator(request)
         backup = await create_backup_snapshot(
             "Prima del carico merce",
             "pre-carico-merce",
-            ["prodotti", "storico_ordini", "smart_venue", "ricezioni_merce"],
+            ["prodotti", "storico_ordini", "smart_venue", "ricezioni_merce", "ordini_fornitore", "ordini_fornitore_righe"],
         )
 
         async def persist_receipt(session):
@@ -736,6 +765,7 @@ def create_orders_router(
                 "created_at": created_at,
                 "data": data,
                 "file_sorgente": body.file_sorgente,
+                "supplier_order_batch_key": body.supplier_order_batch_key,
                 "operatore": operator,
             }, **kwargs)
 
@@ -743,6 +773,7 @@ def create_orders_router(
             created_products = 0
             movements = []
             rollback_actions = []
+            supplier_updates = []
             try:
                 for row in prepared:
                     code = row["codice"]
@@ -761,6 +792,7 @@ def create_orders_router(
                     movement = OrdineStorico(
                         id=f"{batch_id}:{row['index']}",
                         batch_id=batch_id,
+                        supplier_order_batch_key=body.supplier_order_batch_key,
                         data=data,
                         file_sorgente=body.file_sorgente,
                         codice=code,
@@ -826,6 +858,36 @@ def create_orders_router(
                     inserted += 1
                     movements.append(movement)
 
+                if supplier_batch:
+                    for code, quantity in receipt_quantities_by_code(prepared).items():
+                        line = supplier_lines[code]
+                        previous = int(line.get("quantita_ricevuta", 0) or 0)
+                        ordered = int(line.get("quantita_ordinata", line.get("quantita", 0)) or 0)
+                        updated = previous + quantity
+                        changed = await database.ordini_fornitore_righe.update_one(
+                            {"id": line["id"], **({"$or": [{"quantita_ricevuta": 0}, {"quantita_ricevuta": {"$exists": False}}]} if previous == 0 else {"quantita_ricevuta": previous})},
+                            {"$set": {"quantita_ricevuta": updated, "quantita_residua": ordered - updated,
+                                      "stato": "RICEVUTO" if updated == ordered else "PARZIALMENTE_RICEVUTO",
+                                      "data_ultima_ricezione": data}},
+                            **kwargs,
+                        )
+                        if changed.matched_count != 1:
+                            raise HTTPException(409, f"Ricezione concorrente per {code}: ricarica l'ordine")
+                        supplier_updates.append((line, updated))
+                    all_received = all(
+                        int(line.get("quantita_ordinata", line.get("quantita", 0)) or 0)
+                        <= int(line.get("quantita_ricevuta", 0) or 0) + receipt_quantities_by_code(prepared).get(code, 0)
+                        for code, line in supplier_lines.items()
+                    )
+                    changed = await database.ordini_fornitore.update_one(
+                        {"id": supplier_batch["id"], "stato": supplier_batch["stato"]},
+                        {"$set": {"stato": "RICEVUTO" if all_received else "PARZIALMENTE_RICEVUTO",
+                                  "last_receipt_batch_id": batch_id}},
+                        **kwargs,
+                    )
+                    if changed.matched_count != 1:
+                        raise HTTPException(409, "Ordine fornitore cambiato durante il carico")
+
                 response = {
                     "caricate": inserted,
                     "prodotti_nuovi": created_products,
@@ -842,6 +904,9 @@ def create_orders_router(
                         "status": "completed",
                         "completed_at": datetime.now(timezone.utc).isoformat(),
                         "response": response,
+                        "supplier_before": {"batch": {"stato": supplier_batch.get("stato"), "last_receipt_batch_id": supplier_batch.get("last_receipt_batch_id")},
+                                            "lines": {code: {"quantita_ricevuta": line.get("quantita_ricevuta", 0), "quantita_residua": line.get("quantita_residua"), "stato": line.get("stato"), "data_ultima_ricezione": line.get("data_ultima_ricezione")}
+                                                      for code, line in supplier_lines.items()}} if supplier_batch else None,
                     }},
                     **kwargs,
                 )
@@ -852,6 +917,20 @@ def create_orders_router(
                 return response
             except Exception:
                 if session is None:
+                    if supplier_batch:
+                        await database.ordini_fornitore.update_one(
+                            {"id": supplier_batch["id"], "last_receipt_batch_id": batch_id},
+                            {"$set": {"stato": supplier_batch["stato"],
+                                      "last_receipt_batch_id": supplier_batch.get("last_receipt_batch_id")}},
+                        )
+                        for line, updated in reversed(supplier_updates):
+                            await database.ordini_fornitore_righe.update_one(
+                                {"id": line["id"], "quantita_ricevuta": updated},
+                                {"$set": {"quantita_ricevuta": int(line.get("quantita_ricevuta", 0) or 0),
+                                          "quantita_residua": int(line.get("quantita_ordinata", line.get("quantita", 0)) or 0) - int(line.get("quantita_ricevuta", 0) or 0),
+                                          "stato": line.get("stato", "CONFERMATO"),
+                                          "data_ultima_ricezione": line.get("data_ultima_ricezione")}},
+                            )
                     for kind, code, value in reversed(rollback_actions):
                         if kind == "existing_product":
                             await database.prodotti.update_one(
@@ -910,6 +989,16 @@ def create_orders_router(
             }
         if batch.get("status") != "completed":
             raise HTTPException(409, "Il carico non è in uno stato annullabile")
+        supplier_batch = None
+        supplier_lines = {}
+        supplier_key = batch.get("supplier_order_batch_key")
+        if supplier_key:
+            supplier_batch = await database.ordini_fornitore.find_one({"batch_key": supplier_key}, {"_id": 0})
+            if not supplier_batch or supplier_batch.get("last_receipt_batch_id") != batch_id or not batch.get("supplier_before"):
+                raise HTTPException(409, "Ricezione fornitore non annullabile: è presente un carico successivo o manca lo stato precedente")
+            supplier_lines = {line["codice"]: line for line in await database.ordini_fornitore_righe.find(
+                {"batch_key": supplier_key}, {"_id": 0}
+            ).to_list(None) if line.get("codice")}
 
         orders = await database.storico_ordini.find(
             {"batch_id": batch_id, "annullato": {"$ne": True}}, {"_id": 0}
@@ -954,7 +1043,7 @@ def create_orders_router(
         backup = await create_backup_snapshot(
             "Prima dell'annullamento carico merce",
             "pre-annullamento-carico-merce",
-            ["prodotti", "storico_ordini", "smart_venue_movimenti", "ricezioni_merce"],
+            ["prodotti", "storico_ordini", "smart_venue_movimenti", "ricezioni_merce", "ordini_fornitore", "ordini_fornitore_righe"],
         )
         now = datetime.now(timezone.utc).isoformat()
         operator = request_operator(request)
@@ -972,6 +1061,8 @@ def create_orders_router(
             compensated_products = []
             cancelled_movements = []
             cancelled_orders = []
+            supplier_reverted = []
+            supplier_header_reverted = False
             try:
                 for code, quantity in quantities.items():
                     changed = await database.prodotti.update_one(
@@ -1012,6 +1103,35 @@ def create_orders_router(
                         raise HTTPException(409, "Una riga del carico è cambiata nel frattempo")
                     cancelled_orders.append(order)
 
+                if supplier_batch:
+                    before = batch["supplier_before"]
+                    for code, quantity in quantities.items():
+                        line = supplier_lines.get(code)
+                        previous = (before.get("lines") or {}).get(code)
+                        if not line or previous is None:
+                            raise HTTPException(409, f"Riga ordine fornitore non trovata: {code}")
+                        expected = int(previous.get("quantita_ricevuta", 0) or 0) + quantity
+                        changed = await database.ordini_fornitore_righe.update_one(
+                            {"id": line["id"], "quantita_ricevuta": expected},
+                            {"$set": {"quantita_ricevuta": int(previous.get("quantita_ricevuta", 0) or 0),
+                                      "quantita_residua": previous.get("quantita_residua"),
+                                      "stato": previous.get("stato"),
+                                      "data_ultima_ricezione": previous.get("data_ultima_ricezione")}},
+                            **kwargs,
+                        )
+                        if changed.matched_count != 1:
+                            raise HTTPException(409, f"Ordine fornitore modificato: {code}")
+                        supplier_reverted.append((line, previous))
+                    changed = await database.ordini_fornitore.update_one(
+                        {"id": supplier_batch["id"], "last_receipt_batch_id": batch_id},
+                        {"$set": {"stato": before["batch"]["stato"],
+                                  "last_receipt_batch_id": before["batch"].get("last_receipt_batch_id")}},
+                        **kwargs,
+                    )
+                    if changed.matched_count != 1:
+                        raise HTTPException(409, "Stato ordine fornitore cambiato durante l'annullamento")
+                    supplier_header_reverted = True
+
                 response = {
                     "ok": True,
                     "batch_id": batch_id,
@@ -1035,6 +1155,20 @@ def create_orders_router(
                 return response
             except Exception:
                 if session is None:
+                    if supplier_batch:
+                        if supplier_header_reverted:
+                            await database.ordini_fornitore.update_one(
+                                {"id": supplier_batch["id"], "last_receipt_batch_id": batch["supplier_before"]["batch"].get("last_receipt_batch_id")},
+                                {"$set": {"stato": supplier_batch["stato"], "last_receipt_batch_id": batch_id}},
+                            )
+                        for line, previous in reversed(supplier_reverted):
+                            await database.ordini_fornitore_righe.update_one(
+                                {"id": line["id"], "quantita_ricevuta": int(previous.get("quantita_ricevuta", 0) or 0)},
+                                {"$set": {"quantita_ricevuta": line.get("quantita_ricevuta"),
+                                          "quantita_residua": line.get("quantita_residua"),
+                                          "stato": line.get("stato"),
+                                          "data_ultima_ricezione": line.get("data_ultima_ricezione")}},
+                            )
                     for order in reversed(cancelled_orders):
                         await database.storico_ordini.update_one(
                             {"id": order["id"], "annullato_at": now},

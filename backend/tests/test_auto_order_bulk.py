@@ -157,10 +157,10 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     result = asyncio.run(server.auto_order())
 
     assert products.find_calls == 1
-    assert sales.find_one_calls == 1
+    assert sales.find_one_calls == 2  # latest sale and latest CSV vending import
     assert imported_sales.find_one_calls == 1
-    assert len(sales.pipelines) == 2
-    assert len(imported_sales.pipelines) == 2
+    assert len(sales.pipelines) == 3
+    assert len(imported_sales.pipelines) == 3
     assert len(orders.pipelines) == 1
     assert sales.pipelines[0][0]["$match"]["data"]["$gte"]
     assert sales.pipelines[0][0]["$match"]["data"]["$gte"].startswith("2026-09-10")
@@ -177,14 +177,14 @@ def test_auto_order_uses_bulk_aggregations_instead_of_queries_per_product(monkey
     assert not any(row["codice"] == "P3" for row in result["righe"])
     assert next(row for row in result["esclusi"] if row["codice"] == "P3")["stato"] == "ANOMALIA"
 
-    p4 = next(row for row in result["righe"] if row["codice"] == "P4")
+    p4 = next(row for row in result["esclusi"] if row["codice"] == "P4")
     assert p4["venduto_10gg"] == 2
     assert p4["venduto_30gg"] == 5
     assert p4["fonte_domanda"] == "DB_STORICO_VEND"
     assert p4["magazzino_reale"] == 1
     assert p4["magazzino_reale_lordo"] == 1
     assert p4["copertura_gg"] == 5.26
-    assert p4["qta_da_ordinare"] == 3
+    assert p4["qta_da_ordinare"] == 0
     p5 = next(row for row in result["righe"] if row["codice"] == "P5")
     assert p5["stato"] == "ORDINA ORA"
     assert p5["qta_da_ordinare"] == 2

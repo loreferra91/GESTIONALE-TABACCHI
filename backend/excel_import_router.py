@@ -587,6 +587,12 @@ def create_excel_import_router(
             "pre-import",
             excel_import_backup_collections,
         )
+        await get_database().auto_order_import_state.update_one(
+            {"_id": "excel-full"},
+            {"$set": {"status": "PROCESSING", "started_at": datetime.now(timezone.utc).isoformat(),
+                      "backup_id": backup["id"]}},
+            upsert=True,
+        )
         found_sheets: List[str] = []
         missing_sheets: List[str] = []
         report: Dict[str, Any] = {}
@@ -596,6 +602,10 @@ def create_excel_import_router(
             """Restore the explicit pre-import snapshot after a failed sheet."""
             try:
                 await restore_backup_collections(backup["id"])
+                await get_database().auto_order_import_state.update_one(
+                    {"_id": "excel-full"},
+                    {"$set": {"status": "ROLLED_BACK", "finished_at": datetime.now(timezone.utc).isoformat()}},
+                )
             except Exception:
                 set_import_progress(
                     import_job_id,
@@ -714,6 +724,10 @@ def create_excel_import_router(
             "totali": totals,
         }
         await record_import_history(file.filename or "Excel", response, backup["id"])
+        await get_database().auto_order_import_state.update_one(
+            {"_id": "excel-full"},
+            {"$set": {"status": "COMPLETED", "finished_at": datetime.now(timezone.utc).isoformat()}},
+        )
         set_import_progress(
             import_job_id, "completed", "Aggiornamento completato", 10, 10, totals=totals,
         )

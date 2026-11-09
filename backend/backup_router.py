@@ -22,7 +22,7 @@ BACKUP_COLLECTIONS = [
     "vendite_bulk_imports", "versamenti", "prelievi_vending",
     "scontrini_vending", "cassa_vending_stato", "vending_accounting_snapshots",
     "vending_accounting_state", "vending_accounting_events", "cassa",
-    "ordini_fornitore", "ordini_fornitore_righe", "import_history", "adm_sync",
+    "ordini_fornitore", "ordini_fornitore_righe", "auto_order_import_state", "import_history", "adm_sync",
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
     "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
     "rettifiche_venduti", "reconciliation_cases", "audit_events",
@@ -35,7 +35,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "vending_accounting_events", "anomalie_ignorate", "smart_venue",
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
-    "audit_events",
+    "audit_events", "auto_order_import_state",
 }
 BACKUP_RETENTION_LIMIT = 3
 BACKUP_PARTIAL_RETENTION_LIMIT = 6
