@@ -118,13 +118,23 @@ compensazioni fisiche sono ancora lecite.
 Per una ricezione storica priva di riferimento, conservare il movimento
 originale. Confrontare documenti del fornitore, ordine confermato e
 `storico_ordini.id`; verificare prodotto, quantità, data e assenza di
-annullamenti o associazioni precedenti. Annotare la corrispondenza e la prova
-in un registro operativo prima di qualsiasi correzione. Questa versione **non
-applica automaticamente** quantità ricevute ai batch legacy ambigui. Per
-quelle righe l'Auto-Order richiede controllo manuale, evitando di attribuire
-carichi non dimostrati. Un'eventuale migrazione manuale successiva deve usare
-un backup, ID movimento espliciti, una transazione e un audit verificabile;
-non deve incrementare nuovamente lo stock.
+annullamenti o associazioni precedenti. La pagina Auto-Order consente di
+annullare una bozza `CREATO` solo con conferma esplicita; il documento resta
+nello storico. Per un ordine effettivamente ricevuto, **Cerca carico già
+registrato** elenca i carichi completati e non collegati con almeno l'80% dei
+codici dell'ordine in comune. La somiglianza è solo un filtro: lo stesso carico
+può risultare compatibile con più ordini. L'operatore verifica il documento del
+fornitore, la data, i codici e le differenze di quantità prima di scegliere
+**Collega e chiudi senza nuovo carico**.
+
+`GET /api/auto-order/forniture/{batch_key}/carichi-esistenti` espone
+l'anteprima. `POST /api/auto-order/forniture/{batch_key}/chiudi-con-carico/{receipt_id}`
+richiede la versione dell'ordine e la conferma esplicita se ci sono differenze.
+Il sistema crea un backup, registra un audit e collega nella stessa transazione
+ordine, righe e ricezione. Le differenze restano nei metadati; le quantità non
+consegnate non restano pendenti. Non viene inserito un nuovo carico e non si
+modificano giacenze o acquisti. Un carico così collegato richiede verifica
+manuale prima di poter essere annullato.
 
 ## Snapshot, idempotenza e qualità
 

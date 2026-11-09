@@ -1507,6 +1507,8 @@ auto_order_module = create_auto_order_router(
     get_auto_order=lambda: auto_order(),
     run_transactionally=_run_transactionally,
     record_audit_event=lambda *args, **kwargs: _record_audit_event(*args, **kwargs),
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    session_kwargs=_session_kwargs,
 )
 auto_order_router = auto_order_module["router"]
 auto_order = auto_order_module["auto_order"]

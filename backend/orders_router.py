@@ -989,6 +989,8 @@ def create_orders_router(
             }
         if batch.get("status") != "completed":
             raise HTTPException(409, "Il carico non è in uno stato annullabile")
+        if batch.get("legacy_reconciled_order_batch_key"):
+            raise HTTPException(409, "Carico già riconciliato con un ordine: verifica prima il collegamento")
         supplier_batch = None
         supplier_lines = {}
         supplier_key = batch.get("supplier_order_batch_key")

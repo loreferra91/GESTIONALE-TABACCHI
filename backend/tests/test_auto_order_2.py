@@ -17,6 +17,7 @@ os.environ.setdefault("DB_NAME", "gestionale_test")
 from backend import server
 from backend.auto_order_planning import commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
 from backend.auto_order_migrations import AUTO_ORDER_2_SCHEMA_ID, migrate_auto_order_2_schema
+from backend.auto_order_router import RiconciliaCaricoIn
 from backend.orders_router import parse_auto_order_excel
 
 
@@ -78,6 +79,50 @@ def test_accounting_change_entries_are_not_orderable(isolated_database):
     assert error.value.status_code == 422
     assert not is_orderable_product({"descrizione": "resto non erogato"})
     assert not is_orderable_product({"descrizione": "vendibile", "ordinabile_auto_order": False})
+
+
+def test_existing_receipt_closes_legacy_supplier_order_without_reloading_stock(isolated_database):
+    db = isolated_database
+
+    async def scenario():
+        await db.prodotti.insert_one({"id": "product", "codice": "A", "giacenza_negozio": 42, "acquistati": 30})
+        await db.ordini_fornitore.insert_one({"id": "order", "batch_key": "order-key", "data": "2026-11-01", "stato": "CREATO"})
+        await db.ordini_fornitore_righe.insert_many([
+            {"id": "line-a", "batch_key": "order-key", "codice": "A", "quantita": 10},
+            {"id": "line-b", "batch_key": "order-key", "codice": "B", "quantita": 20},
+        ])
+        await db.ricezioni_merce.insert_one({"id": "receipt", "status": "completed", "data": "2026-11-06", "file_sorgente": "ordine 01-11-2026.xlsx"})
+        await db.storico_ordini.insert_many([
+            {"id": "receipt-a", "batch_id": "receipt", "codice": "A", "quantita": 10},
+            {"id": "receipt-b", "batch_id": "receipt", "codice": "B", "quantita": 10},
+            {"id": "receipt-c", "batch_id": "receipt", "codice": "C", "quantita": 10},
+        ])
+        candidates = (await server.auto_order_module["carichi_esistenti"]("order-key"))["carichi"]
+        assert len(candidates) == 1
+        assert candidates[0]["mancanti"] == {"B": 10}
+        assert candidates[0]["extra"] == {"C": 10}
+        with pytest.raises(HTTPException) as error:
+            await server.auto_order_module["chiudi_con_carico"](
+                "order-key", "receipt", RiconciliaCaricoIn(version=0))
+        assert error.value.status_code == 422
+        result = await server.auto_order_module["chiudi_con_carico"](
+            "order-key", "receipt", RiconciliaCaricoIn(version=0, conferma_differenze=True))
+        with pytest.raises(HTTPException) as duplicate:
+            await server.auto_order_module["chiudi_con_carico"](
+                "order-key", "receipt", RiconciliaCaricoIn(version=1, conferma_differenze=True))
+        assert duplicate.value.status_code == 409
+        with pytest.raises(HTTPException) as annulment:
+            await server.annulla_bulk_carico("receipt")
+        assert annulment.value.status_code == 409
+        return result, await db.prodotti.find_one({"codice": "A"}), await db.ordini_fornitore.find_one({"id": "order"}), await db.ordini_fornitore_righe.find_one({"id": "line-b"}), await db.ricezioni_merce.find_one({"id": "receipt"})
+
+    result, product, order, short_line, receipt = asyncio.run(scenario())
+    assert result["ok"] is True and result["mancanti"] == {"B": 10}
+    assert product["giacenza_negozio"] == 42 and product["acquistati"] == 30
+    assert order["stato"] == "RICEVUTO" and order["last_receipt_batch_id"] == "receipt"
+    assert short_line["quantita_ricevuta"] == 10 and short_line["quantita_non_consegnata"] == 10
+    assert short_line["quantita_residua"] == 0
+    assert receipt["legacy_reconciled_order_batch_key"] == "order-key"
 
 
 def test_pending_uses_residual_and_delivery_horizon():

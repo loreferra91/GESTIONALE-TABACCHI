@@ -40,6 +40,11 @@ class FornituraUpdateIn(BaseModel):
     data_consegna_prevista: Optional[date] = None
 
 
+class RiconciliaCaricoIn(BaseModel):
+    version: int = Field(ge=0)
+    conferma_differenze: bool = False
+
+
 def relevant_auto_order_params(params: Dict[str, Any]) -> Dict[str, Any]:
     names = {
         "GIORNI_COPERTURA_MIN", "GIORNI_COPERTURA_TARGET",
@@ -100,6 +105,8 @@ def create_auto_order_router(
     get_auto_order: Callable[[], Any],
     run_transactionally: Callable[[Any], Any],
     record_audit_event: Callable[..., Any],
+    create_backup_snapshot: Callable[..., Any],
+    session_kwargs: Callable[[Any], Dict[str, Any]],
 ) -> Dict[str, Any]:
     router = APIRouter()
 
@@ -116,6 +123,124 @@ def create_auto_order_router(
         for line in lines:
             by_key.setdefault(line.get("batch_key"), []).append(line)
         return [{**batch, "righe": by_key.get(batch.get("batch_key"), [])} for batch in batches]
+
+    async def compatible_receipts(batch_key: str) -> List[Dict[str, Any]]:
+        """Preview completed, unlinked stock receipts without changing balances."""
+        db = get_database()
+        batch = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
+        if not batch:
+            raise HTTPException(404, "Ordine fornitore non trovato")
+        if batch.get("stato") not in {"CREATO", "CONFERMATO", "INVIATO", "PARZIALMENTE_RICEVUTO"}:
+            raise HTTPException(409, "Ordine fornitore già chiuso")
+        if batch.get("status", "COMPLETED") != "COMPLETED" or batch.get("last_receipt_batch_id"):
+            raise HTTPException(409, "Ordine già collegato a un carico o non completato")
+        lines = await db.ordini_fornitore_righe.find({"batch_key": batch_key}, {"_id": 0}).to_list(None)
+        if not lines or any(int(row.get("quantita_ricevuta", 0) or 0) for row in lines):
+            raise HTTPException(409, "Riconciliazione legacy disponibile solo per ordini non ancora collegati a carichi")
+        ordered: Dict[str, int] = {}
+        for row in lines:
+            code = str(row.get("codice") or "")
+            ordered[code] = ordered.get(code, 0) + int(row.get("quantita_ordinata", row.get("quantita", 0)) or 0)
+        receipts = await db.ricezioni_merce.find(
+            {"status": "completed", "supplier_order_batch_key": {"$in": [None, ""]},
+             "legacy_reconciled_order_batch_key": {"$exists": False}}, {"_id": 0}
+        ).sort("completed_at", -1).to_list(100)
+        candidates = []
+        for receipt in receipts:
+            if commercial_day(receipt.get("data")) is None or commercial_day(batch.get("data")) is None or commercial_day(receipt["data"]) < commercial_day(batch["data"]):
+                continue
+            movements = await db.storico_ordini.find(
+                {"batch_id": receipt.get("id"), "annullato": {"$ne": True}},
+                {"_id": 0, "codice": 1, "quantita": 1},
+            ).to_list(None)
+            received: Dict[str, int] = {}
+            for movement in movements:
+                code = str(movement.get("codice") or "")
+                received[code] = received.get(code, 0) + int(movement.get("quantita") or 0)
+            if not received:
+                continue
+            matched = set(ordered) & set(received)
+            if not ordered or len(matched) / len(ordered) < 0.8:
+                continue
+            missing = {code: quantity - received.get(code, 0) for code, quantity in ordered.items() if quantity > received.get(code, 0)}
+            extra = {code: quantity - ordered.get(code, 0) for code, quantity in received.items() if quantity > ordered.get(code, 0)}
+            candidates.append({
+                "ricezione_id": receipt["id"], "data": receipt.get("data"),
+                "file_sorgente": receipt.get("file_sorgente"),
+                "righe_ordine": len(ordered), "righe_coincidenti": len(matched),
+                "pezzi_ordinati": sum(ordered.values()), "pezzi_caricati": sum(received.values()),
+                "mancanti": missing, "extra": extra,
+                "ricevuti_per_codice": received,
+            })
+        return candidates
+
+    @router.get("/auto-order/forniture/{batch_key}/carichi-esistenti")
+    async def carichi_esistenti(batch_key: str):
+        return {"carichi": await compatible_receipts(batch_key)}
+
+    @router.post("/auto-order/forniture/{batch_key}/chiudi-con-carico/{receipt_id}")
+    async def chiudi_con_carico(batch_key: str, receipt_id: str, body: RiconciliaCaricoIn):
+        db = get_database()
+        candidates = await compatible_receipts(batch_key)
+        candidate = next((item for item in candidates if item["ricezione_id"] == receipt_id), None)
+        if not candidate:
+            raise HTTPException(409, "Carico non disponibile o non compatibile con l'ordine")
+        if (candidate["mancanti"] or candidate["extra"]) and not body.conferma_differenze:
+            raise HTTPException(422, "Conferma le differenze fra ordine e carico prima di chiudere")
+        batch = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
+        lines = await db.ordini_fornitore_righe.find({"batch_key": batch_key}, {"_id": 0}).to_list(None)
+        current_version = int(batch.get("version", 0) or 0)
+        if current_version != body.version:
+            raise HTTPException(409, "Ordine fornitore modificato nel frattempo")
+        backup = await create_backup_snapshot(
+            "Prima riconciliazione ordine con carico esistente", "pre-riconciliazione-fornitura",
+            ["ordini_fornitore", "ordini_fornitore_righe", "ricezioni_merce", "storico_ordini"],
+        )
+        now = datetime.now(timezone.utc).isoformat()
+
+        async def persist(session):
+            kwargs = session_kwargs(session)
+            receipt_changed = await db.ricezioni_merce.update_one(
+                {"id": receipt_id, "status": "completed", "supplier_order_batch_key": {"$in": [None, ""]},
+                 "legacy_reconciled_order_batch_key": {"$exists": False}},
+                {"$set": {"legacy_reconciled_order_batch_key": batch_key, "legacy_reconciled_at": now}}, **kwargs,
+            )
+            if receipt_changed.matched_count != 1:
+                raise HTTPException(409, "Carico già riconciliato nel frattempo")
+            for line in lines:
+                code = str(line.get("codice") or "")
+                ordered = int(line.get("quantita_ordinata", line.get("quantita", 0)) or 0)
+                received = min(ordered, candidate["ricevuti_per_codice"].get(code, 0))
+                changed = await db.ordini_fornitore_righe.update_one(
+                    {"id": line["id"], "batch_key": batch_key,
+                     "quantita_ricevuta": {"$in": [None, 0]}},
+                    {"$set": {"quantita_ricevuta": received, "quantita_non_consegnata": ordered - received,
+                              "quantita_residua": 0, "stato": "RICEVUTO", "data_ultima_ricezione": candidate["data"],
+                              "legacy_receipt_id": receipt_id}}, **kwargs,
+                )
+                if changed.matched_count != 1:
+                    raise HTTPException(409, f"Riga fornitura {code} modificata nel frattempo")
+            version_filter = {"version": body.version} if body.version else {"$or": [{"version": 0}, {"version": {"$exists": False}}]}
+            changed = await db.ordini_fornitore.update_one(
+                {"id": batch["id"], "stato": batch["stato"], **version_filter},
+                {"$set": {"stato": "RICEVUTO", "last_receipt_batch_id": receipt_id,
+                          "riconciliazione_legacy": {"at": now, "backup_id": backup["id"],
+                                                    "mancanti": candidate["mancanti"], "extra": candidate["extra"]}},
+                 "$inc": {"version": 1}}, **kwargs,
+            )
+            if changed.matched_count != 1:
+                raise HTTPException(409, "Ordine fornitore modificato nel frattempo")
+            await db.storico_ordini.update_many(
+                {"batch_id": receipt_id, "annullato": {"$ne": True}},
+                {"$set": {"legacy_reconciled_order_batch_key": batch_key}}, **kwargs,
+            )
+
+        await run_transactionally(persist)
+        await record_audit_event("RICONCILIATO", "ORDINE_FORNITORE", batch["id"], prima=batch,
+                                 dopo={"stato": "RICEVUTO", "ricezione_id": receipt_id,
+                                       "mancanti": candidate["mancanti"], "extra": candidate["extra"]})
+        return {"ok": True, "backup_id": backup["id"], "ricezione_id": receipt_id,
+                "ordine": batch_key, "mancanti": candidate["mancanti"], "extra": candidate["extra"]}
 
     @router.patch("/auto-order/forniture/{batch_key}")
     async def update_fornitura(batch_key: str, body: FornituraUpdateIn):
@@ -1031,6 +1156,8 @@ def create_auto_order_router(
         "router": router,
         "auto_order": auto_order,
         "list_forniture": list_forniture,
+        "carichi_esistenti": carichi_esistenti,
+        "chiudi_con_carico": chiudi_con_carico,
         "update_fornitura": update_fornitura,
         "auto_order_selected_rows": auto_order_selected_rows,
         "auto_order_rows_from_query": auto_order_rows_from_query,

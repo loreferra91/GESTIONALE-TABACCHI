@@ -19,6 +19,7 @@ export default function AutoOrder() {
   const [savedBatchKey, setSavedBatchKey] = useState("");
   const [savedConfirmationKey, setSavedConfirmationKey] = useState("");
   const [pendingOrders, setPendingOrders] = useState([]);
+  const [receiptCandidates, setReceiptCandidates] = useState({});
   const [deliveryDrafts, setDeliveryDrafts] = useState({});
   const [supplierChanged, setSupplierChanged] = useState(false);
   const [supplierName, setSupplierName] = useState("");
@@ -115,13 +116,39 @@ export default function AutoOrder() {
       const payload = { version: batch.version || 0 };
       if (state) payload.stato = state;
       const delivery = deliveryDrafts[batch.batch_key] ?? batch.data_consegna_prevista;
-      if (delivery) payload.data_consegna_prevista = delivery;
+      if (delivery && state !== "ANNULLATO") payload.data_consegna_prevista = delivery;
       const response = await api.patch(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}`, payload);
-      setPendingOrders(rows => rows.map(row => row.batch_key === batch.batch_key ? { ...response.data, righe: row.righe } : row));
+      setPendingOrders(rows => state === "ANNULLATO" ? rows.filter(row => row.batch_key !== batch.batch_key) : rows.map(row => row.batch_key === batch.batch_key ? { ...response.data, righe: row.righe } : row));
       setSupplierChanged(true);
       toast.success("Fornitura aggiornata. Ricalcola Auto-Order prima di confermare.");
     } catch (err) {
       toast.error(apiErrorMessage(err, "Impossibile aggiornare la fornitura"));
+    }
+  };
+
+  const findExistingReceipts = async batch => {
+    try {
+      const response = await api.get(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}/carichi-esistenti`);
+      setReceiptCandidates(current => ({ ...current, [batch.batch_key]: response.data.carichi || [] }));
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile verificare i carichi già registrati"));
+    }
+  };
+
+  const closeWithExistingReceipt = async (batch, receipt) => {
+    const missing = Object.entries(receipt.mancanti || {}).map(([code, qty]) => `${code}: ${qty}`).join(", ") || "nessuno";
+    const extra = Object.entries(receipt.extra || {}).map(([code, qty]) => `${code}: ${qty}`).join(", ") || "nessuno";
+    if (!window.confirm(`Ordine ${batch.batch_key} (${(batch.righe || []).reduce((sum, row) => sum + Number(row.quantita_ordinata ?? row.quantita ?? 0), 0)} pezzi)\nCarico ${receipt.file_sorgente || receipt.ricezione_id} del ${receipt.data || "data non disponibile"} (${receipt.pezzi_caricati} pezzi)\nMancanti: ${missing}\nExtra: ${extra}\nConfermi che sono lo stesso ordine? Il magazzino non sarà caricato nuovamente.`)) return;
+    try {
+      await api.post(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}/chiudi-con-carico/${encodeURIComponent(receipt.ricezione_id)}`, {
+        version: batch.version || 0,
+        conferma_differenze: true,
+      });
+      setPendingOrders(rows => rows.filter(row => row.batch_key !== batch.batch_key));
+      setSupplierChanged(true);
+      toast.success("Carico esistente collegato; ordine chiuso senza nuovo carico merce. Ricalcola Auto-Order.");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile riconciliare il carico"));
     }
   };
 
@@ -243,6 +270,17 @@ export default function AutoOrder() {
             <label className="text-xs text-slate-600">Consegna prevista <input type="date" aria-label={`Consegna prevista ${batch.batch_key}`} value={deliveryDrafts[batch.batch_key] ?? batch.data_consegna_prevista ?? ""} onChange={event => setDeliveryDrafts(current => ({ ...current, [batch.batch_key]: event.target.value }))} className="ml-2 rounded border px-2 py-1 text-sm" /></label>
             <button type="button" onClick={() => updateSupply(batch)} disabled={!deliveryDrafts[batch.batch_key]} className="rounded border border-slate-300 px-3 py-2 disabled:opacity-40">Salva data</button>
             {batch.stato === "CONFERMATO" || batch.stato === "CREATO" ? <button type="button" onClick={() => updateSupply(batch, "INVIATO")} className="rounded bg-slate-900 px-3 py-2 text-white">Segna inviato</button> : <span />}
+            <div className="flex flex-wrap gap-2 md:col-span-4">
+              <button type="button" onClick={() => findExistingReceipts(batch)} className="rounded border border-slate-300 px-3 py-2">Cerca carico già registrato</button>
+              {batch.stato === "CREATO" && <button type="button" onClick={() => window.confirm("Confermi che questa fornitura era soltanto una bozza e non è stata inviata? Resterà nello storico come annullata.") && updateSupply(batch, "ANNULLATO")} className="rounded border border-red-300 px-3 py-2 text-red-700">Annulla bozza</button>}
+              {(receiptCandidates[batch.batch_key] || []).map(receipt => <div key={receipt.ricezione_id} className="w-full rounded bg-amber-50 p-2 text-xs text-amber-950">
+                <div><b>{receipt.file_sorgente || "Carico esistente"}</b> · {receipt.data || "data non disponibile"} · {receipt.righe_coincidenti}/{receipt.righe_ordine} codici · {receipt.pezzi_caricati}/{receipt.pezzi_ordinati} pezzi</div>
+                <div>Mancanti: {Object.entries(receipt.mancanti || {}).map(([code, qty]) => `${code} ${qty}`).join(", ") || "nessuno"} · Extra: {Object.entries(receipt.extra || {}).map(([code, qty]) => `${code} ${qty}`).join(", ") || "nessuno"}</div>
+                <div>Verifica il documento fornitore prima di collegare: un carico simile può comparire su più ordini.</div>
+                <button type="button" onClick={() => closeWithExistingReceipt(batch, receipt)} className="mt-1 rounded bg-amber-900 px-2 py-1 text-white">Collega e chiudi senza nuovo carico</button>
+              </div>)}
+              {receiptCandidates[batch.batch_key]?.length === 0 && <span className="text-xs text-slate-500">Nessun carico compatibile trovato.</span>}
+            </div>
           </div>)}
         </div>
       </Card>}

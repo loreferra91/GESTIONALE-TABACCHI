@@ -60,6 +60,12 @@ eventi o quantità per colmare i vuoti.
    ordine e confermare il carico. Il residuo dell'ordine e lo stock negozio si
    aggiornano insieme.
 
+Per gli ordini legacy già consegnati e caricati senza riferimento, Auto-Order
+offre una riconciliazione esplicita con il carico esistente. Essa chiude il
+residuo senza sommare nuovamente merce al magazzino; bozze mai inviate possono
+essere annullate mantenendole nello storico. Nessuna delle due azioni richiede
+un file Excel.
+
 La suite `backend/tests/test_auto_order_2.py` verifica il ciclo completo con
 Mongo simulato e che assenza, presenza e modifica di `db_storico_vend` non
 cambino quantità, canali o `snapshot_key`. I test dell'ingestione CSV vending

@@ -182,3 +182,35 @@ test("la conferma invia lo snapshot usato per la proposta", async () => {
     righe: [{ codice: "AUTO1", quantita: 5 }],
   }));
 });
+
+test("mostra il carico esistente e richiede conferma delle differenze prima di collegarlo", async () => {
+  const batch = { batch_key: "order-key", stato: "CREATO", version: 0, righe: [{ codice: "A", quantita: 10 }] };
+  const receipt = { ricezione_id: "receipt-1", data: "2026-11-06", file_sorgente: "ordine.xlsx", righe_coincidenti: 1, righe_ordine: 1, pezzi_caricati: 9, pezzi_ordinati: 10, mancanti: { A: 1 }, extra: {} };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? response : url === "/auto-order/forniture" ? [batch] : { carichi: [receipt] } }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  const find = [...container.querySelectorAll("button")].find(button => button.textContent === "Cerca carico già registrato");
+  await act(async () => find.click());
+  expect(container.textContent).toContain("ordine.xlsx");
+  expect(container.textContent).toContain("Mancanti: A 1");
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
+  const link = [...container.querySelectorAll("button")].find(button => button.textContent === "Collega e chiudi senza nuovo carico");
+  await act(async () => link.click());
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Il magazzino non sarà caricato nuovamente"));
+  expect(api.post).toHaveBeenCalledWith("/auto-order/forniture/order-key/chiudi-con-carico/receipt-1", { version: 0, conferma_differenze: true });
+  expect(container.textContent).not.toContain("Forniture pendenti");
+  confirm.mockRestore();
+});
+
+test("annulla una bozza solo dopo conferma e la rimuove dalle forniture pendenti", async () => {
+  const batch = { batch_key: "draft-key", stato: "CREATO", version: 2, righe: [{ codice: "A", quantita: 10 }] };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? response : [batch] }));
+  api.patch.mockResolvedValue({ data: { ...batch, stato: "ANNULLATO", version: 3 } });
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
+  const cancel = [...container.querySelectorAll("button")].find(button => button.textContent === "Annulla bozza");
+  await act(async () => cancel.click());
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("soltanto una bozza"));
+  expect(api.patch).toHaveBeenCalledWith("/auto-order/forniture/draft-key", { version: 2, stato: "ANNULLATO" });
+  expect(container.textContent).not.toContain("Forniture pendenti");
+  confirm.mockRestore();
+});
