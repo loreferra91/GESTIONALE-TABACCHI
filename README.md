@@ -1,5 +1,8 @@
 # Gestionale Tabacchi
 
+La progettazione, le formule, le API e le procedure di Auto-Order 2.0 sono in
+[`docs/AUTO_ORDER_2.md`](docs/AUTO_ORDER_2.md).
+
 Gestionale full stack per prodotti, magazzino, vending, vendite, ordini e cassa.
 
 - **Frontend:** React, installato e compilato con Yarn 1.22.22
@@ -68,10 +71,10 @@ Il frontend locale sarà disponibile su `http://localhost:3000`.
 `giacenza_negozio` indica lo stock fisico libero in negozio/magazzino, cioe i
 pezzi realmente disponibili per vendita o ricarica. Nei file Excel la colonna
 `RIMANENZE` e invece aggregata: durante l'import viene convertita una sola volta
-in stock fisico libero sottraendo giacenza vending e venduto vending. Da quel
-momento Auto-Order usa direttamente `giacenza_negozio` e non sottrae di nuovo la
-vending; una ricarica vending `-negozio/+vending` riduce quindi lo stock
-Auto-Order esattamente una volta.
+in stock fisico libero sottraendo giacenza vending e venduto vending. Auto-Order
+usa lo stock negozio per la copertura immediata al banco e la somma negozio +
+vending per il fabbisogno complessivo. Una ricarica vending `-negozio/+vending`
+non cambia il totale fisico e non e una vendita.
 
 Le ricariche vending proteggono inoltre `SCORTA_MINIMA_NEGOZIO_VENDING`
 (2 pezzi di default): soltanto la parte di `giacenza_negozio` eccedente questa
@@ -91,15 +94,15 @@ Stock importati o movimentati in modo incoerente, per esempio con
 da ordinare, non entrano in righe Auto-Order, PDF, totale o conferma, anche se le
 vendite recenti sarebbero sufficienti.
 
-La conferma Auto-Order crea solo un batch ordine fornitore idempotente
-(`ordini_fornitore` e `ordini_fornitore_righe`) usando la chiave inviata dal
-client o lo snapshot corrente. Non incrementa `giacenza_negozio`, non incrementa
+La conferma Auto-Order crea solo un batch ordine fornitore `CONFERMATO`,
+idempotente e vincolato allo snapshot (`ordini_fornitore` e
+`ordini_fornitore_righe`). Non incrementa `giacenza_negozio`, non incrementa
 `acquistati` e non scrive in `storico_ordini`. Il carico merce resta
 `POST /api/ordini/bulk`: usare quell'endpoint quando la merce arriva fisicamente;
-quello e il percorso che registra lo storico di ricezione e aumenta scorte e
-acquistati. Per i prodotti presenti in SMART VENUE, lo stesso carico incrementa
-anche il relativo saldo Smart Venue: cosi la merce ricevuta non appare come una
-differenza negativa da correggere manualmente.
+con `supplier_order_batch_key` esplicito il carico aggiorna anche ricevuto e
+residuo dell'ordine fornitore. Per i prodotti presenti in SMART VENUE, lo stesso
+carico incrementa anche il relativo saldo Smart Venue: cosi la merce ricevuta
+non appare come una differenza negativa da correggere manualmente.
 
 Le finestre Auto-Order sono configurabili con `AUTO_ORDER_FINESTRA_BREVE_GG` e
 `AUTO_ORDER_FINESTRA_LUNGA_GG`. Le API espongono i campi generici
