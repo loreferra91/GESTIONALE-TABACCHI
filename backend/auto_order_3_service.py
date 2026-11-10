@@ -84,6 +84,8 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
             except (ValueError, TypeError):
                 issues.append("CAPACITA_VENDING_INCOERENTE")
                 vending_capacity = None
+        if vending["daily"] > 0 and vending_capacity is None:
+            issues.append("CAPACITA_VENDING_NON_VERIFICATA")
         plan = plan_inventory(
             today=today, shop_stock=stock_shop, vending_stock=stock_vending,
             demand_shop=shop["daily"], demand_vending=vending["daily"],
