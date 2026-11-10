@@ -405,6 +405,7 @@ test("calendario venerdì: mostra mercoledì 11 come cutoff e usa data consegna 
   api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto"
     ? forecast : url === "/auto-order" ? response : [] }));
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  await act(async () => container.querySelector('[data-testid="ao-use-3-1"]').click());
   const calendar = container.querySelector('[data-testid="ao-friday-schedule"]');
   expect(calendar.textContent).toContain("mercoledì");
   expect(calendar.textContent).toContain("11:00");
