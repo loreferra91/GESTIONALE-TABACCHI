@@ -365,6 +365,28 @@ def test_product_shop_minimum_does_not_duplicate_dated_incoming_supply(isolated_
     assert row["qta_da_ordinare"] == 0
 
 
+def test_manual_selection_allows_positive_stock_and_review_without_pending_supply():
+    proposal = {
+        "righe": [],
+        "esclusi": [
+            {"codice": "P", "stato": "CONTROLLO MANUALE", "anomalia": False,
+             "quantita_in_arrivo": 0, "quantita_senza_data": 0,
+             "giacenza_negozio": 40, "lotto_ordine": 10, "prezzo": 5,
+             "costo_unitario_acquisto": None},
+            {"codice": "Q", "stato": "CONTROLLO MANUALE", "anomalia": False,
+             "quantita_in_arrivo": 0, "quantita_senza_data": 20,
+             "giacenza_negozio": 40, "lotto_ordine": 10, "prezzo": 5,
+             "costo_unitario_acquisto": None},
+        ],
+    }
+    selected = server._auto_order_selected_rows(proposal, [server.AutoOrderRigaIn(codice="P", quantita=30)])
+    assert selected[0]["qta_da_ordinare"] == 30
+    assert selected[0]["totale"] == 150
+    with pytest.raises(HTTPException) as pending:
+        server._auto_order_selected_rows(proposal, [server.AutoOrderRigaIn(codice="Q", quantita=30)])
+    assert pending.value.status_code == 422
+
+
 def test_native_italian_dates_are_counted_in_configured_long_window(isolated_database):
     db = isolated_database
     today = datetime.now(ZoneInfo("Europe/Rome")).date()

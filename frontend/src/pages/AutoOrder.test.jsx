@@ -50,6 +50,14 @@ const automaticProduct = {
   qta_da_ordinare: 5,
   totale: 25,
 };
+const otherCategoryProduct = {
+  ...automaticProduct,
+  codice: "ALTRO1",
+  descrizione: "Prodotto altra categoria",
+  categoria: "ACCESSORI",
+  qta_da_ordinare: 3,
+  totale: 15,
+};
 
 const response = {
   righe: [automaticProduct],
@@ -126,10 +134,15 @@ test("cerca un prodotto per descrizione e lo aggiunge alla bozza con il lotto co
   expect(container.querySelector('[data-testid="ao-row-AMMS100"]').textContent).toContain("AGGIUNTO MANUALMENTE");
 });
 
-test("premendo Invio aggiunge il primo risultato e non duplica articoli già presenti", async () => {
+test("premendo Invio seleziona il risultato e poi lo aggiunge", async () => {
   const search = container.querySelector('[data-testid="ao-add-product"]');
   await write(search, "AMMS100");
 
+  await act(async () => search.dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+  })));
+  expect(container.querySelector('[data-testid="ao-manual-quantity"]').value).toBe("10");
   await act(async () => search.dispatchEvent(new KeyboardEvent("keydown", {
     key: "Enter",
     bubbles: true,
@@ -139,21 +152,22 @@ test("premendo Invio aggiunge il primo risultato e non duplica articoli già pre
   expect(container.querySelector('[data-testid="ao-quantity-AMMS100"]').value).toBe("10");
 
   await write(search, "AMMS100");
-  expect(container.querySelector('[data-testid="ao-product-result-AMMS100"]')).toBeNull();
-  expect(container.querySelector('[data-testid="ao-product-no-results"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="ao-product-result-AMMS100"]').disabled).toBe(true);
+  expect(container.querySelector('[data-testid="ao-product-result-AMMS100"]').textContent).toContain("già nella bozza");
 });
 
-test("non propone all'aggiunta un articolo con fornitura da verificare", async () => {
+test("mostra ma blocca un articolo con fornitura da verificare", async () => {
   const search = container.querySelector('[data-testid="ao-add-product"]');
   await act(async () => {
     api.get.mockResolvedValueOnce({ data: {
       ...response,
-      esclusi: [{ ...excludedProduct, codice: "PENDING", descrizione: "Fornitura da verificare", stato: "CONTROLLO MANUALE" }],
+      esclusi: [{ ...excludedProduct, codice: "PENDING", descrizione: "Fornitura da verificare", stato: "CONTROLLO MANUALE", quantita_senza_data: 10 }],
     } });
     container.querySelector('[data-testid="ao-refresh"]').click();
   });
   await write(search, "Fornitura da verificare");
-  expect(container.querySelector('[data-testid="ao-product-result-PENDING"]')).toBeNull();
+  expect(container.querySelector('[data-testid="ao-product-result-PENDING"]').disabled).toBe(true);
+  expect(container.querySelector('[data-testid="ao-product-result-PENDING"]').textContent).toContain("COPERTURA SUFFICIENTE");
 });
 
 test("Ricalcola chiede prima di sostituire una bozza modificata", async () => {
@@ -166,17 +180,54 @@ test("Ricalcola chiede prima di sostituire una bozza modificata", async () => {
   confirm.mockRestore();
 });
 
-test("salva la scorta minima del negozio e richiede il ricalcolo", async () => {
-  const prompt = jest.spyOn(window, "prompt").mockReturnValue("50");
-  api.patch.mockResolvedValue({ data: { codice: "AMMS100", minimo: 50, version: 1 } });
-  const show = [...container.querySelectorAll("button")].find(button => button.textContent.includes("Mostra esclusi"));
-  await act(async () => show.click());
-  await act(async () => container.querySelector('[data-testid="ao-minimum-AMMS100"]').click());
-  expect(api.patch).toHaveBeenCalledWith("/auto-order/prodotti/AMMS100/scorta-minima", { minimo: 50, version: 0 });
-  expect(container.querySelector('[data-testid="ao-minimum-AMMS100"]').textContent).toContain("50");
-  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(true);
-  expect(container.querySelector('[role="alert"]').textContent).toContain("ricalcola Auto-Order");
+test("le categorie escluse non entrano nella conferma e si possono ripristinare", async () => {
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? {
+    ...response, righe: [automaticProduct, otherCategoryProduct],
+  } : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  const category = container.querySelector('[data-testid="ao-category-ACCESSORI"]');
+  await act(async () => category.click());
+  expect(category.getAttribute("aria-pressed")).toBe("false");
+  expect(container.querySelector('[data-testid="ao-row-ALTRO1"]')).toBeNull();
+  const prompt = jest.spyOn(window, "prompt").mockReturnValue("Fornitore");
+  const open = jest.spyOn(window, "open").mockImplementation(() => null);
+  await act(async () => container.querySelector('[data-testid="ao-pdf"]').click());
+  const exportUrl = new URL(open.mock.calls[0][0], "https://example.test");
+  expect(JSON.parse(exportUrl.searchParams.get("selezione"))).toEqual([{ codice: "AUTO1", quantita: 5 }]);
+  open.mockRestore();
   prompt.mockRestore();
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  await act(async () => confirm.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    righe: [{ codice: "AUTO1", quantita: 5 }],
+  }));
+  await act(async () => category.click());
+  expect(container.querySelector('[data-testid="ao-row-ALTRO1"]')).not.toBeNull();
+});
+
+test("un prodotto con giacenza positiva si aggiunge con la quantità scelta", async () => {
+  const search = container.querySelector('[data-testid="ao-add-product"]');
+  await write(search, "AMMS100");
+  await act(async () => container.querySelector('[data-testid="ao-product-result-AMMS100"]').click());
+  await write(container.querySelector('[data-testid="ao-manual-quantity"]'), "30");
+  await act(async () => container.querySelector('[data-testid="ao-add-product-btn"]').click());
+  expect(container.querySelector('[data-testid="ao-quantity-AMMS100"]').value).toBe("30");
+  expect(container.querySelector('[data-testid="ao-row-AMMS100"]').textContent).toContain("AGGIUNTO MANUALMENTE");
+});
+
+test("un articolo da controllare senza anomalie né forniture resta aggiungibile", async () => {
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? {
+    ...response,
+    esclusi: [{ ...excludedProduct, stato: "CONTROLLO MANUALE", giacenza_negozio: 40 }],
+  } : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  await write(container.querySelector('[data-testid="ao-add-product"]'), "AMMS100");
+  const result = container.querySelector('[data-testid="ao-product-result-AMMS100"]');
+  expect(result.disabled).toBe(false);
+  await act(async () => result.click());
+  await act(async () => container.querySelector('[data-testid="ao-add-product-btn"]').click());
+  expect(container.querySelector('[data-testid="ao-row-AMMS100"]')).not.toBeNull();
 });
 
 test("una quantità frazionaria blocca la conferma senza arrotondamenti silenziosi", async () => {

@@ -707,7 +707,9 @@ def create_auto_order_router(
             row["codice"]: row
             for row in [*ao.get("righe", []), *ao.get("esclusi", [])]
             if row.get("codice") and not row.get("anomalia") and not row.get("anomalie_riconciliazione")
-            and row.get("stato") not in {"CONTROLLO MANUALE", "ORDINE IN ARRIVO"}
+            and int(row.get("quantita_in_arrivo") or 0) == 0
+            and int(row.get("quantita_senza_data") or 0) == 0
+            and row.get("stato") != "ORDINE IN ARRIVO"
         }
         seen = set()
         selected = []

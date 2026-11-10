@@ -6,6 +6,7 @@ import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { Plus, Trash2 } from "lucide-react";
+import { shortCategory } from "../lib/categories";
 
 const receiptDateLabel = value => {
   const day = String(value || "").slice(0, 10);
@@ -16,7 +17,7 @@ export default function AutoOrder() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [categoria, setCategoria] = useState("");
+  const [excludedCategories, setExcludedCategories] = useState([]);
   const [mostraEsclusi, setMostraEsclusi] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -32,15 +33,16 @@ export default function AutoOrder() {
   const [draftRows, setDraftRows] = useState([]);
   const [selectedToAdd, setSelectedToAdd] = useState("");
   const [productSearch, setProductSearch] = useState("");
+  const [manualQuantity, setManualQuantity] = useState("");
   const draftRowsRef = useRef([]);
   const originalDraftRef = useRef("[]");
-  const allRighe = draftRows;
+  const allRighe = draftRows.filter(row => !excludedCategories.includes(row.categoria));
   const allEsclusi = data?.esclusi || [];
-  const categorieDisponibili = Array.from(new Set([...allRighe, ...allEsclusi].map(r => r.categoria).filter(Boolean))).sort();
-  const ordiniCategoria = categoria ? allRighe.filter(r => r.categoria === categoria) : allRighe;
-  const draftCodes = new Set(allRighe.map(r => r.codice));
+  const categorieDisponibili = Array.from(new Set([...draftRows, ...allEsclusi].map(r => r.categoria).filter(Boolean))).sort();
+  const ordiniCategoria = allRighe;
+  const draftCodes = new Set(draftRows.map(r => r.codice));
   const esclusiDisponibili = allEsclusi.filter(r => !draftCodes.has(r.codice));
-  const esclusiCategoria = categoria ? esclusiDisponibili.filter(r => r.categoria === categoria) : esclusiDisponibili;
+  const esclusiCategoria = esclusiDisponibili.filter(row => !excludedCategories.includes(row.categoria));
   const righeCategoria = mostraEsclusi ? [...ordiniCategoria, ...esclusiCategoria] : ordiniCategoria;
   const totaleCategoria = ordiniCategoria.reduce((totale, r) => totale + (r.totale || 0), 0);
   const missingCosts = ordiniCategoria.filter(row => row.costo_unitario_acquisto == null).length;
@@ -131,32 +133,6 @@ export default function AutoOrder() {
     }
   };
 
-  const updateMinimum = async row => {
-    const answer = window.prompt(`Scorta minima da tenere in negozio per ${row.descrizione} (${row.codice}). Inserisci 0 per disattivarla:`, String(row.scorta_minima_negozio_auto_order || 0));
-    if (answer === null) return;
-    const minimo = Number(answer.trim());
-    if (!answer.trim() || !Number.isInteger(minimo) || minimo < 0 || minimo > 100000) {
-      toast.error("Inserisci un numero intero tra 0 e 100000");
-      return;
-    }
-    try {
-      const response = await api.patch(`/auto-order/prodotti/${encodeURIComponent(row.codice)}/scorta-minima`, {
-        minimo, version: row.auto_order_version || 0,
-      });
-      const updated = item => item.codice === row.codice ? {
-        ...item, scorta_minima_negozio_auto_order: response.data.minimo,
-        auto_order_version: response.data.version,
-      } : item;
-      setData(current => current ? { ...current, righe: current.righe.map(updated), esclusi: current.esclusi.map(updated) } : current);
-      if (minimo !== (row.scorta_minima_negozio_auto_order || 0)) {
-        setSupplierChanged(true);
-        toast.success("Scorta minima aggiornata. Ricalcola Auto-Order per vedere la proposta.");
-      }
-    } catch (err) {
-      toast.error(apiErrorMessage(err, "Impossibile aggiornare la scorta minima"));
-    }
-  };
-
   const findExistingReceipts = async batch => {
     try {
       const response = await api.get(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}/carichi-esistenti`);
@@ -187,7 +163,6 @@ export default function AutoOrder() {
     const label = format === "excel" ? "Excel" : "PDF";
     const fornitore = window.prompt(`Nome fornitore per il file ${label}:`, "Fornitore") || "Fornitore";
     const params = new URLSearchParams({ fornitore });
-    if (categoria) params.set("categoria", categoria);
     if (savedBatchKey && savedConfirmationKey === confirmationKey) {
       params.set("batch_key", savedBatchKey);
     } else {
@@ -213,10 +188,20 @@ export default function AutoOrder() {
     setDraftRows(rows => { const next = rows.filter(row => row.codice !== codice); draftRowsRef.current = next; return next; });
   };
 
-  const addRow = (codice = selectedToAdd) => {
+  const canManuallyAdd = row => Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
+    && !Number(row.quantita_in_arrivo || 0) && !Number(row.quantita_senza_data || 0)
+    && row.stato !== "ORDINE IN ARRIVO" && !excludedCategories.includes(row.categoria)
+    && !draftCodes.has(row.codice));
+
+  const addRow = (codice = selectedToAdd, requestedQuantity = manualQuantity) => {
     const row = allEsclusi.find(item => item.codice === codice);
-    if (!row || row.anomalia || row.anomalie_riconciliazione?.length || ["CONTROLLO MANUALE", "ORDINE IN ARRIVO"].includes(row.stato) || draftCodes.has(row.codice)) return;
-    const quantity = Math.max(1, Number(row.lotto_ordine) || 1);
+    if (!canManuallyAdd(row)) return;
+    const quantity = Number(requestedQuantity);
+    const lotto = Math.max(1, Number(row.lotto_ordine) || 1);
+    if (!Number.isInteger(quantity) || quantity <= 0 || quantity % lotto !== 0) {
+      toast.error(`Per ${row.descrizione} inserisci una quantità positiva multipla del lotto ${lotto}`);
+      return;
+    }
     setDraftRows(rows => { const next = [...rows, {
       ...row,
       stato: "ORDINA ORA",
@@ -226,33 +211,43 @@ export default function AutoOrder() {
     }]; draftRowsRef.current = next; return next; });
     setSelectedToAdd("");
     setProductSearch("");
+    setManualQuantity("");
   };
 
-  const addableRows = allEsclusi.filter(row => !row.anomalia && !(row.anomalie_riconciliazione || []).length && !["CONTROLLO MANUALE", "ORDINE IN ARRIVO"].includes(row.stato) && !draftCodes.has(row.codice));
   const productSearchResults = (() => {
     const search = productSearch.trim().toLocaleLowerCase("it");
     if (!search || selectedToAdd) return [];
-    return addableRows
+    return [...new Map([...allEsclusi, ...draftRows].map(row => [row.codice, row])).values()]
       .filter(row => [row.codice, row.descrizione, row.categoria]
         .some(value => String(value || "").toLocaleLowerCase("it").includes(search)))
-      .slice(0, 8);
+      .sort((a, b) => {
+        const aCode = String(a.codice || "").toLocaleLowerCase("it");
+        const bCode = String(b.codice || "").toLocaleLowerCase("it");
+        return Number(bCode === search) - Number(aCode === search)
+          || Number(bCode.startsWith(search)) - Number(aCode.startsWith(search))
+          || String(a.descrizione || "").localeCompare(String(b.descrizione || ""), "it");
+      })
+      .slice(0, 12);
   })();
 
   const selectProduct = row => {
+    if (!canManuallyAdd(row)) return;
     setSelectedToAdd(row.codice);
     setProductSearch(`${row.codice} · ${row.descrizione}`);
+    setManualQuantity(String(Math.max(1, Number(row.lotto_ordine) || 1)));
   };
 
   const handleProductSearchKeyDown = event => {
     if (event.key === "Escape") {
       setProductSearch("");
       setSelectedToAdd("");
+      setManualQuantity("");
       return;
     }
     if (event.key !== "Enter") return;
     event.preventDefault();
-    const code = selectedToAdd || productSearchResults[0]?.codice;
-    if (code) addRow(code);
+    if (selectedToAdd) addRow(selectedToAdd, manualQuantity);
+    else if (productSearchResults[0]) selectProduct(productSearchResults[0]);
   };
 
   return (
@@ -266,7 +261,7 @@ export default function AutoOrder() {
       {savedBatchKey && <p className="mb-4 rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">Ordine fornitore confermato. Riferimento per Carico Merce: <code className="break-all select-all">{savedBatchKey}</code></p>}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <KpiCard label={categoria ? "Ordini selezionati" : "Ordina ora"} value={formatNum(ordiniCategoria.length)} />
+        <KpiCard label="Articoli nell’ordine" value={formatNum(ordiniCategoria.length)} />
         <KpiCard label="Valore listino" value={formatEur(totaleCategoria)} tone="success" />
         <KpiCard label="Da controllare" value={formatNum((data?.riepilogo_stati?.["CONTROLLO MANUALE"] || 0) + (data?.n_anomalie_stock || 0))} tone="warning" />
         <KpiCard label="Pezzi già ordinati" value={formatNum(pendingPieces)} />
@@ -276,18 +271,33 @@ export default function AutoOrder() {
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={() => load(true)} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
         <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
-          Esporta PDF {categoria ? "selezione" : "fornitore"}
+          Esporta PDF fornitore
         </button>
         <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
-          Esporta Excel {categoria ? "selezione" : "fornitore"}
+          Esporta Excel fornitore
         </button>
-        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Salvataggio..." : alreadyConfirmed ? "Ordine fornitore salvato" : "Salva ordine fornitore"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
           {mostraEsclusi ? "Nascondi esclusi" : `Mostra esclusi (${esclusiCategoria.length})`}
         </button>
       </div>
+      <Card className="mb-4 p-4">
+        <div className="mb-2 text-sm font-semibold text-slate-700">Categorie da includere nell’ordine</div>
+        <div className="flex flex-wrap gap-2" data-testid="ao-category-bar">
+          {categorieDisponibili.map(category => {
+            const included = !excludedCategories.includes(category);
+            const count = draftRows.filter(row => row.categoria === category).length;
+            return <button key={category} type="button" data-testid={`ao-category-${category}`} aria-pressed={included}
+              onClick={() => setExcludedCategories(current => included ? [...current, category] : current.filter(item => item !== category))}
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${included ? "border-emerald-500 bg-emerald-50 text-emerald-900" : "border-slate-300 bg-white text-slate-500"}`}>
+              {included ? "✓ " : "+ "}{shortCategory(category)} ({count})
+            </button>;
+          })}
+        </div>
+        <p className="mt-2 text-xs text-slate-500">Le categorie spente sono escluse dalla bozza, dal PDF e dall’Excel. Riattivale per ripristinare gli articoli proposti.</p>
+      </Card>
       {invalidRows.length > 0 && <p role="alert" className="mb-4 text-sm font-semibold text-red-700">Quantità non valide: {invalidRows.map(row => `${row.codice} (lotto ${row.lotto_ordine || 1})`).join(", ")}. Inserisci multipli interi del lotto.</p>}
       {supplierChanged && <p role="alert" className="mb-4 text-sm font-semibold text-amber-800">Dati di pianificazione modificati: ricalcola Auto-Order per aggiornare la proposta.</p>}
       {data?.data_quality && <p className={`mb-4 rounded border p-3 text-sm ${data.data_quality === "DATI_AFFIDABILI" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}>Qualità dati: <b>{data.data_quality.replaceAll("_", " ")}</b>. {data.data_quality === "DATI_INCOERENTI" ? "Correggi le anomalie di forniture prima di confermare." : data.data_quality === "DATI_PARZIALI" ? "Verifica le vendite native e gli articoli segnalati prima di procedere." : "Vendite e giacenze operative disponibili nel database."}</p>}
@@ -335,6 +345,7 @@ export default function AutoOrder() {
                 onChange={event => {
                   setProductSearch(event.target.value);
                   setSelectedToAdd("");
+                  setManualQuantity("");
                 }}
                 onKeyDown={handleProductSearchKeyDown}
                 placeholder="Scrivi codice, descrizione o categoria…"
@@ -350,26 +361,30 @@ export default function AutoOrder() {
                       aria-selected="false"
                       data-testid={`ao-product-result-${row.codice}`}
                       onClick={() => selectProduct(row)}
-                      className="flex w-full items-center justify-between gap-3 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 focus:bg-slate-100 focus:outline-none"
+                      disabled={!canManuallyAdd(row)}
+                      className="flex w-full items-center justify-between gap-3 rounded px-3 py-2 text-left text-sm hover:bg-slate-100 focus:bg-slate-100 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <span className="min-w-0">
                         <span className="block font-mono font-bold text-slate-900">{row.codice}</span>
                         <span className="block truncate text-slate-600">{row.descrizione}</span>
                       </span>
-                      <span className="shrink-0 text-xs text-slate-500">{row.categoria} · lotto {formatNum(row.lotto_ordine || 1)}</span>
+                      <span className="shrink-0 text-xs text-slate-500">{shortCategory(row.categoria)} · negozio {formatNum(row.giacenza_negozio || 0)} · {draftCodes.has(row.codice) ? "già nella bozza" : excludedCategories.includes(row.categoria) ? "categoria esclusa" : canManuallyAdd(row) ? `lotto ${formatNum(row.lotto_ordine || 1)}` : row.motivo || row.stato}</span>
                     </button>
                   ))}
                 </div>
               ) : null}
               {productSearch.trim() && !selectedToAdd && productSearchResults.length === 0 ? (
-                <p data-testid="ao-product-no-results" className="mt-2 text-xs text-slate-500">Nessun prodotto ordinabile trovato. Potrebbe essere già presente nell’ordine o avere uno stock anomalo.</p>
+                <p data-testid="ao-product-no-results" className="mt-2 text-xs text-slate-500">Nessun prodotto trovato nel catalogo ordinabile. Cerca il codice esatto o verifica il prodotto in Magazzino.</p>
               ) : null}
             </div>
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">Quantità
+              <input data-testid="ao-manual-quantity" type="number" min="1" step="1" value={manualQuantity} onChange={event => setManualQuantity(event.target.value)} disabled={!selectedToAdd} className="w-28 rounded border border-slate-300 px-2 py-2 text-right font-mono text-sm disabled:bg-slate-50" />
+            </label>
             <button type="button" data-testid="ao-add-product-btn" onClick={() => addRow()} disabled={!selectedToAdd} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-40">
               <Plus size={16} /> Aggiungi all’ordine
             </button>
           </div>
-          <p className="text-xs text-slate-500">Puoi selezionare un risultato oppure premere Invio per aggiungere il primo prodotto trovato.</p>
+          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. La giacenza positiva non impedisce l’aggiunta; le anomalie e le forniture già pendenti richiedono verifica.</p>
         </div>
       </Card>
 
@@ -384,19 +399,12 @@ export default function AutoOrder() {
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
         Il magazzino reale è la <b>giacenza negozio fisica</b> registrata nella WebApp. Il fabbisogno complessivo considera separatamente vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
         Le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
-        Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale. Puoi impostare una scorta minima per articolo nella colonna “Scorta min. neg.”: considera solo il negozio e gli arrivi affidabili; 0 la disattiva.
+        Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale. La scorta minima facoltativa si gestisce in Magazzino → Prodotti.
       </div>
 
       <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">
         <SearchBar data-testid="ao-search" value={query} onChange={setQuery} placeholder="Cerca codice, articolo, tipo o motivo…" className="flex-1 max-w-md" />
-        <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Articoli da visualizzare e stampare
-          <select data-testid="ao-filter-cat" value={categoria} onChange={e => setCategoria(e.target.value)} className="min-w-56 border border-slate-300 bg-white text-slate-900 rounded-md px-3 py-2 text-sm font-normal normal-case tracking-normal">
-            <option value="">Tutte le categorie</option>
-            {categorieDisponibili.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </label>
-        <span className="text-sm text-slate-500 self-center sm:pb-2">{righe.length} risultati</span>
+        <span className="text-sm text-slate-500 self-center">{righe.length} risultati</span>
       </div>
 
       <Card className="overflow-hidden">
@@ -417,7 +425,6 @@ export default function AutoOrder() {
                 <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. min. (gg)</Th>
                 <Th sortKey="quantita_in_arrivo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">In arrivo</Th>
                 <Th sortKey="target_scorta" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Target</Th>
-                <Th sortKey="scorta_minima_negozio_auto_order" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Scorta min. neg.</Th>
                 <Th sortKey="lotto_ordine" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Lotto</Th>
                 <Th sortKey="qta_da_ordinare" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Qta da ordinare</Th>
                 <Th sortKey="totale" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Val. listino</Th>
@@ -427,7 +434,7 @@ export default function AutoOrder() {
               </tr>
             </thead>
             <tbody>
-              {loading && !data && <tr><td colSpan={20} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
+              {loading && !data && <tr><td colSpan={19} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
               {righe.map(r => (
                 <tr key={r.codice} data-testid={`ao-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
@@ -443,7 +450,6 @@ export default function AutoOrder() {
                   <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`} title={`Negozio: ${r.copertura_negozio_gg ?? '∞'} gg · Vending: ${r.copertura_vending_gg ?? '∞'} gg`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
-                  <td className="text-right"><button type="button" data-testid={`ao-minimum-${r.codice}`} onClick={() => updateMinimum(r)} className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50" aria-label={`Imposta scorta minima negozio per ${r.descrizione}`} title="Soglia fisica minima in negozio; 0 la disattiva">{formatNum(r.scorta_minima_negozio_auto_order || 0)} ✎</button></td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
                   <td className="text-right">
                     {draftCodes.has(r.codice) ? <input data-testid={`ao-quantity-${r.codice}`} type="number" min="1" step="1" value={r.qta_da_ordinare} onChange={e => changeQuantity(r.codice, e.target.value)} className="w-20 rounded border border-slate-300 px-2 py-1 text-right font-mono font-bold" aria-label={`Quantità ${r.descrizione}`} /> : "—"}
@@ -455,12 +461,12 @@ export default function AutoOrder() {
                     {draftCodes.has(r.codice) ? (
                       <button data-testid={`ao-remove-${r.codice}`} onClick={() => removeRow(r.codice)} className="rounded p-2 text-red-600 hover:bg-red-50" aria-label={`Rimuovi ${r.descrizione}`} title="Rimuovi dall'ordine"><Trash2 size={16} /></button>
                     ) : (
-                      <button data-testid={`ao-add-${r.codice}`} onClick={() => addRow(r.codice)} disabled={r.anomalia || Boolean(r.anomalie_riconciliazione?.length)} className="rounded p-2 text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-30" aria-label={`Aggiungi ${r.descrizione}`} title={r.anomalia ? "Stock anomalo: articolo non ordinabile" : r.anomalie_riconciliazione?.length ? "Vendite da riconciliare" : "Aggiungi all'ordine"}><Plus size={16} /></button>
+                      <button data-testid={`ao-add-${r.codice}`} onClick={() => addRow(r.codice, Math.max(1, Number(r.lotto_ordine) || 1))} disabled={!canManuallyAdd(r)} className="rounded p-2 text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-30" aria-label={`Aggiungi ${r.descrizione}`} title={canManuallyAdd(r) ? "Aggiungi all'ordine" : r.motivo || "Articolo da verificare"}><Plus size={16} /></button>
                     )}
                   </td>
                 </tr>
               ))}
-              {!loading && !error && righe.length === 0 && <tr><td colSpan={20} className="text-center py-8 text-slate-400">{categoria ? "Nessun articolo nella categoria selezionata." : "Nessun articolo nella bozza d'ordine."}</td></tr>}
+              {!loading && !error && righe.length === 0 && <tr><td colSpan={19} className="text-center py-8 text-slate-400">Nessun articolo nella bozza con le categorie selezionate.</td></tr>}
             </tbody>
           </table>
         </div>

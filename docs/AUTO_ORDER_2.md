@@ -68,9 +68,13 @@ fabbisogno netto = max(0, target - posizione utilizzabile)
 quantità proposta = ceil(fabbisogno netto / lotto) × lotto
 ```
 
-L'operatore può impostare in Auto-Order una **scorta minima per singolo
-prodotto nel negozio**. Il valore è conservato in `prodotti` nel database;
-0 disattiva la regola. Quando `giacenza_negozio + forniture affidabili entro
+In **Magazzino → Prodotti** sono visibili la soglia e il target calcolati da
+vendite WebApp, finestra temporale e copertura. Auto-Order considera inoltre
+le forniture operative per il fabbisogno netto. Lo stesso
+catalogo permette una **scorta minima facoltativa per singolo prodotto nel
+negozio**. Il valore è conservato in `prodotti` nel database; 0 disattiva
+solo questa correzione e lascia attivo il calcolo automatico. Quando
+`giacenza_negozio + forniture affidabili entro
 l'orizzonte` scende sotto il minimo, il fabbisogno considera anche questa
 differenza, arrotondata al lotto. La giacenza vending non copre il minimo del
 negozio. Una regola esplicita può proporre merce anche senza vendite recenti,
@@ -78,6 +82,14 @@ senza inventare domanda; anomalie di stock, vendite sovrapposte e forniture
 senza data futura affidabile continuano a richiedere controllo. Dopo una
 modifica l'ordine deve essere ricalcolato prima della conferma. La scorta
 minima guida gli ordini futuri e non modifica le giacenze fisiche.
+
+La pagina Auto-Order include una barra di categorie: quelle spente non entrano
+nella bozza né negli export; riaccenderle ripristina le righe proposte. La
+ricerca manuale mostra anche articoli già in bozza o da verificare, con il
+motivo del blocco. Un articolo con giacenza positiva può essere aggiunto con
+una quantità scelta dall'operatore, purché sia multipla del lotto e non abbia
+anomalie, vendite da riconciliare o forniture già pendenti. Il solo stato
+`CONTROLLO MANUALE`, senza tali blocchi, non impedisce una scelta esplicita.
 
 Con lead time configurato si ordina quando la posizione utilizzabile è sotto
 il punto di riordino; in modalità legacy resta la soglia di copertura 7 giorni.
@@ -94,10 +106,8 @@ utilizzabile: un possibile acquisto duplicato passa a `CONTROLLO MANUALE`.
 Una fornitura che arriva dopo la data prevista di esaurimento viene segnalata.
 Stock negativo o residui ordine incoerenti sono `ANOMALIA` e bloccano la
 proposta automatica. Un articolo senza vendite non riceve domanda inventata.
-Le righe `CONTROLLO MANUALE` e `ORDINE IN ARRIVO` non possono essere aggiunte
-alla bozza tramite selezione manuale: occorre prima chiarire la fornitura e
-ricalcolare. Le altre righe senza anomalie possono essere aggiunte con un lotto
-valido dall'operatore.
+Le righe `ORDINE IN ARRIVO` e quelle con forniture pendenti non possono essere
+aggiunte manualmente: occorre prima chiarire la fornitura e ricalcolare.
 
 `prezzo` e `totale` restano il **valore di listino legacy**, anche in PDF/Excel
 e nell'import Carico Merce. Non sono il costo di acquisto. Se un prodotto ha un
