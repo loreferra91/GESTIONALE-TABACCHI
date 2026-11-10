@@ -441,6 +441,7 @@ DEFAULT_PARAMS = {
     "AUTO_ORDER_FATTORE_SICUREZZA": {"valore": 1.15, "descrizione": "Margine di sicurezza applicato alla scorta obiettivo"},
     "AUTO_ORDER_LEAD_TIME_GG": {"valore": 0, "descrizione": "Tempo di consegna in giorni; zero mantiene la politica legacy"},
     "AUTO_ORDER_REVIEW_PERIOD_GG": {"valore": 0, "descrizione": "Intervallo fra revisioni Auto-Order in giorni"},
+    "AUTO_ORDER_3_1_ENABLED": {"valore": 0, "descrizione": "Abilita la conferma 3.1 solo dopo verifica dello storico e configurazione di lead/review (0=no, 1=si)"},
     "AUTO_ORDER_MAX_ETA_IMPORT_GG": {"valore": 0, "descrizione": "Età massima dell'import in giorni; zero disabilita il blocco per età"},
     "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Periodo informativo del totale venduto importato (non usato da Auto-Order)"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
