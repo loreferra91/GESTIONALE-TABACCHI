@@ -17,9 +17,11 @@ from pymongo.errors import DuplicateKeyError
 try:
     from .auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
     from .auto_order_3_service import compare_policies
+    from .forecasting.demand_models import NativeSalesAccumulator
 except ImportError:  # pragma: no cover
     from auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
     from auto_order_3_service import compare_policies
+    from forecasting.demand_models import NativeSalesAccumulator
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -701,20 +703,59 @@ def create_auto_order_router(
 
     @router.get("/auto-order/confronto")
     async def confronto_auto_order():
-        """Read-only 2.0/3.0 comparison; this route cannot confirm an order."""
+        """Read-only, cursor-backed comparison; no arbitrary 50k event cutoff."""
         ao = await get_auto_order()
         db = get_database()
         today = commercial_day(ao.get("planning_day")) or datetime.now(ROME).date()
         first = today - timedelta(days=90)
         last = today + timedelta(days=2)
-        documents = await db.vendite.find({"$or": [
-            {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
-            {"data": {"$regex": r"^\d{2}[/\-]\d{2}[/\-]\d{4}"}},
-        ]}, {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1, "canale": 1,
-             "sorgente": 1, "csv_event_key": 1}).to_list(50001)
-        if len(documents) > 50000:
-            raise HTTPException(503, "Storico nativo oltre il limite di confronto: usare un periodo indicizzato")
-        return compare_policies(ao, documents)
+
+        collector = NativeSalesAccumulator(today, 90)
+        cursor = db.vendite.find(
+            {"$or": [
+                {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
+                {"data": {"$regex": r"^\\d{2}[/\\-]\\d{2}[/\\-]\\d{4}"}},
+            ]},
+            {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1,
+             "canale": 1, "sorgente": 1, "csv_event_key": 1},
+        )
+        # Batch the network I/O; keep 90-day totals and explicit event keys,
+        # not the full transaction payload, in application memory.
+        async for document in cursor:
+            collector.add(document)
+
+        columns = await db.vending.find(
+            {}, {"_id": 0, "codice": 1, "capacita_max": 1}
+        ).to_list(None)
+        capacity_by_code: Dict[str, int] = {}
+        incomplete_capacity = set()
+        for column in columns:
+            code = str(column.get("codice") or "").strip()
+            if not code:
+                continue
+            try:
+                capacity = int(column["capacita_max"])
+                if capacity <= 0 or float(column["capacita_max"]) != capacity:
+                    raise ValueError("invalid vending capacity")
+            except (KeyError, ValueError, TypeError):
+                incomplete_capacity.add(code)
+                continue
+            capacity_by_code[code] = capacity_by_code.get(code, 0) + capacity
+
+        def with_capacity(row):
+            code = row.get("codice")
+            physical_capacity = (
+                capacity_by_code.get(code)
+                if code not in incomplete_capacity else None
+            )
+            return {**row, "vending_capacity": physical_capacity}
+
+        active = {
+            **ao,
+            "righe": [with_capacity(row) for row in ao.get("righe", [])],
+            "esclusi": [with_capacity(row) for row in ao.get("esclusi", [])],
+        }
+        return compare_policies(active, collector)
 
     def auto_order_selected_rows(
         ao: Dict[str, Any], requested: Optional[List[AutoOrderRigaIn]] = None
