@@ -348,13 +348,13 @@ export default function AutoOrder() {
 
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={() => load(true)} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF fornitore
         </button>
-        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel fornitore
         </button>
-        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI" || (orderPolicy === "AUTO_ORDER_3_1" && (!comparison?.operational_ready || !comparison?.policy_snapshot_key))} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Salvataggio..." : alreadyConfirmed ? "Ordine fornitore salvato" : "Salva ordine fornitore"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
@@ -475,7 +475,17 @@ export default function AutoOrder() {
 
       <Card className="mb-4 p-4" data-testid="ao-planning-comparison">
         <h2 className="text-lg font-bold text-slate-900">Previsione e pianificazione</h2>
-        <p className="mt-1 text-sm text-slate-600">Confronto senza effetti sul magazzino: gli ordini reali continuano a usare Auto-Order 2.0. La proposta 3.0 usa solo vendite WebApp e simula arrivi, consumo e ricariche vending.</p>
+        <p className="mt-1 text-sm text-slate-600">L'algoritmo 3.1 usa lo storico nativo, le scorte reali, le consegne e le ricariche vending. Le conferme vengono ricalcolate dal backend. Nessun acquisto è automatico.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="ao-policy-selector">
+          <button type="button" data-testid="ao-use-3-1" aria-pressed={orderPolicy === "AUTO_ORDER_3_1"} disabled={!comparison?.operational_ready || loading} onClick={() => applyPolicy("AUTO_ORDER_3_1")} className={`rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40 ${orderPolicy === "AUTO_ORDER_3_1" ? "border-emerald-700 bg-emerald-50 text-emerald-900" : "border-slate-300"}`}>Usa Auto-Order 3.1</button>
+          <button type="button" data-testid="ao-use-2" aria-pressed={orderPolicy === "AUTO_ORDER_2"} disabled={loading} onClick={() => applyPolicy("AUTO_ORDER_2")} className={`rounded border px-3 py-2 text-sm font-semibold ${orderPolicy === "AUTO_ORDER_2" ? "border-slate-900 bg-slate-100" : "border-slate-300"}`}>Fallback 2.0</button>
+          <span className="text-xs font-semibold text-slate-600">Bozza attiva: {orderPolicy === "AUTO_ORDER_3_1" ? "3.1 — conferma validata" : "2.0"}</span>
+        </div>
+        {comparison && !comparison.operational_ready && <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" data-testid="ao-policy-blockers">
+          <b>3.1 non ancora attivabile per gli ordini reali.</b>
+          <ul className="mt-1 list-disc pl-4">{(comparison.operational_blockers || []).map((reason, i) => <li key={i}>{reason}</li>)}</ul>
+          <p className="mt-1">Configura i parametri reali in Parametri; nel frattempo resta disponibile 2.0. Il passaggio a 3.1 non avviene mai silenziosamente durante una bozza già modificata.</p>
+        </div>}
         {comparisonError && <p className="mt-2 text-sm text-amber-700">{comparisonError}</p>}
         {comparison && <>
           <div className="mt-3 grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
@@ -484,11 +494,11 @@ export default function AutoOrder() {
             <div>Già in arrivo <b>{comparison.summary.already_on_order}</b></div>
             <div>Da ricaricare vending <b>{comparison.summary.vending_refills}</b></div>
             <div>Quantità 2.0 <b>{formatNum(comparison.summary.pieces_2)}</b></div>
-            <div>Quantità 3.0 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
+            <div>Quantità 3.1 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
             {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.0 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
             {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.0 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
             <div>Dati da verificare <b>{comparison.summary.insufficient_data}</b></div>
-            <div>Costo noto 3.0 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
+            <div>Costo noto 3.1 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
           </div>
           <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
           <div className="mt-3 max-h-80 overflow-y-auto rounded border">
@@ -585,14 +595,14 @@ export default function AutoOrder() {
       </Card>
       <ConfirmDialog
         open={confirmOpen}
-        title="Confermare Auto-Order?"
+        title={`Confermare Auto-Order ${orderPolicy === "AUTO_ORDER_3_1" ? "3.1" : "2.0"}?`}
         confirmLabel="Crea ordine fornitore"
         loading={confirming}
         confirmDisabled={data?.data_quality === "DATI_PARZIALI" && (!acknowledgePartial || partialReason.trim().length < 10)}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={conferma}
       >
-        <p>Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
+        <p>Politica selezionata: <b>{orderPolicy === "AUTO_ORDER_3_1" ? "Auto-Order 3.1 (validazione server)" : "Auto-Order 2.0 (fallback)"}</b>. Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <label className="text-sm">Fornitore <input value={supplierName} onChange={event => setSupplierName(event.target.value)} maxLength={120} placeholder="Nome fornitore (facoltativo)" className="mt-1 w-full rounded border px-2 py-1" /></label>
           <label className="text-sm">Consegna prevista <input type="date" value={expectedDelivery} onChange={event => setExpectedDelivery(event.target.value)} className="mt-1 w-full rounded border px-2 py-1" /></label>
