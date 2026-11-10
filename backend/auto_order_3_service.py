@@ -1,21 +1,23 @@
 """Read-only comparison between the active order policy and deterministic 3.0."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 try:
+    from .auto_order_supplier_schedule import ROME, friday_delivery_schedule
     from .auto_order_planning import commercial_day
     from .forecasting.demand_models import NativeSalesAccumulator, native_daily_series
     from .forecasting.model_selection import choose_forecast
     from .replenishment.planning import plan_inventory
 except ImportError:  # direct ASGI module import from backend/
+    from auto_order_supplier_schedule import ROME, friday_delivery_schedule
     from auto_order_planning import commercial_day
     from forecasting.demand_models import NativeSalesAccumulator, native_daily_series
     from forecasting.model_selection import choose_forecast
     from replenishment.planning import plan_inventory
 
 
-def compare_policies(active: dict, native_sales: list[dict]) -> dict:
+def compare_policies(active: dict, native_sales: list[dict], *, now: datetime | None = None) -> dict:
     today = commercial_day(active.get("planning_day")) or date.today()
     first = today - timedelta(days=89)
     if isinstance(native_sales, NativeSalesAccumulator):
@@ -37,9 +39,12 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
     short = int(active.get("finestra_breve_gg") or 10)
     long = int(active.get("finestra_lunga_gg") or 30)
     weight = float(active.get("peso_breve", .7))
-    lead = max(0, int(params.get("AUTO_ORDER_LEAD_TIME_GG") or 0))
+    schedule = friday_delivery_schedule(now or datetime.now(ROME)) if int(params.get("AUTO_ORDER_WEEKLY_FRIDAY") or 0) == 1 else None
+    lead = schedule["lead_days"] if schedule else max(0, int(params.get("AUTO_ORDER_LEAD_TIME_GG") or 0))
     configured_review = max(0, int(params.get("AUTO_ORDER_REVIEW_PERIOD_GG") or 0))
-    review = configured_review if lead else max(1, int(params.get("GIORNI_COPERTURA_TARGET") or 14))
+    review = schedule["review_days"] if schedule else (
+        configured_review if lead else max(1, int(params.get("GIORNI_COPERTURA_TARGET") or 14))
+    )
     safety_factor = max(1, float(active.get("fattore_sicurezza") or 1.15))
     rows = []
     for old in [*(active.get("righe") or []), *(active.get("esclusi") or [])]:
@@ -133,7 +138,9 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
         if plan["intraday_demand_not_modelled"]:
             reasons.append("Giacenza live: il consumo giornaliero completo è proiettato da domani; domanda residua odierna non stimata.")
         if plan["stockout_before_supplier_delivery"]:
-            reasons.append("Rischio prima del lead time: anticipare la consegna o intervenire manualmente.")
+            reasons.append("Rischio prima della consegna prevista: non assumere merce disponibile in anticipo.")
+        if schedule:
+            reasons.append(f"Ciclo settimanale: consegna prevista venerdì {schedule['delivery_date']}; limite ordine {schedule['cutoff_datetime']} ora italiana.")
         if issues:
             reasons.append("Proposta sospesa: " + ", ".join(sorted(set(issues))) + ".")
         unit_cost = old.get("costo_unitario_acquisto")
@@ -181,7 +188,8 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
                        for key, value in sorted(errors_by_class.items())}
     return {
         "mode": "CONFRONTO_SENZA_CONFERMA", "active_policy": "AUTO_ORDER_2",
-        "candidate_policy": "AUTO_ORDER_3", "planning_day": today.isoformat(),
+        "candidate_policy": "AUTO_ORDER_3_1", "planning_day": today.isoformat(),
+        "delivery_schedule": schedule,
         "native_history_days": available_days,
         "source_watermarks": active.get("source_watermarks"),
         "rows": rows,

@@ -4,7 +4,7 @@ All MongoDB operations use mongomock-motor; never open production connections.
 """
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -187,3 +187,60 @@ def test_31_end_to_end_shadow_to_confirm_replay_and_server_revalidation(isolated
     assert line["quantita"] == line["quantita_3_1_massima"]
     assert product["giacenza_negozio"] == 0
     assert product["auto_order_version"] == 1
+
+
+
+def test_friday_calendar_is_enforced_for_31_order_and_saved_without_client_date(isolated_database):
+    """Real route integration: 11:00 cutoff changes supplier arrival, not just UI."""
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def exercise():
+        await db.ordini_fornitore.create_index("batch_key", unique=True)
+        await db.prodotti.insert_one({
+            "id": "test-product-weekly", "codice": "P", "descrizione": "P",
+            "categoria": "SIGARETTE", "prezzo": 5,
+            "giacenza_negozio": 0, "scorta_minima_negozio_auto_order": 0,
+        })
+        await db.parametri.insert_many([
+            {"nome": "AUTO_ORDER_WEEKLY_FRIDAY", "valore": 1},
+            {"nome": "AUTO_ORDER_3_1_ENABLED", "valore": 1},
+            # No fixed lead time or review interval necessary for Friday calendar.
+            {"nome": "AUTO_ORDER_LEAD_TIME_GG", "valore": 0},
+            {"nome": "AUTO_ORDER_REVIEW_PERIOD_GG", "valore": 0},
+        ])
+        await db.vendite.insert_many([
+            {"id": f"weekly-{n}", "codice": "P",
+             "data": (today - timedelta(days=n)).isoformat() + "T12:00:00",
+             "quantita": 2, "canale": "NEGOZIO", "sorgente": "MANUALE"}
+            for n in range(90)
+        ])
+        ao = await server.auto_order()
+        comparison = await server.auto_order_module["build_comparison"](ao)
+        assert comparison["operational_ready"] is True, comparison["operational_blockers"]
+        expected = comparison["delivery_schedule"]["delivery_date"]
+        row = next(x for x in comparison["rows"] if x["codice"] == "P")
+        assert row["quantita_suggerita"] > 0
+        body = AutoOrderConfermaIn(
+            policy_version=POLICY_31,
+            snapshot_key=ao["snapshot_key"],
+            policy_snapshot_key=comparison["policy_snapshot_key"],
+            righe=[AutoOrderRigaIn(codice="P", quantita=int(row["quantita_suggerita"]))],
+            idempotency_key="friday-auto-date",
+        )
+        wrong_friday = date.fromisoformat(expected) + timedelta(days=7)
+        wrong = body.model_copy(update={"idempotency_key": "wrong-week",
+            "data_consegna_prevista": wrong_friday})
+        with pytest.raises(HTTPException) as invalid:
+            await server.conferma_auto_order(wrong)
+        assert invalid.value.status_code == 422
+        saved = await server.conferma_auto_order(body)
+        assert saved["policy_version"] == POLICY_31
+        assert saved["data_consegna_prevista"] == expected
+        assert saved["calendario_consegne"]["cutoff_local_time"] == "11:00"
+        line = await db.ordini_fornitore_righe.find_one({"batch_key": saved["batch_key"]})
+        assert line["data_consegna_prevista"] == expected
+        return saved
+
+    result = asyncio.run(exercise())
+    assert result["status"] == "COMPLETED"
