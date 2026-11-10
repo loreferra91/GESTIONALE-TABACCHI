@@ -33,6 +33,24 @@ def readiness(ao: dict, comparison: dict) -> dict:
         reasons.append("Verificare la qualità delle vendite e delle forniture operative.")
     if int(comparison.get("native_history_days") or 0) < 60:
         reasons.append("Occorrono almeno 60 giorni di storico nativo osservabile.")
+    # A per-product quality guard can suppress a 3.1 quantity while the global
+    # 2.0 data-quality banner remains green. Do not make that incomplete draft
+    # the default order when it would omit a needed or at-risk product.
+    unverified_needs = [
+        row for row in comparison.get("rows") or []
+        if (
+            int(row.get("quantita_2") or 0) > 0
+            or float(row.get("fabbisogno_netto") or 0) > 0
+            or bool(row.get("data_rischio_esaurimento"))
+        )
+        and (row.get("anomalie") or row.get("qualita_previsione") != "OSSERVABILE")
+    ]
+    if unverified_needs:
+        examples = ", ".join(str(row.get("codice")) for row in unverified_needs[:3])
+        reasons.append(
+            f"{len(unverified_needs)} articoli con fabbisogno o rischio non certificabili in 3.1"
+            f" (es. {examples}). Verificare le anomalie e usare Auto-Order 2.0 nel frattempo."
+        )
     eligible = sum(
         1 for row in comparison.get("rows") or []
         if int(row.get("quantita_suggerita") or 0) > 0
@@ -42,6 +60,7 @@ def readiness(ao: dict, comparison: dict) -> dict:
     return {
         "operational_ready": not reasons,
         "operational_blockers": reasons,
+        "unverified_needed_products": len(unverified_needs),
         "eligible_products": eligible,
         "active_policy": POLICY_31 if not reasons else POLICY_2,
     }
