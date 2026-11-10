@@ -14,6 +14,7 @@ export default function Carico() {
   const today = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(today);
   const [sorgente, setSorgente] = useState("carico manuale");
+  const [supplierBatchKey, setSupplierBatchKey] = useState("");
   const [righe, setRighe] = useState([]); // {codice, descrizione, quantita, prezzo}
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
@@ -83,6 +84,7 @@ export default function Carico() {
     }));
     setRighe(nuove);
     setSorgente("da auto-order (modificato)");
+    setSupplierBatchKey("");
     setImportPreview(null);
     setLastReceipt(null);
     toast.success(`${nuove.length} righe importate dall'Auto-Order — modifica le quantità e conferma`);
@@ -115,6 +117,7 @@ export default function Carico() {
       setRighe(importedRows);
       setSorgente(`Auto-Order Excel · ${preview.file}`);
       setImportPreview(preview);
+      setSupplierBatchKey(preview.supplier_order_batch_key || "");
       setLastReceipt(null);
       setIdempotencyKey(createIdempotencyKey());
       toast.success(`${importedRows.length} prodotti importati · controlla il riepilogo e conferma l'ordine`);
@@ -143,6 +146,7 @@ export default function Carico() {
       const r = await api.post("/ordini/bulk", {
         file_sorgente: sorgente, data: new Date(data).toISOString(),
         idempotency_key: idempotencyKey,
+        supplier_order_batch_key: supplierBatchKey.trim() || null,
         righe: valide,
       });
       toast.success(r.data.gia_registrato
@@ -158,6 +162,7 @@ export default function Carico() {
         totale: valide.reduce((sum, row) => sum + (row.quantita || 0) * (row.prezzo || 0), 0),
       });
       setRighe([]);
+      setSupplierBatchKey("");
       setImportPreview(null);
       setIdempotencyKey(createIdempotencyKey());
       setConfirmOpen(false);
@@ -256,6 +261,11 @@ export default function Carico() {
             </button>
           </div>
         </div>
+        <div className="mb-4">
+          <label htmlFor="supplier-order-batch-key" className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-500">Riferimento ordine fornitore Auto-Order (facoltativo)</label>
+          <input id="supplier-order-batch-key" data-testid="carico-supplier-key" value={supplierBatchKey} onChange={event => setSupplierBatchKey(event.target.value)} placeholder="Incolla il riferimento dell'ordine confermato" className="w-full rounded-md border px-3 py-2 text-sm font-mono" />
+          <p className="mt-1 text-xs text-slate-500">Usa il riferimento solo se questo carico appartiene a quell'ordine. Le quantità ricevute ridurranno il residuo; senza riferimento il carico rimane non riconciliato.</p>
+        </div>
 
         {importPreview && (
           <div data-testid="carico-import-summary" className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950">
@@ -308,7 +318,7 @@ export default function Carico() {
               </tr>
             </thead>
             <tbody>
-              {righe.length === 0 && <tr><td colSpan={7} className="text-center py-12 text-slate-400">Nessuna riga — importa l'Excel Auto-Order, cerca un prodotto o aggiungi una riga vuota.</td></tr>}
+              {righe.length === 0 && <tr><td colSpan={7} className="text-center py-12 text-slate-400">Nessuna riga — precompila da Auto-Order, cerca un prodotto o aggiungi una riga vuota.</td></tr>}
               {righe.map((r, i) => {
                 const known = r.codice && prodMap.has(r.codice.trim());
                 return (

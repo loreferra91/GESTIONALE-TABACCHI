@@ -85,7 +85,8 @@ def test_inventory_import_updates_only_both_stocks(monkeypatch):
     assert by_code["10008"]["giacenza_vending"] == 0
 
 
-def test_full_import_rejects_workbook_without_supported_headers():
+def test_full_import_rejects_workbook_without_supported_headers(monkeypatch):
+    monkeypatch.setenv("ENABLE_LEGACY_EXCEL_IMPORT", "true")
     workbook = openpyxl.Workbook()
     workbook.active.append(["COLONNA NON SUPPORTATA"])
     payload = io.BytesIO()
@@ -93,7 +94,7 @@ def test_full_import_rejects_workbook_without_supported_headers():
     upload = UploadFile(filename="non-supportato.xlsx", file=io.BytesIO(payload.getvalue()))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.import_excel_full(upload, "test-invalid-format"))
+        asyncio.run(server.import_excel_full(upload, "test-invalid-format", "confermo-import-legacy"))
 
     assert exc.value.status_code == 422
     assert "Nessun foglio importabile" in exc.value.detail

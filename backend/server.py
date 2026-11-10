@@ -30,6 +30,7 @@ if __package__:
         AutoOrderConfermaIn, AutoOrderRigaIn, auto_order_snapshot_key,
         create_auto_order_router,
     )
+    from .auto_order_migrations import migrate_auto_order_2_schema
     from .backup_router import (
         BACKUP_COLLECTIONS, BACKUP_FILE_FORMAT, BACKUP_FILE_VERSION,
         BACKUP_PARTIAL_RETENTION_LIMIT, BACKUP_RETENTION_LIMIT,
@@ -120,6 +121,7 @@ else:
         AutoOrderConfermaIn, AutoOrderRigaIn, auto_order_snapshot_key,
         create_auto_order_router,
     )
+    from auto_order_migrations import migrate_auto_order_2_schema
     from backup_router import (
         BACKUP_COLLECTIONS, BACKUP_FILE_FORMAT, BACKUP_FILE_VERSION,
         BACKUP_PARTIAL_RETENTION_LIMIT, BACKUP_RETENTION_LIMIT,
@@ -437,6 +439,9 @@ DEFAULT_PARAMS = {
     "AUTO_ORDER_MIN_VENDUTO_BREVE": {"valore": 2, "descrizione": "Parametro legacy: ogni vendita recente viene ora analizzata"},
     "AUTO_ORDER_MIN_VENDUTO_LUNGO": {"valore": 4, "descrizione": "Parametro legacy: ogni vendita nella finestra lunga viene ora analizzata"},
     "AUTO_ORDER_FATTORE_SICUREZZA": {"valore": 1.15, "descrizione": "Margine di sicurezza applicato alla scorta obiettivo"},
+    "AUTO_ORDER_LEAD_TIME_GG": {"valore": 0, "descrizione": "Tempo di consegna in giorni; zero mantiene la politica legacy"},
+    "AUTO_ORDER_REVIEW_PERIOD_GG": {"valore": 0, "descrizione": "Intervallo fra revisioni Auto-Order in giorni"},
+    "AUTO_ORDER_MAX_ETA_IMPORT_GG": {"valore": 0, "descrizione": "Età massima dell'import in giorni; zero disabilita il blocco per età"},
     "PERIODO_VENDUTI_GG": {"valore": 90, "descrizione": "Periodo informativo del totale venduto importato (non usato da Auto-Order)"},
     "AGGIO_PCT": {"valore": 0.10, "descrizione": "Aggio tabaccaio (10% default): costo acquisto = prezzo × (1 - AGGIO_PCT)"},
     "SCORTA_MINIMA_NEGOZIO_VENDING": {
@@ -607,6 +612,7 @@ async def on_start():
             db.app_migrations.create_index("id", unique=True),
             db.anomalie_ignorate.create_index("key", unique=True),
         )
+        await migrate_auto_order_2_schema(db)
         product_ids_created = await ensure_product_ids()
         if product_ids_created:
             logging.info("Assigned IDs to %s legacy products", product_ids_created)
@@ -901,7 +907,7 @@ async def _vending_stock_by_code() -> Optional[Dict[str, int]]:
     # collezione Vending è sempre disponibile, anche quando è vuota.
     if not hasattr(db, "vending"):
         return None
-    rows = await db.vending.find({}, {"_id": 0, "codice": 1, "giacenza": 1}).to_list(5000)
+    rows = await db.vending.find({}, {"_id": 0, "codice": 1, "giacenza": 1}).to_list(None)
     totals: Dict[str, int] = {}
     for row in rows:
         code = str(row.get("codice") or "").strip()
@@ -1499,6 +1505,10 @@ auto_order_module = create_auto_order_router(
     sum_money=money_sum,
     multiply_money=money_product,
     get_auto_order=lambda: auto_order(),
+    run_transactionally=_run_transactionally,
+    record_audit_event=lambda *args, **kwargs: _record_audit_event(*args, **kwargs),
+    create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    session_kwargs=_session_kwargs,
 )
 auto_order_router = auto_order_module["router"]
 auto_order = auto_order_module["auto_order"]

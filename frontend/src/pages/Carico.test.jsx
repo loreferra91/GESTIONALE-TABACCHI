@@ -55,6 +55,7 @@ beforeEach(async () => {
         fornitore: "Deposito Rossi",
         data_ordine: "2026-10-20",
         selezione: "Tutte le categorie",
+        supplier_order_batch_key: "confirmed-key",
         righe: [{ codice: "SIG1", descrizione: "Articolo test", quantita: 10, prezzo: 5.5 }],
         avvisi: [],
       } });
@@ -98,6 +99,7 @@ test("importa l'Excel Auto-Order, chiede conferma con riepilogo e mostra l'esito
   expect(container.querySelector('[data-testid="carico-import-summary"]')).not.toBeNull();
   expect(container.textContent).toContain("Deposito Rossi");
   expect(container.querySelector('[data-testid="carico-row-0-qta"]').value).toBe("10");
+  expect(container.querySelector('[data-testid="carico-supplier-key"]').value).toBe("confirmed-key");
 
   await act(async () => container.querySelector('[data-testid="carico-conferma"]').click());
   expect(container.textContent).toContain("Confermare ordine e carico?");
@@ -113,6 +115,7 @@ test("importa l'Excel Auto-Order, chiede conferma con riepilogo e mostra l'esito
       file_sorgente: "Auto-Order Excel · ordine_20261020.xlsx",
       righe: [expect.objectContaining({ codice: "SIG1", quantita: 10, prezzo: 5.5 })],
       idempotency_key: expect.any(String),
+      supplier_order_batch_key: "confirmed-key",
     }),
   );
   const summary = container.querySelector('[data-testid="carico-success-summary"]');

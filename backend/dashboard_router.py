@@ -71,7 +71,7 @@ def calculate_purchase_breakdown(
     normalize_money: Callable[[Any], float],
     decimal_money: Callable[[Any], Decimal],
 ) -> Dict[str, Any]:
-    """Split cumulative purchases into the last Excel base and later receipts.
+    """Split cumulative purchases into the migrated base and later receipts.
 
     Product ``acquistati`` already contains both portions. We therefore
     subtract post-import receipt quantities to reconstruct the Excel base,
@@ -80,18 +80,6 @@ def calculate_purchase_breakdown(
     kpi = pivot_result.get("kpi") or {}
     rows = pivot_result.get("righe") or []
     import_created_at = (latest_import or {}).get("created_at")
-    if not import_created_at:
-        return {
-            "valore_acquistato_base_excel": normalize_money(kpi.get("valore_acquistato") or 0),
-            "valore_acquistato_carico_merce": 0.0,
-            "valore_acquistato": normalize_money(kpi.get("valore_acquistato") or 0),
-            "acquistati_base_excel_pezzi": sum(int(row.get("acq") or 0) for row in rows),
-            "acquistati_carico_merce_pezzi": 0,
-            "acquisti_excel_data": None,
-            "acquisti_excel_file": None,
-            "acquisti_ricostruzione_anomalie": 0,
-        }
-
     aggio = Decimal(str(kpi.get("aggio_pct", 0.10) or 0))
     cost_factor = max(Decimal(0), Decimal(1) - aggio)
     rows_by_code = {str(row.get("codice") or ""): row for row in rows}
@@ -173,6 +161,17 @@ def create_dashboard_router(
     get_vending_list: Callable[[], Any],
 ) -> Dict[str, Any]:
     router = APIRouter()
+
+    async def validated_accounting_baseline() -> Dict[str, Any] | None:
+        collection = getattr(get_database(), "accounting_baselines", None)
+        if collection is None:
+            return None
+        document = await collection.find_one({"id": "webapp-opening"}, {"_id": 0})
+        if not document or not document.get("validated_at") or not parse_utc_datetime(document.get("effective_at")):
+            return None
+        if "shop_cash_sales_opening" not in document or "vending_payments_opening" not in document:
+            return None
+        return document
 
     def vending_payment_values(documents: List[Dict[str, Any]], legacy_raw: bool) -> List[tuple]:
         values = []
@@ -275,8 +274,7 @@ def create_dashboard_router(
         giacenza_iniziale_vending: float = 0,
     ) -> Dict[str, float]:
         db = get_database()
-        historical_docs, app_docs, accounting_ledger, accounting_snapshot = await asyncio.gather(
-            db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None),
+        app_docs, accounting_ledger, accounting_snapshot, baseline = await asyncio.gather(
             db.vendite.find(
                 {"canale": {"$regex": "^VENDING$", "$options": "i"}},
                 {
@@ -292,6 +290,7 @@ def create_dashboard_router(
             ).to_list(None),
             get_vending_accounting_ledger_summary(),
             get_latest_vending_accounting_snapshot(),
+            validated_accounting_baseline(),
         )
         accounting_source = accounting_ledger or accounting_snapshot
         if accounting_source:
@@ -340,6 +339,23 @@ def create_dashboard_router(
             )
             return result
 
+        if baseline:
+            aligned_at = parse_utc_datetime(baseline["effective_at"])
+            payments = [(float(amount or 0), bucket) for bucket, amount in
+                        baseline["vending_payments_opening"].items()]
+            for document in app_docs:
+                created_at = parse_utc_datetime(document.get("created_at"))
+                if created_at and created_at > aligned_at:
+                    payments.extend(vending_payment_values([document], legacy_raw=False))
+            result = calculate_dashboard_balances(
+                payments, saldo_cassa, totale_prelievi_vending,
+                totale_scontrini, giacenza_iniziale_vending,
+            )
+            result.update({"fonteVendingContabile": "BASELINE_MONGO",
+                           "fonteVendingAllineataIl": baseline["effective_at"]})
+            return result
+
+        historical_docs = await db.db_storico_vending_ext.find({}, {"_id": 0, "raw": 1}).to_list(None)
         payments = vending_payment_values(historical_docs, legacy_raw=True)
         cutoff = latest_historical_vending_date(historical_docs)
         supplemental_app_docs = []
@@ -359,7 +375,8 @@ def create_dashboard_router(
         )
 
     async def supplemental_store_cash_sales(
-        latest_imported_sale: Any, latest_import_created_at: Any = None
+        latest_imported_sale: Any, latest_import_created_at: Any = None,
+        baseline: Dict[str, Any] | None = None,
     ) -> float:
         db = get_database()
         cutoff = parse_sale_date(latest_imported_sale)
@@ -371,7 +388,11 @@ def create_dashboard_router(
             channel = str(document.get("canale") or "NEGOZIO").strip().upper()
             if channel == "VENDING" or not is_cash_payment(document.get("pagamento")):
                 continue
-            if not is_sale_after_excel_import(document, cutoff, latest_import_created_at):
+            if baseline:
+                created_at = parse_utc_datetime(document.get("created_at"))
+                if not created_at or created_at <= parse_utc_datetime(baseline["effective_at"]):
+                    continue
+            elif not is_sale_after_excel_import(document, cutoff, latest_import_created_at):
                 continue
             try:
                 total += decimal_money(document.get("importo") or 0)
@@ -382,15 +403,16 @@ def create_dashboard_router(
     async def vending_cash_accounting_snapshot() -> Dict[str, Any]:
         """Return the physical vending cash derived from accounting sources."""
         db = get_database()
-        latest_import, historical_dates, prelievi, opening_document = await asyncio.gather(
+        latest_import, baseline, prelievi, opening_document = await asyncio.gather(
             get_latest_accounting_import(),
-            db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
+            validated_accounting_baseline(),
             get_prelievi_vending_summary(),
             db.parametri.find_one(
                 {"nome": "GIACENZA_INIZIALE_CONTANTI_VENDING"},
                 {"_id": 0, "valore": 1},
             ),
         )
+        historical_dates = await db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None) if not baseline else []
         latest_imported_sale = latest_sale_date(historical_dates)
         opening_cash = normalize_money((opening_document or {}).get("valore") or 0)
         gross_withdrawals = normalize_money(prelievi.get("totale") or 0)
@@ -398,7 +420,7 @@ def create_dashboard_router(
             0,
             gross_withdrawals,
             0,
-            (latest_import or {}).get("created_at"),
+            baseline.get("effective_at") if baseline else (latest_import or {}).get("created_at"),
             opening_cash,
         )
         return {
@@ -406,6 +428,7 @@ def create_dashboard_router(
             "giacenza_iniziale": opening_cash,
             "vendite_contanti": balances["venditeVendingContanti"],
             "prelievi_lordi": gross_withdrawals,
+            "fonte_contabile": balances.get("fonteVendingContabile", "LEGACY_DA_RICONCILIARE"),
             "ultima_vendita_importata": latest_imported_sale.isoformat()
             if latest_imported_sale else None,
         }
@@ -430,12 +453,9 @@ def create_dashboard_router(
 
     async def dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
         db = get_database()
-        app_sales, imported_sales = await asyncio.gather(
-            db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-            db.db_storico_vend.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None),
-        )
+        app_sales = await db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None)
         totals_by_date: Dict[Any, Decimal] = {}
-        for sale in [*imported_sales, *app_sales]:
+        for sale in app_sales:
             parsed_day = parse_sale_date(sale.get("data"))
             if parsed_day is None:
                 continue
@@ -484,70 +504,44 @@ def create_dashboard_router(
             raise HTTPException(422, "Il periodo deve essere di 7, 30 o 365 giorni")
 
         db = get_database()
-        app_sales, imported_sales, latest_import = await asyncio.gather(
-            db.vendite.find(
-                {},
-                {
-                    "_id": 0,
-                    "data": 1,
-                    "codice": 1,
-                    "descrizione": 1,
-                    "quantita": 1,
-                    "importo": 1,
-                    "canale": 1,
-                    "pagamento": 1,
-                    "created_at": 1,
-                },
-            ).to_list(None),
-            db.db_storico_vend.find(
-                {},
-                {
-                    "_id": 0,
-                    "data": 1,
-                    "codice": 1,
-                    "descrizione": 1,
-                    "quantita": 1,
-                    "importo": 1,
-                },
-            ).to_list(None),
-            get_latest_accounting_import(),
-        )
-        latest_imported_sale = latest_sale_date(imported_sales)
-        if imported_sales:
-            app_sales = [
-                sale
-                for sale in app_sales
-                if is_sale_after_excel_import(
-                    sale,
-                    latest_imported_sale,
-                    (latest_import or {}).get("created_at"),
-                )
-            ]
+        app_sales = await db.vendite.find(
+            {},
+            {
+                "_id": 0,
+                "data": 1,
+                "codice": 1,
+                "descrizione": 1,
+                "quantita": 1,
+                "importo": 1,
+                "canale": 1,
+                "pagamento": 1,
+                "created_at": 1,
+            },
+        ).to_list(None)
         parsed_sales = []
-        for source, documents in (("APP", app_sales), ("STORICO", imported_sales)):
-            for sale in documents:
-                parsed_day = parse_sale_date(sale.get("data"))
-                if parsed_day is None:
-                    continue
-                try:
-                    amount = decimal_money(sale.get("importo") or 0)
-                    quantity = int(sale.get("quantita") or 0)
-                except (TypeError, ValueError):
-                    continue
-                channel = str(sale.get("canale") or "NEGOZIO").strip().upper()
-                if channel not in {"NEGOZIO", "VENDING"}:
-                    channel = "ALTRO"
-                payment = str(sale.get("pagamento") or "NON DISPONIBILE").strip().upper()
-                parsed_sales.append({
-                    "data": parsed_day,
-                    "codice": str(sale.get("codice") or "").strip(),
-                    "descrizione": str(sale.get("descrizione") or "").strip(),
-                    "quantita": quantity,
-                    "importo": amount,
-                    "canale": channel,
-                    "pagamento": payment,
-                    "fonte": source,
-                })
+        for sale in app_sales:
+            parsed_day = parse_sale_date(sale.get("data"))
+            if parsed_day is None:
+                continue
+            try:
+                amount = decimal_money(sale.get("importo") or 0)
+                quantity = int(sale.get("quantita") or 0)
+            except (TypeError, ValueError):
+                continue
+            channel = str(sale.get("canale") or "NEGOZIO").strip().upper()
+            if channel not in {"NEGOZIO", "VENDING"}:
+                channel = "ALTRO"
+            payment = str(sale.get("pagamento") or "NON DISPONIBILE").strip().upper()
+            parsed_sales.append({
+                "data": parsed_day,
+                "codice": str(sale.get("codice") or "").strip(),
+                "descrizione": str(sale.get("descrizione") or "").strip(),
+                "quantita": quantity,
+                "importo": amount,
+                "canale": channel,
+                "pagamento": payment,
+                "fonte": "VENDITE",
+            })
 
         if not parsed_sales:
             return {
@@ -678,9 +672,9 @@ def create_dashboard_router(
     async def dashboard():
         db = get_database()
         pivot_result = await get_pivot()
-        ultimo_import_contabile, date_vendite_importate, storico_ordini = await asyncio.gather(
+        ultimo_import_contabile, baseline_contabile, storico_ordini = await asyncio.gather(
             get_latest_accounting_import(),
-            db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None),
+            validated_accounting_baseline(),
             db.storico_ordini.find(
                 {"annullato": {"$ne": True}},
                 {
@@ -697,8 +691,8 @@ def create_dashboard_router(
         import_cutoff = parse_utc_datetime(import_created_at)
         ordini_successivi = [
             order for order in storico_ordini
-            if import_cutoff
-            and (parse_utc_datetime(order.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc))
+            if not import_cutoff
+            or (parse_utc_datetime(order.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc))
             > import_cutoff
         ]
         purchase_breakdown = calculate_purchase_breakdown(
@@ -709,19 +703,27 @@ def create_dashboard_router(
             decimal_money,
         )
         pivot_result["kpi"].update(purchase_breakdown)
+        date_vendite_importate = await db.db_storico_vend.find({}, {"_id": 0, "data": 1}).to_list(None) if not baseline_contabile else []
         ultima_vendita_importata = latest_sale_date(date_vendite_importate)
         import_totali = (ultimo_import_contabile or {}).get("totali", {})
-        venduto_negozio_excel = normalize_money(import_totali.get("valore_venduto_negozio_excel") or 0)
-        venduto_vending_excel = normalize_money(import_totali.get("valore_venduto_vending_excel") or 0)
-        venduto_totale_excel = normalize_money(import_totali.get("valore_venduto_totale_excel") or 0)
-        if venduto_totale_excel:
-            pivot_result["kpi"]["valore_venduto"] = round(venduto_totale_excel, 2)
-            pivot_result["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
-            pivot_result["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
-            pivot_result["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
-            pivot_result["kpi"]["margine_lordo"] = sum_money(
-                [venduto_totale_excel, -(pivot_result["kpi"].get("valore_acquistato") or 0)]
-            )
+        venduto_negozio_excel = normalize_money(
+            baseline_contabile["shop_cash_sales_opening"] if baseline_contabile
+            else import_totali.get("valore_venduto_negozio_excel") or 0
+        )
+        venduto_vending_excel = normalize_money(
+            sum(float(amount or 0) for amount in baseline_contabile["vending_payments_opening"].values())
+            if baseline_contabile else import_totali.get("valore_venduto_vending_excel") or 0
+        )
+        venduto_totale_excel = normalize_money(
+            venduto_negozio_excel + venduto_vending_excel if baseline_contabile
+            else import_totali.get("valore_venduto_totale_excel") or 0
+        )
+        pivot_result["kpi"]["valore_venduto_negozio_excel"] = round(venduto_negozio_excel, 2)
+        pivot_result["kpi"]["valore_venduto_vending_excel"] = round(venduto_vending_excel, 2)
+        pivot_result["kpi"]["valore_venduto_totale_excel"] = round(venduto_totale_excel, 2)
+        pivot_result["kpi"]["margine_lordo"] = sum_money(
+            [pivot_result["kpi"].get("valore_venduto") or 0, -(pivot_result["kpi"].get("valore_acquistato") or 0)]
+        )
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_sales = {"tot": Decimal(0), "pezzi": 0}
@@ -747,9 +749,13 @@ def create_dashboard_router(
                 {"_id": 0, "valore": 1},
             ),
             supplemental_store_cash_sales(
-                ultima_vendita_importata, (ultimo_import_contabile or {}).get("created_at")
+                ultima_vendita_importata, (ultimo_import_contabile or {}).get("created_at"),
+                baseline_contabile,
             ),
-            shop_sold_accounting_corrections((ultimo_import_contabile or {}).get("created_at")),
+            shop_sold_accounting_corrections(
+                baseline_contabile["effective_at"] if baseline_contabile
+                else (ultimo_import_contabile or {}).get("created_at")
+            ),
         )
         giacenza_iniziale_vending = normalize_money((giacenza_iniziale_doc or {}).get("valore") or 0)
         venduto_negozio_contabilizzato = sum_money(
@@ -785,6 +791,7 @@ def create_dashboard_router(
             "venduto_negozio_contabilizzato": venduto_negozio_contabilizzato,
             "liquidita_residua": liquidita_residua,
             "saldo_cassa": liquidita_residua,
+            "stato_baseline_contabile": "VALIDATA_MONGO" if baseline_contabile else "LEGACY_DA_RICONCILIARE",
             "saldi": saldi,
             "andamento_vendite": andamento_vendite,
             "vending_da_caricare": vend_da_caricare,

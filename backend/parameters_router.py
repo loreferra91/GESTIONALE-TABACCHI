@@ -20,6 +20,9 @@ PARAM_BOUNDS = {
     "AUTO_ORDER_MIN_VENDUTO_BREVE": (0.0, 10000.0, "0 ≤ soglia"),
     "AUTO_ORDER_MIN_VENDUTO_LUNGO": (0.0, 10000.0, "0 ≤ soglia"),
     "AUTO_ORDER_FATTORE_SICUREZZA": (1.0, 5.0, "1 ≤ fattore < 5"),
+    "AUTO_ORDER_LEAD_TIME_GG": (0.0, 366.0, "0 ≤ giorni ≤ 365"),
+    "AUTO_ORDER_REVIEW_PERIOD_GG": (0.0, 366.0, "0 ≤ giorni ≤ 365"),
+    "AUTO_ORDER_MAX_ETA_IMPORT_GG": (0.0, 366.0, "0 ≤ giorni ≤ 365"),
     "PERIODO_VENDUTI_GG": (1.0, 3650.0, "1 ≤ giorni ≤ 3650"),
     "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
     "FATT_SETTIMANALE": (0.0, 10.0, "0 ≤ FATT_SETTIMANALE ≤ 10"),
@@ -84,6 +87,8 @@ def create_parameters_router(
                 )
         if nome == "SCORTA_MINIMA_NEGOZIO_VENDING" and not float(body.valore).is_integer():
             raise HTTPException(422, "SCORTA_MINIMA_NEGOZIO_VENDING deve essere un numero intero")
+        if nome in {"AUTO_ORDER_LEAD_TIME_GG", "AUTO_ORDER_REVIEW_PERIOD_GG", "AUTO_ORDER_MAX_ETA_IMPORT_GG"} and not float(body.valore).is_integer():
+            raise HTTPException(422, f"{nome} deve essere un numero intero di giorni")
 
         database = get_database()
         previous = await database.parametri.find_one(

@@ -49,8 +49,7 @@ def create_operations_router(
 
         latest_app = latest_sale_date([{"data": value} for value in app_dates])
         latest_imported = latest_sale_date([{"data": value} for value in imported_dates])
-        latest_days = [parsed for parsed in (latest_app, latest_imported) if parsed]
-        latest_sales_day = max(latest_days).isoformat() if latest_days else None
+        latest_sales_day = latest_app.isoformat() if latest_app else None
         delay = None
         if latest_sales_day:
             try:
@@ -148,19 +147,16 @@ def create_operations_router(
                     "azione": "Completa anagrafica prodotto",
                 })
 
-        sales_codes, imported_codes = await asyncio.gather(
-            database.vendite.distinct("codice"),
-            database.db_storico_vend.distinct("codice"),
-        )
+        sales_codes = await database.vendite.distinct("codice")
         unknown_codes = sorted({
-            code for code in [*sales_codes, *imported_codes]
+            code for code in sales_codes
             if code and code not in product_codes
         })[:200]
         for code in unknown_codes:
             items.append({
                 "tipo": "vendita_senza_prodotto", "severita": "media", "codice": code,
                 "descrizione": "", "messaggio": "Vendite presenti ma prodotto non trovato",
-                "azione": "Importa listino/prodotti aggiornati o crea prodotto",
+                "azione": "Aggiorna il listino ADM o crea il prodotto",
             })
 
         status = await data_status_payload()
@@ -172,7 +168,7 @@ def create_operations_router(
                     f"Ultima vendita disponibile: {status.get('latest_sales_day')} "
                     f"({status['sales_data_delay_days']} giorni fa)"
                 ),
-                "azione": "Importa Excel aggiornato prima di confermare ordini",
+                "azione": "Verifica la registrazione delle vendite nella WebApp o l'integrazione CSV vending",
             })
         for item in items:
             item["id"] = hashlib.sha256(

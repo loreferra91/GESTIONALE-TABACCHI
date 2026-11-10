@@ -9,14 +9,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from pymongo import UpdateOne
 
 try:
     from .money import NonNegativeMoney
+    from .legacy_excel_import import require_legacy_excel_import
 except ImportError:  # pragma: no cover - direct module execution
     from money import NonNegativeMoney
+    from legacy_excel_import import require_legacy_excel_import
 
 
 class SmartVenueProductIn(BaseModel):
@@ -366,7 +368,11 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
         response = {"ok": True, "batch_id": batch_id, "backup_id": backup["id"], "created_at": now, "righe": rows, "prodotti": len(rows), "totale_smart_venue": sum(r["smart_venue"] for r in rows), "differenze": sum(r["stato"] != "OK" for r in rows), "errori": []}; await record_import_history("Testo SmartVenue", response, backup["id"]); return response
 
     @router.post("/smart-venue/import-excel")
-    async def import_smart_venue_excel(file: UploadFile = File(...), modo: str = Form("entrambi")):
+    async def import_smart_venue_excel(
+        file: UploadFile = File(...), modo: str = Form("entrambi"),
+        legacy_confirmation: Optional[str] = Header(None, alias="X-Legacy-Import-Confirmed"),
+    ):
+        require_legacy_excel_import(legacy_confirmation)
         try: import openpyxl
         except Exception: raise HTTPException(500, "openpyxl non installato")
         try: workbook = openpyxl.load_workbook(io.BytesIO(await read_capped(file)), data_only=True, keep_vba=False)

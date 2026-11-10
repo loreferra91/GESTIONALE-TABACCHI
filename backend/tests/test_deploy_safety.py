@@ -517,7 +517,7 @@ def test_data_status_uses_distinct_dates_without_full_scans(monkeypatch):
 
     database = Database({
         "vendite": DistinctCollection(["2026-10-27", "2026-10-28"]),
-        "db_storico_vend": DistinctCollection(["2026-10-26"]),
+        "db_storico_vend": DistinctCollection(["2026-12-31"]),
         "import_history": DistinctCollection([]),
         "backup_snapshots": DistinctCollection([]),
     })
@@ -543,10 +543,14 @@ def test_data_status_uses_distinct_dates_without_full_scans(monkeypatch):
 
     assert calls == ["data", "data"]
     assert payload["latest_sales_day"] == "2026-10-28"
+    assert payload["latest_imported_sale"] == "2026-12-31"
 
 
-def test_render_blueprint_requires_manual_deploy():
+def test_render_blueprint_autodeploy_requires_passing_ci_on_main():
+    """The owner explicitly enabled auto-deploy after checks, not on every commit."""
     blueprint = (server.ROOT_DIR.parent / "render.yaml").read_text(encoding="utf-8")
 
-    assert "autoDeploy: false" in blueprint
+    assert "branch: main" in blueprint
+    assert "autoDeployTrigger: checksPass" in blueprint
     assert "autoDeploy: true" not in blueprint
+    assert "autoDeployTrigger: commit" not in blueprint

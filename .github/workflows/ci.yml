@@ -2,7 +2,7 @@ name: Verify
 
 on:
   push:
-    branches: [main]
+    branches: [main, openclaw/render-staging-deploy, 'feature/**', 'codex/**']
   pull_request:
 
 permissions:
@@ -31,7 +31,10 @@ jobs:
         run: python -m compileall -q backend -x '(^|/)(\.venv|node_modules|__pycache__)(/|$)'
 
       - name: Test backend
-        run: python -m pytest backend/tests -q --tb=short
+        run: python -m pytest backend/tests -q --tb=short -rs
+
+      - name: Synthetic sales streaming benchmark (read-only)
+        run: python scripts/benchmark_auto_order_3_stream.py --sizes 5000 50000 100000
 
       - uses: actions/setup-node@v4
         with:

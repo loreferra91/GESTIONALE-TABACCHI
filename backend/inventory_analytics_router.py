@@ -32,9 +32,7 @@ def create_inventory_analytics_router(
     async def pivot():
         database = get_database()
         products, params, vending_totals = await asyncio.gather(
-            database.prodotti.find(
-                {"presente_ultimo_import": {"$ne": False}}, {"_id": 0}
-            ).to_list(5000),
+            database.prodotti.find({}, {"_id": 0}).to_list(5000),
             get_params(),
             vending_stock_by_code(),
         )

@@ -3,7 +3,8 @@ services:
     name: gestionale-tabacchi
     runtime: docker
     plan: free
-    autoDeploy: false
+    branch: main
+    autoDeployTrigger: checksPass
     healthCheckPath: /api/
     envVars:
       - key: MONGO_URL

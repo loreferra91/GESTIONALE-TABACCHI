@@ -6,6 +6,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 import backend.server as server
+from mongomock_motor import AsyncMongoMockClient
 
 
 class FakeCursor:
@@ -121,6 +122,48 @@ def test_uses_app_vending_sales_as_backward_compatible_fallback(monkeypatch):
     assert result["differenzaCassaVendingContanti"] == 1000.0
     query = app_sales.queries[0][0]
     assert query["canale"]["$regex"] == "^VENDING$"
+
+
+def test_validated_mongo_baseline_is_independent_of_later_excel_history(monkeypatch):
+    db = AsyncMongoMockClient()["accounting_baseline_test"]
+    monkeypatch.setattr(server, "db", db)
+
+    async def no_ledger():
+        return None
+
+    monkeypatch.setattr(server, "_vending_accounting_ledger_summary", no_ledger)
+    monkeypatch.setattr(server, "_latest_vending_accounting_snapshot", no_ledger)
+
+    async def scenario():
+        baseline = {
+            "id": "webapp-opening", "validated_at": "2026-10-01T12:00:00Z",
+            "effective_at": "2026-10-01T00:00:00Z", "shop_cash_sales_opening": 500,
+            "vending_payments_opening": {"CONTANTI": 100, "CARTE": 20},
+            "source_reference": "riconciliazione firmata", "note": "saldo verificato",
+        }
+        await db.accounting_baselines.insert_one(baseline)
+        await db.vendite.insert_many([
+            {"id": "old", "codice": "P", "data": "2026-09-30", "created_at": "2026-09-30T12:00:00Z",
+             "canale": "VENDING", "importo": 999, "pagamento": "CONTANTI"},
+            {"id": "new", "codice": "P", "data": "2026-10-02", "created_at": "2026-10-02T12:00:00Z",
+             "canale": "VENDING", "importo": 15, "pagamento": "CONTANTI"},
+            {"id": "shop", "codice": "P", "data": "2026-10-02", "created_at": "2026-10-02T12:00:00Z",
+             "canale": "NEGOZIO", "importo": 10, "pagamento": "CONTANTI"},
+        ])
+        before = await server._dashboard_balances(0)
+        shop_before = await server._supplemental_store_cash_sales(None, None, baseline)
+        await db.db_storico_vending_ext.insert_one(historical_row(5000, "Contanti"))
+        await db.db_storico_vend.insert_one({"codice": "P", "data": "2026-10-03", "quantita": 999})
+        after = await server._dashboard_balances(0)
+        shop_after = await server._supplemental_store_cash_sales(None, None, baseline)
+        return before, after, shop_before, shop_after
+
+    before, after, shop_before, shop_after = asyncio.run(scenario())
+    assert before == after
+    assert before["fonteVendingContabile"] == "BASELINE_MONGO"
+    assert before["venditeVendingContanti"] == 115
+    assert before["saldoVendingElettronico"] == 20
+    assert shop_before == shop_after == 10
 
 
 def test_latest_historical_vending_date_uses_date_then_datetime_fallback():
@@ -501,7 +544,7 @@ def test_latest_sale_date_compares_mixed_formats_chronologically():
     assert result.isoformat() == "2026-10-03"
 
 
-def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monkeypatch):
+def test_dashboard_sales_trend_uses_only_native_sales(monkeypatch):
     monkeypatch.setattr(
         server,
         "db",
@@ -518,12 +561,11 @@ def test_dashboard_sales_trend_uses_latest_available_day_and_merges_sources(monk
 
     result = asyncio.run(server._dashboard_sales_trend())
 
-    assert result["ultimo_giorno"] == "2026-10-01"
-    assert result["totale_ultimo_giorno"] == 20
-    assert result["totale_periodo"] == 35
+    assert result["ultimo_giorno"] == "2026-09-30"
+    assert result["totale_ultimo_giorno"] == 5
+    assert result["totale_periodo"] == 5
     assert len(result["serie"]) == 30
-    assert result["serie"][-2] == {"data": "2026-09-30", "importo": 15.0}
-    assert result["serie"][-1] == {"data": "2026-10-01", "importo": 20.0}
+    assert result["serie"][-1] == {"data": "2026-09-30", "importo": 5.0}
 
 
 def test_dashboard_sales_trend_handles_empty_sources(monkeypatch):
@@ -593,11 +635,11 @@ def test_sales_period_report_splits_channels_payments_and_compares_periods(monke
 
     assert result["data_da"] == "2026-10-13"
     assert result["data_a"] == "2026-10-19"
-    assert result["totale"] == 23.75
-    assert result["totale_precedente"] == 10
-    assert result["variazione_pct"] == 137.5
-    assert result["pezzi"] == 4
-    assert result["giorni_con_vendite"] == 3
+    assert result["totale"] == 17.5
+    assert result["totale_precedente"] == 0
+    assert result["variazione_pct"] is None
+    assert result["pezzi"] == 3
+    assert result["giorni_con_vendite"] == 2
     assert len(result["serie"]) == 7
     assert result["serie"][-1] == {
         "data": "2026-10-19",
@@ -606,15 +648,15 @@ def test_sales_period_report_splits_channels_payments_and_compares_periods(monke
         "vending": 0.0,
     }
     assert result["canali"] == [
-        {"nome": "NEGOZIO", "importo": 18.75, "pezzi": 3},
+        {"nome": "NEGOZIO", "importo": 12.5, "pezzi": 2},
         {"nome": "VENDING", "importo": 5.0, "pezzi": 1},
     ]
     assert result["pagamenti"][0]["nome"] == "POS"
     assert result["prodotti"][0] == {
         "codice": "A1",
         "descrizione": "Prodotto A",
-        "importo": 18.75,
-        "pezzi": 3,
+        "importo": 12.5,
+        "pezzi": 2,
     }
 
 
@@ -637,7 +679,7 @@ def test_sales_period_report_empty_sources(monkeypatch):
     assert result["prodotti"] == []
 
 
-def test_sales_period_report_excludes_app_sales_already_captured_by_latest_import(monkeypatch):
+def test_sales_period_report_ignores_legacy_history_and_import_cutoff(monkeypatch):
     monkeypatch.setattr(
         server,
         "db",
@@ -674,5 +716,5 @@ def test_sales_period_report_excludes_app_sales_already_captured_by_latest_impor
 
     result = asyncio.run(server._sales_period_report(7))
 
-    assert result["totale"] == 15
+    assert result["totale"] == 104
     assert [product["codice"] for product in result["prodotti"]] == ["A1", "B2"]

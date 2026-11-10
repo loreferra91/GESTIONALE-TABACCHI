@@ -117,6 +117,10 @@ export default function Parametri() {
   const upload = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    if (!window.confirm(`Import legacy controllato: il file ${f.name} può sostituire giacenze, venduti, ordini e parametri operativi. È stato verificato un backup e vuoi procedere?`)) {
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     const jobId = globalThis.crypto?.randomUUID?.() || `import-${Date.now()}`;
     const startedAt = Date.now();
     let progressTimer;
@@ -143,7 +147,7 @@ export default function Parametri() {
       const r = await fetch(`${API}/import/excel-full`, {
         method: "POST",
         body: fd,
-        headers: { "X-Import-Job-ID": jobId },
+        headers: { "X-Import-Job-ID": jobId, "X-Legacy-Import-Confirmed": "confermo-import-legacy" },
       });
       if (!r.ok) {
         const body = await r.json().catch(() => null);
@@ -259,7 +263,7 @@ export default function Parametri() {
   const T = importReport?.totali || {};
 
   return (
-    <Layout title="Parametri di sistema" subtitle="configurazione motore & sincronizzazione Excel">
+    <Layout title="Parametri di sistema" subtitle="configurazione e manutenzione del gestionale">
       <Card className="mb-6 p-6">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-3xl">
@@ -296,18 +300,17 @@ export default function Parametri() {
         </div>
       </Card>
 
-      <Card className="p-6 mb-6">
+      <details className="mb-6">
+        <summary className="cursor-pointer rounded-md border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Strumenti di migrazione Excel legacy — apri solo per una procedura autorizzata</summary>
+      <Card className="p-6 mt-3">
         <div className="flex items-start gap-4">
           <div className="w-12 h-12 bg-slate-900 text-white rounded-md flex items-center justify-center flex-shrink-0">
             <UploadSimple size={22} weight="bold" />
           </div>
           <div className="flex-1">
-            <h2 className="font-heading font-black text-lg mb-1">Sincronizzazione da Excel</h2>
+            <h2 className="font-heading font-black text-lg mb-1">Import Excel legacy controllato</h2>
             <p className="text-sm text-slate-600 mb-3">
-              Carica un file <code>.xlsm/.xlsx</code>: la web app legge automaticamente i fogli
-              <b> RIEP_VENDITA, (SMART VENUE), LISTINO ADM, RICARICA VENDING, STORICO_ORDINI, DB_STORICO_VEND, PARAMETRI</b> e allinea il DB con l'Excel (Excel = fonte di verità).
-              <br/><span className="text-xs text-slate-500">Puoi anche caricare un file giacenze separato con le colonne <b>CODICE, DESCRIZIONE, ACQUISTATI, GIACENZA NEGOZIO e GIACENZA VENDING</b>, indipendentemente dal nome del foglio.</span>
-              <br/><span className="text-xs text-slate-500">Le righe presenti nel DB ma NON nell'Excel vengono conservate. I parametri custom (es. AGGIO_PCT) sono preservati.</span>
+              La WebApp e MongoDB sono la fonte operativa. Questa funzione è disabilitata per impostazione predefinita e va abilitata temporaneamente dall'amministratore solo per una migrazione verificata. Un import può sovrascrivere giacenze, venduti, ordini e parametri: controlla il backup prima di confermare.
             </p>
             <div className="flex items-center gap-3">
               <input
@@ -398,6 +401,7 @@ export default function Parametri() {
           </div>
         )}
       </Card>
+      </details>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
         <Card className="p-5">

@@ -55,9 +55,18 @@ class FakeBatchCollection:
     async def insert_one(self, doc):
         self.docs[doc["batch_key"]] = dict(doc)
 
+    async def update_one(self, query, update):
+        for document in self.docs.values():
+            if all(document.get(key) == value for key, value in query.items()):
+                document.update(update["$set"])
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
+
     async def delete_one(self, query):
         self.deleted.append(query)
-        self.docs.pop(query["batch_key"], None)
+        for key, document in list(self.docs.items()):
+            if all(document.get(field) == value for field, value in query.items()):
+                self.docs.pop(key)
 
 
 class MutatingFakeBatchCollection(FakeBatchCollection):
@@ -80,7 +89,7 @@ class FakeRowsCollection:
     async def delete_many(self, query):
         self.deleted.append(query)
         ids = set(query.get("id", {}).get("$in", []))
-        self.docs = [d for d in self.docs if d.get("id") not in ids]
+        self.docs = [d for d in self.docs if d.get("id") not in ids and ("batch_id" not in query or d.get("batch_id") != query["batch_id"])]
 
 
 def base_params(**overrides):
@@ -164,7 +173,7 @@ def test_short_only_weight_falls_back_to_any_long_demand(monkeypatch):
             AUTO_ORDER_MIN_VENDUTO_LUNGO=999,
             AUTO_ORDER_FATTORE_SICUREZZA=1.3,
         ),
-        imported_sales=[[], [{"_id": "AMMS451", "tot": 36}]],
+        app_sales=[[], [{"_id": "AMMS451", "tot": 36}]],
     )
 
     row = next(r for r in result["righe"] if r["codice"] == "AMMS451")
@@ -240,10 +249,12 @@ def test_restock_then_auto_order_does_not_double_subtract_vending(monkeypatch):
     row = next(r for r in result["righe"] if r["codice"] == "RESTOCK")
     assert row["magazzino_reale"] == 6
     assert row["magazzino_reale_lordo"] == 6
-    assert row["qta_da_ordinare"] == 8
+    assert row["qta_da_ordinare"] == 5
+    assert row["scorta_riservata"] == 2
+    assert row["posizione_inventariale"] == 11
 
 
-def test_imported_source_overlaps_app_and_long_only_sales_order(monkeypatch):
+def test_excel_history_never_overrides_native_sales(monkeypatch):
     result = run_auto_order(
         monkeypatch,
         [product("SRC", giacenza_negozio=0)],
@@ -252,11 +263,10 @@ def test_imported_source_overlaps_app_and_long_only_sales_order(monkeypatch):
         imported_sales=[[], [{"_id": "SRC", "tot": 30}]],
     )
 
-    row = next(r for r in result["righe"] if r["codice"] == "SRC")
-    assert row["fonte_domanda"] == "DB_STORICO_VEND"
-    assert row["venduto_breve"] == 0
-    assert row["venduto_lungo"] == 30
-    assert row["qta_da_ordinare"] == 14
+    row = next(r for r in [*result["righe"], *result["esclusi"]] if r["codice"] == "SRC")
+    assert row["fonte_domanda"] == "VENDITE"
+    assert row["venduto_breve"] == 99
+    assert row["venduto_lungo"] == 99
 
 
 def test_configurable_windows_and_compat_fields(monkeypatch):
@@ -274,6 +284,32 @@ def test_configurable_windows_and_compat_fields(monkeypatch):
     assert row["venduto_lungo"] == row["venduto_30gg"] == 20
 
 
+def test_recent_demand_surge_is_flagged_without_changing_weighted_formula(monkeypatch):
+    result = run_auto_order(
+        monkeypatch,
+        [product("SURGE", giacenza_negozio=0)],
+        app_sales=[[{"_id": "SURGE", "tot": 90}], [{"_id": "SURGE", "tot": 150}]],
+    )
+    row = next(row for row in result["righe"] if row["codice"] == "SURGE")
+    assert row["domanda_precedente_gg"] == 3
+    assert row["anomalia_domanda"] is True
+    assert row["domanda_gg"] == 7.8
+    assert "DOMANDA IN FORTE AUMENTO" in row["motivo"]
+
+
+def test_configured_lead_and_review_period_trigger_inventory_position_reorder(monkeypatch):
+    result = run_auto_order(
+        monkeypatch,
+        [product("LEAD", giacenza_negozio=30)],
+        params=base_params(AUTO_ORDER_LEAD_TIME_GG=10, AUTO_ORDER_REVIEW_PERIOD_GG=7),
+        app_sales=[[{"_id": "LEAD", "tot": 30}], [{"_id": "LEAD", "tot": 90}]],
+    )
+    row = next(row for row in result["righe"] if row["codice"] == "LEAD")
+    assert row["modalita_pianificazione"] == "LEAD_TIME"
+    assert row["punto_riordino"] == 51
+    assert row["qta_da_ordinare"] == 21
+
+
 async def fake_ao_two_rows():
     return {
         "righe": [
@@ -283,6 +319,8 @@ async def fake_ao_two_rows():
         "esclusi": [
             {"codice": "X", "descrizione": "X", "categoria": "ACCESSORI", "stato": "ANOMALIA", "anomalia": True, "qta_da_ordinare": 0, "prezzo": 9, "totale": 0, "motivo": "TEST"},
             {"codice": "Y", "descrizione": "Y", "categoria": "ACCESSORI", "stato": "NESSUN ORDINE", "anomalia": False, "qta_da_ordinare": 0, "prezzo": 2, "totale": 0, "motivo": "TEST"},
+            {"codice": "U", "descrizione": "U", "categoria": "ACCESSORI", "stato": "CONTROLLO MANUALE", "anomalia": False, "qta_da_ordinare": 0, "quantita_senza_data": 1, "prezzo": 2, "totale": 0, "motivo": "FORNITURA SENZA DATA"},
+            {"codice": "P", "descrizione": "P", "categoria": "ACCESSORI", "stato": "ORDINE IN ARRIVO", "anomalia": False, "qta_da_ordinare": 0, "prezzo": 2, "totale": 0, "motivo": "FORNITURA PENDENTE"},
         ],
         "totale": 10,
         "parametri": {},
@@ -319,7 +357,8 @@ def test_partial_confirmation_failure_rolls_back(monkeypatch):
 
     assert batches.docs == {}
     assert rows.docs == []
-    assert batches.deleted == [{"batch_key": "key-rollback"}]
+    assert len(batches.deleted) == 1
+    assert batches.deleted[0]["status"] == "PROCESSING"
     assert rows.deleted
 
 
@@ -333,7 +372,7 @@ def test_confirmation_uses_custom_quantities_and_allows_safe_excluded_rows(monke
         prodotti=FakeProducts([]),
     ))
 
-    body = server.AutoOrderConfermaIn(righe=[
+    body = server.AutoOrderConfermaIn(snapshot_key="snapshot-1", righe=[
         server.AutoOrderRigaIn(codice="A", quantita=5),
         server.AutoOrderRigaIn(codice="Y", quantita=3),
     ])
@@ -347,7 +386,8 @@ def test_confirmation_uses_custom_quantities_and_allows_safe_excluded_rows(monke
     ]
 
 
-def test_confirmation_rejects_anomalous_manual_row(monkeypatch):
+@pytest.mark.parametrize("code", ["X", "U", "P"])
+def test_confirmation_rejects_anomalous_manual_row(monkeypatch, code):
     monkeypatch.setattr(server, "auto_order", fake_ao_two_rows)
     monkeypatch.setattr(server, "db", SimpleNamespace(
         ordini_fornitore=FakeBatchCollection(),
@@ -356,8 +396,8 @@ def test_confirmation_rejects_anomalous_manual_row(monkeypatch):
     ))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(server.conferma_auto_order(server.AutoOrderConfermaIn(
-            righe=[server.AutoOrderRigaIn(codice="X", quantita=1)]
+        asyncio.run(server.conferma_auto_order(server.AutoOrderConfermaIn(snapshot_key="snapshot-1",
+            righe=[server.AutoOrderRigaIn(codice=code, quantita=1)]
         )))
 
     assert exc.value.status_code == 422
@@ -372,7 +412,7 @@ def test_confirmation_response_is_not_mutated_by_mongo_insert(monkeypatch):
         prodotti=FakeProducts([]),
     ))
 
-    result = asyncio.run(server.conferma_auto_order(server.AutoOrderConfermaIn(
+    result = asyncio.run(server.conferma_auto_order(server.AutoOrderConfermaIn(snapshot_key="snapshot-1",
         righe=[server.AutoOrderRigaIn(codice="A", quantita=2)]
     )))
 

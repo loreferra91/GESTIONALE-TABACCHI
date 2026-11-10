@@ -86,7 +86,7 @@ test("mostra i KPI economici della dashboard prima degli indicatori operativi", 
   expect(api.get).toHaveBeenCalledWith("/dashboard");
   expect(container.textContent).toContain("Totale acquistato (netto aggio 10%)");
   expect(container.textContent).toContain("1000,00 €");
-  expect(container.textContent).toContain("Base ultimo Excel");
+  expect(container.textContent).toContain("Base registrata");
   expect(container.textContent).toContain("900,00 €");
   expect(container.textContent).toContain("GODSERVICES38.xlsm");
   expect(container.textContent).toContain("02/10/2026");

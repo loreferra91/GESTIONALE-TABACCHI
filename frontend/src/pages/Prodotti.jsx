@@ -15,6 +15,10 @@ export default function Prodotti() {
   const [editing, setEditing] = useState(null);
   const [vendutiEditor, setVendutiEditor] = useState(null);
   const [savingVenduti, setSavingVenduti] = useState(false);
+  const [minimumEditor, setMinimumEditor] = useState(null);
+  const [savingMinimum, setSavingMinimum] = useState(false);
+  const [planningRows, setPlanningRows] = useState({});
+  const [planningAvailable, setPlanningAvailable] = useState(null);
   const [form, setForm] = useState({ codice: "", descrizione: "", categoria: "ACCESSORI", prezzo: "", giacenza_negozio: "" });
 
   const filtered = cat ? allRows.filter(r => r.categoria === cat) : allRows;
@@ -30,9 +34,21 @@ export default function Prodotti() {
 
   const load = async () => {
     setLoading(true);
-    const r = await api.get("/prodotti", { params: { limit: 5000 } });
-    setAllRows(r.data);
-    setLoading(false);
+    setPlanningAvailable(null);
+    const productsRequest = api.get("/prodotti", { params: { limit: 5000 } })
+      .then(response => setAllRows(response.data))
+      .catch(error => toast.error(apiErrorMessage(error, "Impossibile caricare i prodotti")))
+      .finally(() => setLoading(false));
+    const planningRequest = api.get("/auto-order", { timeout: 20000 })
+      .then(response => {
+        setPlanningRows(Object.fromEntries([...(response.data.righe || []), ...(response.data.esclusi || [])].map(row => [row.codice, row])));
+        setPlanningAvailable(true);
+      })
+      .catch(() => {
+        setPlanningRows({});
+        setPlanningAvailable(false);
+      });
+    await Promise.all([productsRequest, planningRequest]);
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
@@ -114,6 +130,37 @@ export default function Prodotti() {
     }
   };
 
+  const startMinimumEdit = row => setMinimumEditor({
+    codice: row.codice,
+    value: String(row.scorta_minima_negozio_auto_order || 0),
+    version: row.auto_order_version || 0,
+  });
+
+  const saveMinimum = async () => {
+    const value = Number(minimumEditor?.value);
+    if (!minimumEditor?.value.trim() || !Number.isInteger(value) || value < 0 || value > 100000) {
+      toast.error("Inserisci un numero intero tra 0 e 100000");
+      return;
+    }
+    setSavingMinimum(true);
+    try {
+      await api.patch(`/auto-order/prodotti/${encodeURIComponent(minimumEditor.codice)}/scorta-minima`, {
+        minimo: value, version: minimumEditor.version,
+      });
+      setMinimumEditor(null);
+      await load();
+      toast.success("Minimo operativo aggiornato; Auto-Order userà il nuovo valore");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Impossibile aggiornare il minimo operativo"));
+      if (error?.response?.status === 409) {
+        setMinimumEditor(null);
+        await load();
+      }
+    } finally {
+      setSavingMinimum(false);
+    }
+  };
+
   return (
     <Layout title="Prodotti" subtitle={`${rows.length} articoli`}>
       <Card className="p-4 mb-6">
@@ -143,6 +190,8 @@ export default function Prodotti() {
         </select>
         <span className="text-sm text-slate-500 self-center">{rows.length} risultati</span>
       </div>
+      <p className="mb-3 text-xs text-slate-600">Soglia e target sono calcolati dalle vendite WebApp e dai giorni di copertura; Auto-Order considera anche le forniture future affidabili. Il minimo operativo del negozio è facoltativo: 0 lascia lavorare solo l’algoritmo. La giacenza vending resta separata.</p>
+      {planningAvailable === false && !loading && <p className="mb-3 text-xs text-amber-700">Soglie calcolate temporaneamente non disponibili; i prodotti restano modificabili.</p>}
 
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
@@ -156,12 +205,15 @@ export default function Prodotti() {
                 <Th sortKey="prezzo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Prezzo</Th>
                 <Th sortKey="giacenza_negozio" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. negozio</Th>
                 <Th sortKey="giacenza_vending" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Giac. vending</Th>
+                <th className="text-right">Soglia totale calcolata</th>
+                <th className="text-right">Target totale calcolato</th>
+                <th className="text-right">Scorta minima negozio</th>
                 <th className="text-right">Venduti</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={9} className="text-center py-8 text-slate-400">Caricamento…</td></tr>}
+              {loading && <tr><td colSpan={12} className="text-center py-8 text-slate-400">Caricamento…</td></tr>}
               {rows.map((r, index) => (
                 <tr key={`${r.id || r.codice}-${index}`} data-testid={`prod-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
@@ -171,6 +223,15 @@ export default function Prodotti() {
                   <td className="font-mono text-right">{formatEur(r.prezzo)}</td>
                   <td className={`font-mono text-right ${r.giacenza_negozio < 0 ? 'text-red-600 font-bold' : ''}`}>{formatNum(r.giacenza_negozio)}</td>
                   <td className="font-mono text-right">{formatNum(r.giacenza_vending)}</td>
+                  <td className="font-mono text-right">{planningRows[r.codice] ? formatNum(planningRows[r.codice].punto_riordino) : "—"}</td>
+                  <td className="font-mono text-right">{planningRows[r.codice] ? formatNum(planningRows[r.codice].target_scorta) : "—"}</td>
+                  <td className="text-right">
+                    {planningAvailable === true && !planningRows[r.codice] ? <span className="text-slate-400">—</span> : minimumEditor?.codice === r.codice ? <div className="flex items-center justify-end gap-1">
+                      <input data-testid={`prod-minimum-input-${r.codice}`} type="number" min="0" step="1" value={minimumEditor.value} onChange={event => setMinimumEditor(current => ({ ...current, value: event.target.value }))} onKeyDown={event => { if (event.key === "Enter") saveMinimum(); if (event.key === "Escape") setMinimumEditor(null); }} className="w-20 rounded border px-2 py-1 text-right font-mono text-sm" aria-label={`Minimo operativo negozio ${r.descrizione}`} />
+                      <button type="button" onClick={saveMinimum} disabled={savingMinimum} className="rounded bg-slate-900 px-2 py-1 text-xs text-white disabled:opacity-50">Salva</button>
+                      <button type="button" onClick={() => setMinimumEditor(null)} disabled={savingMinimum} className="rounded border px-2 py-1 text-xs">Annulla</button>
+                    </div> : <button type="button" data-testid={`prod-minimum-edit-${r.codice}`} onClick={() => startMinimumEdit(r)} className="rounded px-2 py-1 font-mono hover:bg-slate-100" title="Modifica minimo operativo negozio">{formatNum(r.scorta_minima_negozio_auto_order || 0)} ✎</button>}
+                  </td>
                   <td className="font-mono text-right">
                     {vendutiEditor !== null && vendutiEditor.id === r.id ? (
                       <div className="ml-auto w-56 rounded-lg border border-slate-200 bg-white p-3 text-left font-sans shadow-lg" data-testid={`prod-venduti-editor-${r.codice}`}>

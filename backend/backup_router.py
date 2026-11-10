@@ -22,7 +22,7 @@ BACKUP_COLLECTIONS = [
     "vendite_bulk_imports", "versamenti", "prelievi_vending",
     "scontrini_vending", "cassa_vending_stato", "vending_accounting_snapshots",
     "vending_accounting_state", "vending_accounting_events", "cassa",
-    "ordini_fornitore", "ordini_fornitore_righe", "import_history", "adm_sync",
+    "ordini_fornitore", "ordini_fornitore_righe", "auto_order_import_state", "import_history", "adm_sync",
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
     "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
     "rettifiche_venduti", "reconciliation_cases", "audit_events",
@@ -35,7 +35,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "vending_accounting_events", "anomalie_ignorate", "smart_venue",
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
-    "audit_events",
+    "audit_events", "auto_order_import_state",
 }
 BACKUP_RETENTION_LIMIT = 3
 BACKUP_PARTIAL_RETENTION_LIMIT = 6
@@ -330,6 +330,30 @@ def create_backup_router(
             collections[collection_name] = [item["doc"] for item in items]
         return collections
 
+    async def load_restore_snapshot(meta: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """Load and verify the selected snapshot before retention can prune it."""
+        counts = meta.get("counts") or {}
+        names = [name for name in BACKUP_COLLECTIONS if name in counts]
+        if not names or len(names) != len(counts):
+            raise HTTPException(409, "Il backup selezionato non contiene collezioni valide")
+        collections = await backup_documents(meta["id"], names)
+        checksums = meta.get("checksums") or {}
+        for name in names:
+            documents = collections[name]
+            if len(documents) != counts[name]:
+                raise HTTPException(409, f"Backup incompleto: dati mancanti in {name}")
+            if name in checksums:
+                digest = hashlib.sha256()
+                for document in documents:
+                    digest.update(json.dumps(
+                        document, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), default=str,
+                    ).encode("utf-8"))
+                    digest.update(b"\n")
+                if not secrets.compare_digest(str(checksums[name]), digest.hexdigest()):
+                    raise HTTPException(409, f"Backup danneggiato: checksum non valido per {name}")
+        return collections
+
     def validate_backup_file(payload: Any) -> Dict[str, List[Dict[str, Any]]]:
         if not isinstance(payload, dict):
             raise HTTPException(422, "Il file di backup non contiene un oggetto JSON valido")
@@ -505,14 +529,13 @@ def create_backup_router(
             )
             if not meta:
                 raise HTTPException(404, "backup non trovato")
+            collections = await load_restore_snapshot(meta)
             pre_restore = await create_backup_snapshot(
                 f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
                 "pre-restore",
             )
-            names = [name for name in (meta.get("counts") or {}) if name in BACKUP_COLLECTIONS]
-            collections = await backup_documents(snapshot_id, names)
             await run_transactionally(lambda session: restore_collections(collections, session))
-            if "vending" in names:
+            if "vending" in collections:
                 await database.vending.update_many({}, {"$set": {
                     "giacenza_aggiornata_il": meta.get("created_at"),
                     "giacenza_sorgente": "BACKUP_RIPRISTINATO",
