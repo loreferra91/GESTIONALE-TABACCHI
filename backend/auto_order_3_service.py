@@ -5,12 +5,12 @@ from datetime import date, timedelta
 
 try:
     from .auto_order_planning import commercial_day
-    from .forecasting.demand_models import native_daily_series
+    from .forecasting.demand_models import NativeSalesAccumulator, native_daily_series
     from .forecasting.model_selection import choose_forecast
     from .replenishment.planning import plan_inventory
 except ImportError:  # direct ASGI module import from backend/
     from auto_order_planning import commercial_day
-    from forecasting.demand_models import native_daily_series
+    from forecasting.demand_models import NativeSalesAccumulator, native_daily_series
     from forecasting.model_selection import choose_forecast
     from replenishment.planning import plan_inventory
 
@@ -18,10 +18,21 @@ except ImportError:  # direct ASGI module import from backend/
 def compare_policies(active: dict, native_sales: list[dict]) -> dict:
     today = commercial_day(active.get("planning_day")) or date.today()
     first = today - timedelta(days=89)
-    observed = [commercial_day(row.get("data")) for row in native_sales]
-    observed = [day for day in observed if day and first <= day <= today]
-    available_days = min(90, (today - min(observed)).days + 1) if observed else 0
-    series, evidence = native_daily_series(native_sales, today, max(1, available_days))
+    if isinstance(native_sales, NativeSalesAccumulator):
+        # Cursor-backed input has already been reconciled incrementally.
+        first_observed = native_sales.first_observed
+        available_days = min(90, (today - first_observed).days + 1) if first_observed else 0
+        series, evidence = native_sales.finish()
+        # Match the historical baseline semantics: do not pad absent early days
+        # when the native event history begins less than 90 days ago.
+        for channels in series.values():
+            channels["NEGOZIO"] = channels["NEGOZIO"][-max(1, available_days):]
+            channels["VENDING"] = channels["VENDING"][-max(1, available_days):]
+    else:
+        observed = [commercial_day(row.get("data")) for row in native_sales]
+        observed = [day for day in observed if day and first <= day <= today]
+        available_days = min(90, (today - min(observed)).days + 1) if observed else 0
+        series, evidence = native_daily_series(native_sales, today, max(1, available_days))
     params = active.get("parametri") or {}
     short = int(active.get("finestra_breve_gg") or 10)
     long = int(active.get("finestra_lunga_gg") or 30)
@@ -63,13 +74,23 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
         except (TypeError, ValueError):
             lot = 1
             issues.append("LOTTO_NON_VALIDO")
+        vending_capacity = old.get("vending_capacity")
+        if vending_capacity is not None:
+            try:
+                capacity = int(vending_capacity)
+                if capacity < stock_vending or capacity < 0 or float(vending_capacity) != capacity:
+                    raise ValueError("inconsistent vending capacity")
+                vending_capacity = capacity
+            except (ValueError, TypeError):
+                issues.append("CAPACITA_VENDING_INCOERENTE")
+                vending_capacity = None
         plan = plan_inventory(
             today=today, shop_stock=stock_shop, vending_stock=stock_vending,
             demand_shop=shop["daily"], demand_vending=vending["daily"],
             receipts=old.get("ricezioni_previste") or [],
             minimum_shop=max(0, int(old.get("scorta_minima_negozio_auto_order") or 0)),
             lead_days=lead, review_days=review, lot=lot,
-            safety_factor=safety_factor,
+            safety_factor=safety_factor, vending_capacity=vending_capacity,
         )
         quality = "DATI_AMBIGUI" if issues else (
             "NESSUNA DOMANDA OSSERVATA" if sum(shop_history) + sum(vending_history) == 0 else
@@ -94,6 +115,7 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
                 minimum_shop=max(0, int(old.get("scorta_minima_negozio_auto_order") or 0)),
                 lead_days=lead, review_days=review,
                 lot=lot, safety_factor=safety_factor,
+                vending_capacity=vending_capacity,
             )
             return {"stockout_date": projected["predicted_stockout_date"],
                     "ending_stock": projected["expected_inventory_at_horizon"]}
@@ -103,7 +125,11 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
                    f"{plan['relevant_receipts']}; obiettivo {plan['order_up_to_level']}; "
                    f"fabbisogno netto {plan['net_requirement']}; lotto {lot}."]
         if plan["planned_vending_transfer"]:
-            reasons.append(f"Ricarica interna vending: {plan['planned_vending_transfer']} pezzi dal negozio.")
+            reasons.append(f"Ricariche interne vending pianificate: {plan['planned_vending_transfer']} pezzi dal negozio in più giorni; non sono movimenti eseguiti.")
+        if not plan["vending_capacity_known"] and vending["daily"] > 0:
+            reasons.append("Capacità vending non verificata: la simulazione dei trasferimenti è indicativa.")
+        if plan["intraday_demand_not_modelled"]:
+            reasons.append("Giacenza live: il consumo giornaliero completo è proiettato da domani; domanda residua odierna non stimata.")
         if plan["stockout_before_supplier_delivery"]:
             reasons.append("Rischio prima del lead time: anticipare la consegna o intervenire manualmente.")
         if issues:
