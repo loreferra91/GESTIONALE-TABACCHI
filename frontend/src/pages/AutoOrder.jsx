@@ -495,20 +495,20 @@ export default function AutoOrder() {
             <div>Da ricaricare vending <b>{comparison.summary.vending_refills}</b></div>
             <div>Quantità 2.0 <b>{formatNum(comparison.summary.pieces_2)}</b></div>
             <div>Quantità 3.1 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
-            {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.0 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
-            {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.0 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
+            {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.1 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
+            {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.1 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
             <div>Dati da verificare <b>{comparison.summary.insufficient_data}</b></div>
             <div>Costo noto 3.1 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
           </div>
           <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
           <div className="mt-3 max-h-80 overflow-y-auto rounded border">
             {comparison.rows.map(row => <details key={row.codice} className="border-b px-3 py-2 text-sm last:border-b-0" data-testid={`ao-comparison-${row.codice}`}>
-              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.0 {row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
+              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.1 {row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
               <div className="mt-2 space-y-1 text-slate-600">
                 <p>{row.motivazione}</p>
                 <p>Negozio {formatNum(row.domanda_negozio_gg, 2)}/gg · Vending {formatNum(row.domanda_vending_gg, 2)}/gg · Sicurezza {row.scorta_sicurezza} · Posizione {row.inventory_position} · Trasferimento vending {row.planned_vending_transfer}</p>
                 <p>Qualità: {row.qualita_previsione} · Classe: {row.classe_rotazione} · Modello negozio: {row.metodo_negozio} · Modello vending: {row.metodo_vending}</p>
-                {row.simulazione_2 && <p>Fine orizzonte 2.0: {formatNum(row.simulazione_2.ending_stock, 1)} pezzi; 3.0: {formatNum(row.simulazione_3.ending_stock, 1)} pezzi. Rischio 2.0: {row.simulazione_2.stockout_date || "nessuno"}; 3.0: {row.simulazione_3.stockout_date || "nessuno"}.</p>}
+                {row.simulazione_2 && <p>Fine orizzonte 2.0: {formatNum(row.simulazione_2.ending_stock, 1)} pezzi; 3.1: {formatNum(row.simulazione_3.ending_stock, 1)} pezzi. Rischio 2.0: {row.simulazione_2.stockout_date || "nessuno"}; 3.1: {row.simulazione_3.stockout_date || "nessuno"}.</p>}
                 {Object.keys(row.backtest_negozio || {}).length > 0 && <p>Backtest negozio MAE: {Object.entries(row.backtest_negozio).map(([name, score]) => `${name} ${score.mae}`).join(" · ")}</p>}
               </div>
             </details>)}
