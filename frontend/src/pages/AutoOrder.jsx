@@ -19,6 +19,8 @@ export default function AutoOrder() {
   const [error, setError] = useState("");
   const [comparison, setComparison] = useState(null);
   const [comparisonError, setComparisonError] = useState("");
+  const [orderPolicy, setOrderPolicy] = useState("AUTO_ORDER_2");
+  const orderPolicyRef = useRef(null);
   const [excludedCategories, setExcludedCategories] = useState([]);
   const [mostraEsclusi, setMostraEsclusi] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -57,9 +59,9 @@ export default function AutoOrder() {
   const lungoGg = data?.finestra_lunga_gg || 30;
   const snapshotKey = data?.snapshot_key || "";
   const draftSignature = JSON.stringify(allRighe.map(r => [r.codice, r.qta_da_ordinare]).sort((a, b) => a[0].localeCompare(b[0])));
-  const confirmationKey = `${snapshotKey}:${draftSignature}`;
+  const confirmationKey = `${orderPolicy}:${snapshotKey}:${orderPolicy === "AUTO_ORDER_3_1" ? comparison?.policy_snapshot_key || "" : ""}:${draftSignature}`;
   const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(confirmationKey));
-  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0 || (Number(row.quantita_in_arrivo || 0) > 0 && Number(row.qta_da_ordinare) > Number(row.quantita_integrativa_massima || 0)));
+  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0 || ((orderPolicy === "AUTO_ORDER_3_1" || Number(row.quantita_in_arrivo || 0) > 0) && Number(row.qta_da_ordinare) > Number(row.quantita_integrativa_massima || 0)));
   const pendingPieces = [...(data?.righe || []), ...(data?.esclusi || [])].reduce((sum, row) => sum + (Number(row.quantita_in_arrivo) || 0) + (Number(row.quantita_senza_data) || 0), 0);
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
@@ -68,6 +70,40 @@ export default function AutoOrder() {
     initial: "totale", dir: "desc",
     searchFields: ["codice", "descrizione", "categoria", "stato", "motivo"],
   });
+
+  const make31Draft = (nativeData, forecast) => {
+    const original = new Map([...(nativeData.righe || []), ...(nativeData.esclusi || [])].map(row => [row.codice, row]));
+    return (forecast?.rows || [])
+      .filter(row => Number(row.quantita_suggerita) > 0 && row.qualita_previsione === "OSSERVABILE" && !(row.anomalie || []).length)
+      .map(row => {
+        const source = original.get(row.codice);
+        if (!source || source.anomalia || (source.anomalie_riconciliazione || []).length || (source.anomalie_forniture || []).length || Number(source.quantita_senza_data || 0) > 0) return null;
+        const quantity = Number(row.quantita_suggerita);
+        return {
+          ...source, stato: "ORDINA ORA", qta_da_ordinare: quantity,
+          totale: Math.round(Number(source.prezzo || 0) * quantity * 100) / 100,
+          quantita_integrativa_massima: quantity, motivo: row.motivazione,
+        };
+      }).filter(Boolean);
+  };
+
+  const applyPolicy = (policy, forecast = comparison) => {
+    if (!data) return;
+    if (policy === "AUTO_ORDER_3_1" && !forecast?.operational_ready) {
+      toast.error("3.1 non attivabile: controlla parametri, storico e qualità dei dati");
+      return;
+    }
+    if (JSON.stringify(draftRows.map(row => [row.codice, row.qta_da_ordinare])) !== originalDraftRef.current &&
+        !window.confirm("La bozza corrente ha modifiche non salvate. Sostituirla con le proposte della politica selezionata?")) return;
+    const nextRows = policy === "AUTO_ORDER_3_1" ? make31Draft(data, forecast) : (data.righe || []);
+    orderPolicyRef.current = policy;
+    setOrderPolicy(policy);
+    draftRowsRef.current = nextRows;
+    originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
+    setDraftRows(nextRows);
+    setSavedBatchKey("");
+    setSavedConfirmationKey("");
+  };
 
   const load = useCallback(async (refresh = false) => {
     if (refresh && JSON.stringify(draftRowsRef.current.map(row => [row.codice, row.qta_da_ordinare])) !== originalDraftRef.current) {
@@ -79,21 +115,29 @@ export default function AutoOrder() {
     try {
       const r = await api.get("/auto-order", { timeout: 20000 });
       setData(r.data);
-      const nextRows = r.data.righe || [];
-      draftRowsRef.current = nextRows;
-      originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
-      setDraftRows(nextRows);
-      setSupplierChanged(false);
       const comparisonRequest = api.get("/auto-order/confronto", { timeout: 30000 })
-        .then(response => setComparison(response.data?.mode === "CONFRONTO_SENZA_CONFERMA" ? response.data : null))
-        .catch(() => { setComparison(null); setComparisonError("Confronto 3.0 temporaneamente non disponibile."); });
+        .then(response => response.data?.mode === "CONFRONTO_SENZA_CONFERMA" ? response.data : null)
+        .catch(() => { setComparisonError("Previsione 3.1 non disponibile: continua a usare 2.0."); return null; });
       try {
         const supplies = await api.get("/auto-order/forniture", { timeout: 20000 });
         setPendingOrders(Array.isArray(supplies.data) ? supplies.data : []);
       } catch {
         setPendingOrders([]);
       }
-      await comparisonRequest;
+      const forecast = await comparisonRequest;
+      setComparison(forecast);
+      const preferred = orderPolicyRef.current || (forecast?.operational_ready ? "AUTO_ORDER_3_1" : "AUTO_ORDER_2");
+      const selected = preferred === "AUTO_ORDER_3_1" && forecast?.operational_ready
+        ? "AUTO_ORDER_3_1" : "AUTO_ORDER_2";
+      orderPolicyRef.current = selected;
+      setOrderPolicy(selected);
+      const nextRows = selected === "AUTO_ORDER_3_1" ? make31Draft(r.data, forecast) : (r.data.righe || []);
+      draftRowsRef.current = nextRows;
+      originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
+      setDraftRows(nextRows);
+      setSavedBatchKey("");
+      setSavedConfirmationKey("");
+      setSupplierChanged(false);
     } catch (err) {
       const timedOut = err.code === "ECONNABORTED";
       const message = timedOut
@@ -112,6 +156,8 @@ export default function AutoOrder() {
     try {
       const r = await api.post("/auto-order/conferma", {
         snapshot_key: snapshotKey,
+        policy_version: orderPolicy,
+        policy_snapshot_key: orderPolicy === "AUTO_ORDER_3_1" ? comparison?.policy_snapshot_key : null,
         fornitore: supplierName.trim() || null,
         data_consegna_prevista: expectedDelivery || null,
         righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare })),
@@ -178,6 +224,10 @@ export default function AutoOrder() {
     if (savedBatchKey && savedConfirmationKey === confirmationKey) {
       params.set("batch_key", savedBatchKey);
     } else {
+      if (orderPolicy === "AUTO_ORDER_3_1") {
+        toast.error("Conferma prima l'ordine 3.1 per esportare un documento valido.");
+        return;
+      }
       params.set("snapshot_key", snapshotKey);
       params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare }))));
     }
@@ -200,7 +250,12 @@ export default function AutoOrder() {
     setDraftRows(rows => { const next = rows.filter(row => row.codice !== codice); draftRowsRef.current = next; return next; });
   };
 
-  const canManuallyAdd = row => Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
+  const canManuallyAdd = row => orderPolicy === "AUTO_ORDER_3_1"
+    ? Boolean(row && comparison?.operational_ready && !draftCodes.has(row.codice) &&
+        comparison.rows.some(candidate => candidate.codice === row.codice &&
+          candidate.quantita_suggerita > 0 && candidate.qualita_previsione === "OSSERVABILE" &&
+          !(candidate.anomalie || []).length))
+    : Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
     && (!Number(row.quantita_in_arrivo || 0) || (row.stato === "ORDINA ORA" && Number(row.quantita_integrativa_massima || 0) > 0))
     && !Number(row.quantita_senza_data || 0)
     && row.stato !== "ORDINE IN ARRIVO" && !excludedCategories.includes(row.categoria)
@@ -215,7 +270,12 @@ export default function AutoOrder() {
       toast.error(`Per ${row.descrizione} inserisci una quantità positiva multipla del lotto ${lotto}`);
       return;
     }
-    if (Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) {
+    const forecastMax = comparison?.rows?.find(item => item.codice === codice)?.quantita_suggerita;
+    if (orderPolicy === "AUTO_ORDER_3_1" && (forecastMax == null || quantity > Number(forecastMax))) {
+      toast.error(`La quantità massima 3.1 per ${row.descrizione} è ${forecastMax ?? 0}`);
+      return;
+    }
+    if (orderPolicy !== "AUTO_ORDER_3_1" && Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) {
       toast.error(`La quantità integrativa massima per ${row.descrizione} è ${row.quantita_integrativa_massima}`);
       return;
     }
@@ -224,6 +284,7 @@ export default function AutoOrder() {
       stato: "ORDINA ORA",
       motivo: `AGGIUNTO MANUALMENTE · ${row.motivo}`,
       qta_da_ordinare: quantity,
+      quantita_integrativa_massima: orderPolicy === "AUTO_ORDER_3_1" ? Number(forecastMax) : row.quantita_integrativa_massima,
       totale: Math.round(quantity * (row.prezzo || 0) * 100) / 100,
     }]; draftRowsRef.current = next; return next; });
     setSelectedToAdd("");
