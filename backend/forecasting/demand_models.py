@@ -11,23 +11,36 @@ except ImportError:  # direct ASGI module import from backend/
     from auto_order_planning import commercial_day
 
 
-def native_daily_series(documents: Iterable[dict[str, Any]], end: date, days: int = 90):
-    """Return daily channel series and evidence; dedupe only explicit event IDs.
+class NativeSalesAccumulator:
+    """Incremental 90-day index: O(products*days + unique explicit IDs) memory.
 
-    Two ordinary sales with the same product, time and quantity may be genuine,
-    so they are never collapsed by resemblance alone. Repeated CSV event keys
-    are collapsed and conflicting payloads are reported as ambiguous.
+    Stream the Mongo cursor without allocating a raw list of all transactions.
+    Explicit IDs remain in memory for cross-batch deduplication. Never infer
+    duplicates from matching product/time/amount alone.
     """
-    start = end - timedelta(days=days - 1)
-    totals = defaultdict(lambda: {"NEGOZIO": [0] * days, "VENDING": [0] * days})
-    evidence = defaultdict(lambda: {"issues": set(), "sale_days": set(), "sources": set(), "vending_sources_by_day": defaultdict(set)})
-    seen = {}
-    for doc in documents:
+
+    def __init__(self, end: date, days: int = 90):
+        if days < 1:
+            raise ValueError("days must be positive")
+        self.end = end
+        self.days = days
+        self.start = end - timedelta(days=days - 1)
+        self.first_observed: date | None = None
+        self.totals = defaultdict(lambda: {"NEGOZIO": [0] * days, "VENDING": [0] * days})
+        self.evidence = defaultdict(lambda: {
+            "issues": set(), "sale_days": set(), "sources": set(),
+            "vending_sources_by_day": defaultdict(set),
+        })
+        self.seen: dict[tuple, tuple] = {}
+
+    def add(self, doc: dict[str, Any]) -> None:
         code = str(doc.get("codice") or "").strip()
         day = commercial_day(doc.get("data"))
-        if not code or day is None or not start <= day <= end:
-            continue
-        info = evidence[code]
+        if not code or day is None or not self.start <= day <= self.end:
+            return
+        if self.first_observed is None or day < self.first_observed:
+            self.first_observed = day
+        info = self.evidence[code]
         source = str(doc.get("sorgente") or "").upper()
         channel = str(doc.get("canale") or "NEGOZIO").upper()
         event_key = str(doc.get("csv_event_key") or "") if source == "CSV_VENDING" else ""
@@ -37,44 +50,59 @@ def native_daily_series(documents: Iterable[dict[str, Any]], end: date, days: in
         if native_id:
             identity = ("NATIVE_ID", native_id)
             fingerprint = (code, day, channel, doc.get("quantita"))
-            if identity in seen:
-                info["issues"].add("ID_VENDITA_DUPLICATO" if seen[identity] == fingerprint
-                                   else "ID_VENDITA_CONFLITTUALE")
-                continue
-            seen[identity] = fingerprint
+            if identity in self.seen:
+                info["issues"].add(
+                    "ID_VENDITA_DUPLICATO" if self.seen[identity] == fingerprint
+                    else "ID_VENDITA_CONFLITTUALE"
+                )
+                return
+            self.seen[identity] = fingerprint
         if event_key:
             identity = (source, event_key)
             fingerprint = (code, day, channel, doc.get("quantita"))
-            if identity in seen:
-                if seen[identity] != fingerprint:
-                    info["issues"].add("CSV_EVENT_KEY_CONFLITTUALE")
-                else:
-                    info["issues"].add("CSV_EVENT_KEY_DUPLICATO")
-                continue
-            seen[identity] = fingerprint
+            if identity in self.seen:
+                info["issues"].add(
+                    "CSV_EVENT_KEY_CONFLITTUALE" if self.seen[identity] != fingerprint
+                    else "CSV_EVENT_KEY_DUPLICATO"
+                )
+                return
+            self.seen[identity] = fingerprint
         try:
             quantity = int(doc.get("quantita") or 0)
         except (ValueError, TypeError):
             info["issues"].add("QUANTITA_NON_VALIDA")
-            continue
+            return
         if quantity < 0:
             info["issues"].add("RETTIFICA_NEGATIVA")
-            continue
+            return
         if channel not in ("NEGOZIO", "VENDING"):
             info["issues"].add("CANALE_NON_RICONOSCIUTO")
-            continue
-        totals[code][channel][(day - start).days] += quantity
+            return
+        self.totals[code][channel][(day - self.start).days] += quantity
         if quantity:
             info["sale_days"].add(day.isoformat())
         info["sources"].add(source or "NON_SPECIFICATA")
         if channel == "VENDING":
             info["vending_sources_by_day"][day].add("CSV" if source == "CSV_VENDING" else "APP")
-    for info in evidence.values():
-        if any(len(sources) > 1 for sources in info["vending_sources_by_day"].values()):
-            info["issues"].add("VENDING_APP_CSV_POTENZIALMENTE_SOVRAPPOSTE")
-    return totals, {code: {"issues": sorted(info["issues"]),
-                           "sale_days": len(info["sale_days"]),
-                           "sources": sorted(info["sources"])} for code, info in evidence.items()}
+
+    def finish(self):
+        for info in self.evidence.values():
+            if any(len(sources) > 1 for sources in info["vending_sources_by_day"].values()):
+                info["issues"].add("VENDING_APP_CSV_POTENZIALMENTE_SOVRAPPOSTE")
+        return self.totals, {
+            code: {"issues": sorted(info["issues"]),
+                   "sale_days": len(info["sale_days"]),
+                   "sources": sorted(info["sources"])}
+            for code, info in self.evidence.items()
+        }
+
+
+def native_daily_series(documents: Iterable[dict[str, Any]], end: date, days: int = 90):
+    """Return daily channel series and quality evidence, deduping explicit keys."""
+    collector = NativeSalesAccumulator(end, days)
+    for document in documents:
+        collector.add(document)
+    return collector.finish()
 
 
 def baseline(history: list[int], short: int = 10, long: int = 30, weight: float = .7) -> float:
