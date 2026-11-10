@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import pytest
 
 from backend.auto_order_3_service import compare_policies
-from backend.forecasting.demand_models import native_daily_series
+from backend.forecasting.demand_models import NativeSalesAccumulator, native_daily_series
 from backend.forecasting.model_selection import choose_forecast, rolling_backtest, rotation_class
 from backend.replenishment.planning import plan_inventory
 
@@ -34,7 +34,7 @@ def test_late_delivery_does_not_count_as_today_stock_or_prevent_early_warning():
     result = plan(shop_stock=10, minimum_shop=0, demand_shop=4,
                   receipts=[{"data": "2026-11-16", "quantita": 20}],
                   lead_days=5, review_days=7)
-    assert result["predicted_stockout_date"] == "2026-11-12"
+    assert result["predicted_stockout_date"] == "2026-11-13"
     assert result["stockout_before_supplier_delivery"] is True
     assert result["next_delivery_date"] == "2026-11-16"
     assert result["order_quantity"] > 0
@@ -166,3 +166,97 @@ def test_invalid_product_lot_suspends_only_that_product():
     row = compare_policies(active, [])["rows"][0]
     assert row["quantita_suggerita"] == 0
     assert "LOTTO_NON_VALIDO" in row["anomalie"]
+
+
+
+def test_live_snapshot_does_not_resubtract_full_day_today():
+    result = plan(shop_stock=10, minimum_shop=0, demand_shop=4,
+                  receipts=[], lead_days=5, review_days=7)
+    assert result["forecast_first_full_day"] == "2026-11-11"
+    assert result["predicted_stockout_date"] == "2026-11-13"
+    assert result["intraday_demand_not_modelled"] is True
+    assert result["expected_inventory_at_horizon"] >= 0
+
+
+def test_vending_can_be_refilled_again_after_supplier_delivery():
+    result = plan(shop_stock=0, vending_stock=1, minimum_shop=0,
+                  demand_vending=2, lead_days=2, review_days=5,
+                  receipts=[{"data": "2026-11-12", "quantita": 20}],
+                  vending_capacity=5)
+    schedule = result["vending_transfer_schedule"]
+    assert len(schedule) >= 2
+    assert schedule[0]["data"] == "2026-11-12"
+    assert schedule[0]["quantita"] == 5
+    assert sum(item["quantita"] for item in schedule) == result["planned_vending_transfer"]
+    assert max(item["quantita"] for item in schedule) <= 5
+    assert result["vending_capacity_known"] is True
+    # The missing vending sale on 11 November is a lost sale, never a
+    # fictitious negative inventory to be carried into the next delivery.
+    assert result["vending_stockout_date"] == "2026-11-11"
+
+
+def test_incremental_native_sales_match_batch_aggregation():
+    native = [
+        {"id": "one", "codice": "P", "data": "2026-11-09", "canale": "NEGOZIO",
+         "quantita": 4},
+        {"id": "two", "codice": "P", "data": "2026-11-10", "canale": "VENDING",
+         "sorgente": "CSV_VENDING", "csv_event_key": "csv-1", "quantita": 2},
+        {"id": "two", "codice": "P", "data": "2026-11-10", "canale": "VENDING",
+         "sorgente": "CSV_VENDING", "csv_event_key": "csv-1", "quantita": 2},
+    ]
+    collector = NativeSalesAccumulator(TODAY, 90)
+    for event in native:
+        collector.add(event)
+    old_series, old_evidence = native_daily_series(native, TODAY, 90)
+    new_series, new_evidence = collector.finish()
+    assert new_series == old_series
+    assert new_evidence == old_evidence
+    assert collector.first_observed == date(2026, 11, 9)
+
+
+def test_streamed_vs_materialized_comparison_agree():
+    active = {
+        "planning_day": TODAY.isoformat(),
+        "finestra_breve_gg": 10, "finestra_lunga_gg": 30,
+        "peso_breve": .7, "fattore_sicurezza": 1.15,
+        "parametri": {"AUTO_ORDER_LEAD_TIME_GG": 3,
+                      "AUTO_ORDER_REVIEW_PERIOD_GG": 10},
+        "righe": [], "esclusi": [
+            {"codice": "P", "descrizione": "P",
+             "giacenza_negozio": 5, "giacenza_vending": 0,
+             "lotto_ordine": 1, "qta_da_ordinare": 0}
+        ],
+    }
+    native = [
+        {"id": str(i), "codice": "P",
+         "data": (TODAY - timedelta(days=i)).isoformat(),
+         "canale": "NEGOZIO", "quantita": 1}
+        for i in range(90)
+    ]
+    collector = NativeSalesAccumulator(TODAY, 90)
+    for event in native:
+        collector.add(event)
+    assert compare_policies(active, collector) == compare_policies(active, native)
+
+
+def test_vending_capacity_is_respected_and_inconsistent_capacity_suspends():
+    refill = plan(shop_stock=100, vending_stock=0, minimum_shop=0,
+                  demand_vending=2, lead_days=2, review_days=12,
+                  vending_capacity=5)
+    assert refill["vending_transfer_schedule"][0]["quantita"] == 5
+    assert len(refill["vending_transfer_schedule"]) > 1
+    assert refill["planned_vending_transfer"] == 28
+    with pytest.raises(ValueError):
+        plan(shop_stock=10, vending_stock=6, vending_capacity=5)
+
+    active = {
+        "planning_day": TODAY.isoformat(), "parametri": {},
+        "righe": [], "esclusi": [
+            {"codice": "P", "descrizione": "P", "giacenza_negozio": 10,
+             "giacenza_vending": 6, "vending_capacity": 5,
+             "lotto_ordine": 1, "qta_da_ordinare": 0}
+        ],
+    }
+    row = compare_policies(active, [])["rows"][0]
+    assert "CAPACITA_VENDING_INCOERENTE" in row["anomalie"]
+    assert row["quantita_suggerita"] == 0
