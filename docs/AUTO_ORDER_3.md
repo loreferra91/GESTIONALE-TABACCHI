@@ -1,9 +1,12 @@
 # Auto-Order 3.0 — confronto controllato
 
-Stato: **motore sperimentale in sola lettura**. `GET /api/auto-order/confronto`
-calcola 2.0 e 3.0 sugli stessi prodotti e sulle vendite native `vendite`, ma
-`POST /api/auto-order/conferma`, PDF ed Excel continuano a usare 2.0. Il nuovo
-motore non è un interruttore di produzione e non scrive in MongoDB.
+Stato aggiornato (3.1): **previsione in sola lettura; conferma manuale con opt-in controllato**.
+`GET /api/auto-order/confronto` calcola il confronto 2.0/3.1 senza scrivere
+nel database. `POST /api/auto-order/conferma` può confermare una proposta 3.1
+soltanto se l'operatore ha abilitato esplicitamente la politica, configurato
+i tempi del fornitore, e lo snapshot/qualità sono validati nuovamente lato server.
+Altrimenti resta disponibile la conferma della politica 2.0. Nessun ordine
+viene creato automaticamente dal solo calcolo.
 
 ## Fonti e qualità
 
@@ -210,3 +213,75 @@ su uno staging isolato con evidenza documentale prima del taglio definitivo.
 - Registrare e validare le baseline contabili senza supposizioni.
 
 In mancanza di tali verifiche: **PASS CON RISERVE, non pronto per produzione**.
+
+
+## Passaggio operativo 3.1 — attivazione controllata
+
+La **policy attiva dell'ordine** è distinta dalla modalità di confronto.
+Il frontend sceglie 3.1 come bozza predefinita soltanto quando l'API restituisce
+`operational_ready=true`, altrimenti usa e segnala 2.0. L'operatore può
+selezionare esplicitamente il fallback 2.0; non cambia le quantità dell'ordine
+già salvato.
+
+### Prerequisiti obbligatori
+
+Configurare nella pagina Parametri soltanto valori aziendali reali:
+
+- `AUTO_ORDER_LEAD_TIME_GG`: giorni reali necessari al fornitore, interi >0
+- `AUTO_ORDER_REVIEW_PERIOD_GG`: giorni reali fra opportunità di riordino, interi >0
+- `AUTO_ORDER_3_1_ENABLED`: 1 abilita la conferma 3.1; 0 la blocca (default sicuro)
+
+Devono inoltre risultare `data_quality=DATI_AFFIDABILI` e almeno 60 giorni
+di storico nativo osservabile nella finestra di 90 giorni. Lo storico non prova
+la completezza dei flussi; il controllo operativo resta necessario.
+
+Gli articoli con quantità proposta positiva, qualità `OSSERVABILE`, senza
+anomalie, possono essere inclusi. Un articolo senza dati sufficienti o con
+forniture ambigue resta escluso da 3.1 e richiede un controllo esplicito.
+Il programma non sostituisce automaticamente una quantità 3.1 non verificata
+con una 2.0, anche quando la categoria risulta già selezionata.
+
+### Contratto di conferma
+
+La conferma continua a usare `POST /api/auto-order/conferma`.
+Un ordine 3.1 include:
+
+```json
+{
+  "policy_version": "AUTO_ORDER_3_1",
+  "snapshot_key": "auto-order:...",
+  "policy_snapshot_key": "auto-order-3-1:...",
+  "righe": [{"codice": "CODICE_PRODOTTO", "quantita": 10}]
+}
+```
+
+`policy_snapshot_key` è restituita dal confronto e incorpora il
+precedente snapshot operativo 2.0, la configurazione e i risultati della
+previsione. Il backend **ricalcola** il confronto nativo prima di accettare
+l'ordine, non si fida delle quantità inviate dal browser e verifica:
+
+- attivazione esplicita, lead time, review period, qualità e giorni storici
+- snapshot 2.0 e 3.1 ancora correnti
+- prodotto ordinabile e senza anomalie
+- quantità positiva, multipla del lotto e non superiore al suggerimento 3.1
+- versione prodotto, giacenza e prezzo tramite CAS
+- chiave idempotente e transazione/rollback esistenti
+
+Le righe salvate contengono `policy_version`, `quantita_3_1_massima`,
+`modello_negozio` e `modello_vending` per riconciliazione e audit.
+PDF/Excel di un ordine 3.1 vengono esportati soltanto **dopo** la conferma
+dal batch salvato; non è consentito esportare una bozza tramite il validatore
+2.0 con quantità potenzialmente differenti.
+
+### Non coperto
+
+La presenza di test unitari e mock MongoDB non certifica la correttezza
+dei tempi del fornitore, la completezza reale dello storico, la qualità
+di tutte le colonne vending o la disponibilità del database in produzione.
+I 25 test di certificazione che richiedono un backend/replica set isolato
+restano separati dalla CI ordinaria. Prima di considerare 3.1 certificato
+sono necessari confronto storico su staging e prova transazionale Atlas.
+
+Per disattivare in ogni momento nuove **conferme** 3.1:
+impostare `AUTO_ORDER_3_1_ENABLED=0`. Gli ordini 3.1 già confermati
+restano storicizzati e ricevibili, senza cancellazioni o riconteggi.
