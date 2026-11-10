@@ -1317,6 +1317,8 @@ def create_auto_order_router(
     return {
         "router": router,
         "auto_order": auto_order,
+        "confronto_auto_order": confronto_auto_order,
+        "build_comparison": build_comparison,
         "list_forniture": list_forniture,
         "carichi_esistenti": carichi_esistenti,
         "chiudi_con_carico": chiudi_con_carico,
