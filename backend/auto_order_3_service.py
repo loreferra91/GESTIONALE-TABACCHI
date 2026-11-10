@@ -90,7 +90,7 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
             today=today, shop_stock=stock_shop, vending_stock=stock_vending,
             demand_shop=shop["daily"], demand_vending=vending["daily"],
             receipts=old.get("ricezioni_previste") or [],
-            minimum_shop=max(0, int(old.get("scorta_minima_negozio_auto_order") or 0)),
+            minimum_shop=max(0, int(old.get("scorta_minima_negozio_auto_order") or 0), int(old.get("scorta_riservata") or 0)),
             lead_days=lead, review_days=review, lot=lot,
             safety_factor=safety_factor, vending_capacity=vending_capacity,
         )
@@ -114,7 +114,7 @@ def compare_policies(active: dict, native_sales: list[dict]) -> dict:
                 today=today, shop_stock=stock_shop, vending_stock=stock_vending,
                 demand_shop=shop["daily"], demand_vending=vending["daily"],
                 receipts=simulated_receipts,
-                minimum_shop=max(0, int(old.get("scorta_minima_negozio_auto_order") or 0)),
+                minimum_shop=max(0, int(old.get("scorta_minima_negozio_auto_order") or 0), int(old.get("scorta_riservata") or 0)),
                 lead_days=lead, review_days=review,
                 lot=lot, safety_factor=safety_factor,
                 vending_capacity=vending_capacity,
