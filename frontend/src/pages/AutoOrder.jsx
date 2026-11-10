@@ -17,6 +17,8 @@ export default function AutoOrder() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [comparison, setComparison] = useState(null);
+  const [comparisonError, setComparisonError] = useState("");
   const [excludedCategories, setExcludedCategories] = useState([]);
   const [mostraEsclusi, setMostraEsclusi] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -34,10 +36,13 @@ export default function AutoOrder() {
   const [selectedToAdd, setSelectedToAdd] = useState("");
   const [productSearch, setProductSearch] = useState("");
   const [manualQuantity, setManualQuantity] = useState("");
+  const [acknowledgePartial, setAcknowledgePartial] = useState(false);
+  const [partialReason, setPartialReason] = useState("");
   const draftRowsRef = useRef([]);
   const originalDraftRef = useRef("[]");
   const allRighe = draftRows.filter(row => !excludedCategories.includes(row.categoria));
   const allEsclusi = data?.esclusi || [];
+  const sourceRows = [...(data?.righe || []), ...allEsclusi];
   const categorieDisponibili = Array.from(new Set([...draftRows, ...allEsclusi].map(r => r.categoria).filter(Boolean))).sort();
   const ordiniCategoria = allRighe;
   const draftCodes = new Set(draftRows.map(r => r.codice));
@@ -54,7 +59,7 @@ export default function AutoOrder() {
   const draftSignature = JSON.stringify(allRighe.map(r => [r.codice, r.qta_da_ordinare]).sort((a, b) => a[0].localeCompare(b[0])));
   const confirmationKey = `${snapshotKey}:${draftSignature}`;
   const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(confirmationKey));
-  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0);
+  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0 || (Number(row.quantita_in_arrivo || 0) > 0 && Number(row.qta_da_ordinare) > Number(row.quantita_integrativa_massima || 0)));
   const pendingPieces = [...(data?.righe || []), ...(data?.esclusi || [])].reduce((sum, row) => sum + (Number(row.quantita_in_arrivo) || 0) + (Number(row.quantita_senza_data) || 0), 0);
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
@@ -70,6 +75,7 @@ export default function AutoOrder() {
     }
     setLoading(true);
     setError("");
+    setComparisonError("");
     try {
       const r = await api.get("/auto-order", { timeout: 20000 });
       setData(r.data);
@@ -78,12 +84,16 @@ export default function AutoOrder() {
       originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
       setDraftRows(nextRows);
       setSupplierChanged(false);
+      const comparisonRequest = api.get("/auto-order/confronto", { timeout: 30000 })
+        .then(response => setComparison(response.data?.mode === "CONFRONTO_SENZA_CONFERMA" ? response.data : null))
+        .catch(() => { setComparison(null); setComparisonError("Confronto 3.0 temporaneamente non disponibile."); });
       try {
         const supplies = await api.get("/auto-order/forniture", { timeout: 20000 });
         setPendingOrders(Array.isArray(supplies.data) ? supplies.data : []);
       } catch {
         setPendingOrders([]);
       }
+      await comparisonRequest;
     } catch (err) {
       const timedOut = err.code === "ECONNABORTED";
       const message = timedOut
@@ -105,6 +115,8 @@ export default function AutoOrder() {
         fornitore: supplierName.trim() || null,
         data_consegna_prevista: expectedDelivery || null,
         righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare })),
+        conferma_dati_parziali: acknowledgePartial,
+        motivo_deroga: acknowledgePartial ? partialReason.trim() : null,
       });
       if (snapshotKey) setConfirmedKeys(keys => new Set(keys).add(confirmationKey));
       setSavedBatchKey(r.data.batch_key || "");
@@ -189,17 +201,22 @@ export default function AutoOrder() {
   };
 
   const canManuallyAdd = row => Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
-    && !Number(row.quantita_in_arrivo || 0) && !Number(row.quantita_senza_data || 0)
+    && (!Number(row.quantita_in_arrivo || 0) || (row.stato === "ORDINA ORA" && Number(row.quantita_integrativa_massima || 0) > 0))
+    && !Number(row.quantita_senza_data || 0)
     && row.stato !== "ORDINE IN ARRIVO" && !excludedCategories.includes(row.categoria)
     && !draftCodes.has(row.codice));
 
   const addRow = (codice = selectedToAdd, requestedQuantity = manualQuantity) => {
-    const row = allEsclusi.find(item => item.codice === codice);
+    const row = sourceRows.find(item => item.codice === codice);
     if (!canManuallyAdd(row)) return;
     const quantity = Number(requestedQuantity);
     const lotto = Math.max(1, Number(row.lotto_ordine) || 1);
     if (!Number.isInteger(quantity) || quantity <= 0 || quantity % lotto !== 0) {
       toast.error(`Per ${row.descrizione} inserisci una quantità positiva multipla del lotto ${lotto}`);
+      return;
+    }
+    if (Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) {
+      toast.error(`La quantità integrativa massima per ${row.descrizione} è ${row.quantita_integrativa_massima}`);
       return;
     }
     setDraftRows(rows => { const next = [...rows, {
@@ -217,7 +234,7 @@ export default function AutoOrder() {
   const productSearchResults = (() => {
     const search = productSearch.trim().toLocaleLowerCase("it");
     if (!search || selectedToAdd) return [];
-    return [...new Map([...allEsclusi, ...draftRows].map(row => [row.codice, row])).values()]
+    return [...new Map([...sourceRows, ...draftRows].map(row => [row.codice, row])).values()]
       .filter(row => [row.codice, row.descrizione, row.categoria]
         .some(value => String(value || "").toLocaleLowerCase("it").includes(search)))
       .sort((a, b) => {
@@ -384,7 +401,7 @@ export default function AutoOrder() {
               <Plus size={16} /> Aggiungi all’ordine
             </button>
           </div>
-          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. La giacenza positiva non impedisce l’aggiunta; le anomalie e le forniture già pendenti richiedono verifica.</p>
+          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. Una fornitura datata consente un ordine integrativo soltanto per il fabbisogno netto residuo; le forniture senza data affidabile richiedono verifica.</p>
         </div>
       </Card>
 
@@ -394,6 +411,40 @@ export default function AutoOrder() {
           <button onClick={load} disabled={loading} className="font-semibold underline disabled:opacity-40">Riprova</button>
         </div>
       )}
+
+      <Card className="mb-4 p-4" data-testid="ao-planning-comparison">
+        <h2 className="text-lg font-bold text-slate-900">Previsione e pianificazione</h2>
+        <p className="mt-1 text-sm text-slate-600">Confronto senza effetti sul magazzino: gli ordini reali continuano a usare Auto-Order 2.0. La proposta 3.0 usa solo vendite WebApp e simula arrivi, consumo e ricariche vending.</p>
+        {comparisonError && <p className="mt-2 text-sm text-amber-700">{comparisonError}</p>}
+        {comparison && <>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
+            <div>Rischio esaurimento <b>{comparison.summary.stockout_risk}</b></div>
+            <div>Ordini integrativi <b>{comparison.summary.supplementary_orders}</b></div>
+            <div>Già in arrivo <b>{comparison.summary.already_on_order}</b></div>
+            <div>Da ricaricare vending <b>{comparison.summary.vending_refills}</b></div>
+            <div>Quantità 2.0 <b>{formatNum(comparison.summary.pieces_2)}</b></div>
+            <div>Quantità 3.0 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
+            {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.0 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
+            {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.0 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
+            <div>Dati da verificare <b>{comparison.summary.insufficient_data}</b></div>
+            <div>Costo noto 3.0 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
+          </div>
+          <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
+          <div className="mt-3 max-h-80 overflow-y-auto rounded border">
+            {comparison.rows.map(row => <details key={row.codice} className="border-b px-3 py-2 text-sm last:border-b-0" data-testid={`ao-comparison-${row.codice}`}>
+              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.0 {row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
+              <div className="mt-2 space-y-1 text-slate-600">
+                <p>{row.motivazione}</p>
+                <p>Negozio {formatNum(row.domanda_negozio_gg, 2)}/gg · Vending {formatNum(row.domanda_vending_gg, 2)}/gg · Sicurezza {row.scorta_sicurezza} · Posizione {row.inventory_position} · Trasferimento vending {row.planned_vending_transfer}</p>
+                <p>Qualità: {row.qualita_previsione} · Classe: {row.classe_rotazione} · Modello negozio: {row.metodo_negozio} · Modello vending: {row.metodo_vending}</p>
+                {row.simulazione_2 && <p>Fine orizzonte 2.0: {formatNum(row.simulazione_2.ending_stock, 1)} pezzi; 3.0: {formatNum(row.simulazione_3.ending_stock, 1)} pezzi. Rischio 2.0: {row.simulazione_2.stockout_date || "nessuno"}; 3.0: {row.simulazione_3.stockout_date || "nessuno"}.</p>}
+                {Object.keys(row.backtest_negozio || {}).length > 0 && <p>Backtest negozio MAE: {Object.entries(row.backtest_negozio).map(([name, score]) => `${name} ${score.mae}`).join(" · ")}</p>}
+              </div>
+            </details>)}
+          </div>
+          {Object.keys(comparison.summary.forecast_errors_by_class || {}).length > 0 && <p className="mt-2 text-xs text-slate-500">MAE medio negozio per classe: {Object.entries(comparison.summary.forecast_errors_by_class).map(([name, score]) => `${name} ${score.mean_shop_mae} (${score.products})`).join(" · ")}</p>}
+        </>}
+      </Card>
 
       <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
@@ -476,6 +527,7 @@ export default function AutoOrder() {
         title="Confermare Auto-Order?"
         confirmLabel="Crea ordine fornitore"
         loading={confirming}
+        confirmDisabled={data?.data_quality === "DATI_PARZIALI" && (!acknowledgePartial || partialReason.trim().length < 10)}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={conferma}
       >
@@ -484,6 +536,11 @@ export default function AutoOrder() {
           <label className="text-sm">Fornitore <input value={supplierName} onChange={event => setSupplierName(event.target.value)} maxLength={120} placeholder="Nome fornitore (facoltativo)" className="mt-1 w-full rounded border px-2 py-1" /></label>
           <label className="text-sm">Consegna prevista <input type="date" value={expectedDelivery} onChange={event => setExpectedDelivery(event.target.value)} className="mt-1 w-full rounded border px-2 py-1" /></label>
         </div>
+        {data?.data_quality === "DATI_PARZIALI" && <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+          <p className="font-semibold">Fonti parziali: verifica i dati prima dell’ordine.</p>
+          <label className="mt-2 flex items-center gap-2"><input type="checkbox" checked={acknowledgePartial} onChange={event => setAcknowledgePartial(event.target.checked)} /> Confermo di aver verificato le fonti</label>
+          <label className="mt-2 block">Motivo della deroga<input data-testid="ao-partial-reason" value={partialReason} onChange={event => setPartialReason(event.target.value)} maxLength={500} className="mt-1 w-full rounded border px-2 py-1" placeholder="Indica la verifica svolta (almeno 10 caratteri)" /></label>
+        </div>}
         <p className="mt-2 text-slate-600">Questa azione non carica il magazzino: le giacenze aumentano solo dalla pagina <b>Carico Merce</b> quando la merce arriva fisicamente.</p>
       </ConfirmDialog>
     </Layout>

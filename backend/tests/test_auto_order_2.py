@@ -375,6 +375,60 @@ def test_product_shop_minimum_does_not_duplicate_dated_incoming_supply(isolated_
     assert row["qta_da_ordinare"] == 0
 
 
+def test_integrative_order_is_confirmed_only_for_net_shortage(isolated_database):
+    """The old selector rejected P solely because a dated 20-piece order existed."""
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def scenario():
+        await db.ordini_fornitore.create_index("batch_key", unique=True)
+        await db.prodotti.insert_one({
+            "id": "product", "codice": "P", "descrizione": "P", "categoria": "SIGARETTE",
+            "giacenza_negozio": 10, "prezzo": 5, "scorta_minima_negozio_auto_order": 60,
+        })
+        await db.ordini_fornitore.insert_one({
+            "id": "pending", "batch_key": "pending", "stato": "INVIATO", "status": "COMPLETED",
+            "data_consegna_prevista": (today + timedelta(days=2)).isoformat(),
+        })
+        await db.ordini_fornitore_righe.insert_one({
+            "id": "pending-line", "batch_key": "pending", "codice": "P", "quantita": 20,
+            "quantita_ordinata": 20, "quantita_ricevuta": 0, "stato": "INVIATO",
+        })
+        proposal = await server.auto_order()
+        row = next(row for row in proposal["righe"] if row["codice"] == "P")
+        with pytest.raises(HTTPException) as excessive:
+            server._auto_order_selected_rows(proposal, [server.AutoOrderRigaIn(codice="P", quantita=40)])
+        with pytest.raises(HTTPException) as missing_override:
+            await server.conferma_auto_order(server.AutoOrderConfermaIn(
+                snapshot_key=proposal["snapshot_key"], idempotency_key="without-override",
+                righe=[server.AutoOrderRigaIn(codice="P", quantita=30)],
+            ))
+        assert missing_override.value.status_code == 422
+        body = server.AutoOrderConfermaIn(
+            snapshot_key=proposal["snapshot_key"], idempotency_key="integrative-P",
+            data_consegna_prevista=today + timedelta(days=3),
+            conferma_dati_parziali=True, motivo_deroga="Giacenza fisica verificata in negozio",
+            righe=[server.AutoOrderRigaIn(codice="P", quantita=30)],
+        )
+        saved = await server.conferma_auto_order(body)
+        after = await server.auto_order()
+        with pytest.raises(HTTPException) as duplicate:
+            server._auto_order_selected_rows(after, [server.AutoOrderRigaIn(codice="P", quantita=10)])
+        return row, excessive.value.status_code, saved, after, duplicate.value.status_code, await db.ordini_fornitore_righe.find_one({"batch_key": "integrative-P"}), await db.audit_events.find_one({"idempotency_key": "integrative-P"})
+
+    row, excessive, saved, after, duplicate, line, audit = asyncio.run(scenario())
+    assert row["quantita_in_arrivo"] == 20
+    assert row["fabbisogno_grezzo"] == 30
+    assert row["quantita_integrativa_massima"] == 30
+    assert row["qta_da_ordinare"] == 30
+    assert excessive == 422 and duplicate == 422
+    assert saved["status"] == "COMPLETED" and line["quantita"] == 30
+    assert audit["azione"] == "DEROGA_QUALITA_DATI"
+    after_row = next(row for row in after["esclusi"] if row["codice"] == "P")
+    assert after_row["quantita_in_arrivo"] == 50
+    assert after_row["quantita_senza_data"] == 0
+
+
 def test_manual_selection_allows_positive_stock_and_review_without_pending_supply():
     proposal = {
         "righe": [],

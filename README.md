@@ -2,6 +2,8 @@
 
 La progettazione, le formule, le API e le procedure di Auto-Order 2.0 sono in
 [`docs/AUTO_ORDER_2.md`](docs/AUTO_ORDER_2.md).
+Il confronto sperimentale e in sola lettura con Auto-Order 3.0 è documentato
+in [`docs/AUTO_ORDER_3.md`](docs/AUTO_ORDER_3.md); le conferme restano su 2.0.
 
 Gestionale full stack per prodotti, magazzino, vending, vendite, ordini e cassa.
 La WebApp e MongoDB sono la fonte operativa: Auto-Order usa solo le vendite

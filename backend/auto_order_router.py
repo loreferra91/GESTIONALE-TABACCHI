@@ -16,8 +16,10 @@ from pymongo.errors import DuplicateKeyError
 
 try:
     from .auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
+    from .auto_order_3_service import compare_policies
 except ImportError:  # pragma: no cover
     from auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
+    from auto_order_3_service import compare_policies
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -32,6 +34,8 @@ class AutoOrderConfermaIn(BaseModel):
     fornitore: Optional[str] = Field(default=None, max_length=120)
     data_consegna_prevista: Optional[date] = None
     righe: Optional[List[AutoOrderRigaIn]] = None
+    conferma_dati_parziali: bool = False
+    motivo_deroga: Optional[str] = Field(default=None, max_length=500)
 
 
 class FornituraUpdateIn(BaseModel):
@@ -570,6 +574,7 @@ def create_auto_order_router(
                 "codice": codice,
                 "descrizione": prodotto.get("descrizione", ""),
                 "categoria": prodotto.get("categoria", ""),
+                "data_creazione_prodotto": prodotto.get("created_at"),
                 "stato": stato,
                 "anomalia": anomalia,
                 "anomalie_forniture": supply_anomalies,
@@ -615,6 +620,7 @@ def create_auto_order_router(
                 "scorta_sicurezza": scorta_sicurezza,
                 "scorta_riservata": reserve,
                 "fabbisogno_grezzo": fabbisogno_grezzo,
+                "quantita_integrativa_massima": rounded_order_quantity(fabbisogno_grezzo, lotto) if incoming and not undated and stato == "ORDINA ORA" else 0,
                 "quantita_in_arrivo": incoming,
                 "quantita_senza_data": undated,
                 "ricezioni_previste": receipts,
@@ -693,6 +699,23 @@ def create_auto_order_router(
         response["snapshot_key"] = auto_order_snapshot_key(response)
         return response
 
+    @router.get("/auto-order/confronto")
+    async def confronto_auto_order():
+        """Read-only 2.0/3.0 comparison; this route cannot confirm an order."""
+        ao = await get_auto_order()
+        db = get_database()
+        today = commercial_day(ao.get("planning_day")) or datetime.now(ROME).date()
+        first = today - timedelta(days=90)
+        last = today + timedelta(days=2)
+        documents = await db.vendite.find({"$or": [
+            {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
+            {"data": {"$regex": r"^\d{2}[/\-]\d{2}[/\-]\d{4}"}},
+        ]}, {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1, "canale": 1,
+             "sorgente": 1, "csv_event_key": 1}).to_list(50001)
+        if len(documents) > 50000:
+            raise HTTPException(503, "Storico nativo oltre il limite di confronto: usare un periodo indicizzato")
+        return compare_policies(ao, documents)
+
     def auto_order_selected_rows(
         ao: Dict[str, Any], requested: Optional[List[AutoOrderRigaIn]] = None
     ) -> List[Dict[str, Any]]:
@@ -709,8 +732,9 @@ def create_auto_order_router(
             row["codice"]: row
             for row in [*ao.get("righe", []), *ao.get("esclusi", [])]
             if row.get("codice") and not row.get("anomalia") and not row.get("anomalie_riconciliazione")
-            and int(row.get("quantita_in_arrivo") or 0) == 0
             and int(row.get("quantita_senza_data") or 0) == 0
+            and (int(row.get("quantita_in_arrivo") or 0) == 0
+                 or (row.get("stato") == "ORDINA ORA" and int(row.get("quantita_integrativa_massima") or 0) > 0))
             and row.get("stato") != "ORDINE IN ARRIVO"
         }
         seen = set()
@@ -729,6 +753,8 @@ def create_auto_order_router(
                 lower = (quantity // max(1, lot)) * lot
                 upper = lower + max(1, lot)
                 raise HTTPException(422, f"Quantità {quantity} non multipla del lotto {lot} per {codice}. Valori validi: {lower} o {upper}.")
+            if int(row.get("quantita_in_arrivo") or 0) > 0 and quantity > int(row.get("quantita_integrativa_massima") or 0):
+                raise HTTPException(422, f"Quantità integrativa {quantity} superiore al fabbisogno netto arrotondato per {codice}")
             selected.append(
                 {
                     **row,
@@ -767,6 +793,8 @@ def create_auto_order_router(
             "righe": [row.model_dump() for row in requested_rows] if requested_rows is not None else None,
             "fornitore": (body.fornitore or "").strip() if body else "",
             "data_consegna_prevista": body.data_consegna_prevista.isoformat() if body and body.data_consegna_prevista else None,
+            "conferma_dati_parziali": bool(body and body.conferma_dati_parziali),
+            "motivo_deroga": (body.motivo_deroga or "").strip() if body else "",
         }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         header_key = idempotency_key if isinstance(idempotency_key, str) else None
         explicit_key = header_key or (body.idempotency_key if body else None) or (body.batch_key if body else None)
@@ -799,6 +827,12 @@ def create_auto_order_router(
         righe = auto_order_selected_rows(ao, requested_rows)
         if not righe:
             raise HTTPException(422, "Nessun articolo da confermare")
+        partial_quality = ao.get("data_quality") == "DATI_PARZIALI" or any(
+            row.get("qualita_dati") == "DATI_PARZIALI" for row in righe
+        )
+        override_reason = (body.motivo_deroga or "").strip() if body else ""
+        if partial_quality and (not body or not body.conferma_dati_parziali or len(override_reason) < 10):
+            raise HTTPException(422, "Dati parziali: conferma consapevole e motivo di almeno 10 caratteri obbligatori")
         selection_key = hashlib.sha256(
             json.dumps(
                 [{"codice": row["codice"], "quantita": row["qta_da_ordinare"]} for row in righe],
@@ -838,10 +872,13 @@ def create_auto_order_router(
             "data_consegna_prevista": body.data_consegna_prevista.isoformat() if body and body.data_consegna_prevista else None,
             "totale_costo_stimato": sum_money(row["totale_costo_stimato"] for row in righe if row.get("totale_costo_stimato") is not None) if all(row.get("totale_costo_stimato") is not None for row in righe) else None,
             "costi_non_disponibili": sum(1 for row in righe if row.get("totale_costo_stimato") is None),
+            "deroga_qualita": {"motivo": override_reason, "stato": ao.get("data_quality"),
+                               "source_watermarks": ao.get("source_watermarks")} if partial_quality else None,
         }
         async def persist(session):
             kwargs = {"session": session} if session is not None else {}
             locked_products = []
+            audit_id = None
             await db.ordini_fornitore.insert_one(batch.copy(), **kwargs)
             try:
                 for row in righe:
@@ -882,6 +919,14 @@ def create_auto_order_router(
                     "motivo": row.get("motivo", ""),
                     }
                     await db.ordini_fornitore_righe.insert_one(document, **kwargs)
+                if partial_quality and getattr(db, "audit_events", None) is not None:
+                    audit_id = str(uuid.uuid4())
+                    await db.audit_events.insert_one({
+                        "id": audit_id, "created_at": datetime.now(timezone.utc).isoformat(),
+                        "azione": "DEROGA_QUALITA_DATI", "entita": "ORDINE_FORNITORE",
+                        "entita_id": batch["id"], "dopo": batch["deroga_qualita"],
+                        "idempotency_key": batch_key, "batch_id": batch["id"],
+                    }, **kwargs)
                 completed = await db.ordini_fornitore.update_one(
                     {"id": batch["id"], "status": "PROCESSING"},
                     {"$set": {"status": "COMPLETED", "completed_at": datetime.now(timezone.utc).isoformat()}},
@@ -892,6 +937,8 @@ def create_auto_order_router(
             except Exception:
                 if session is None:
                     try:
+                        if audit_id:
+                            await db.audit_events.delete_one({"id": audit_id})
                         await db.ordini_fornitore_righe.delete_many({"batch_id": batch["id"]})
                         deleted = await db.ordini_fornitore.delete_one({"id": batch["id"], "status": "PROCESSING"})
                         if deleted is None or deleted.deleted_count == 1:

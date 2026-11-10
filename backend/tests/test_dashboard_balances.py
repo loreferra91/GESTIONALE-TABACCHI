@@ -6,6 +6,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
 os.environ.setdefault("DB_NAME", "gestionale_test")
 
 import backend.server as server
+from mongomock_motor import AsyncMongoMockClient
 
 
 class FakeCursor:
@@ -121,6 +122,48 @@ def test_uses_app_vending_sales_as_backward_compatible_fallback(monkeypatch):
     assert result["differenzaCassaVendingContanti"] == 1000.0
     query = app_sales.queries[0][0]
     assert query["canale"]["$regex"] == "^VENDING$"
+
+
+def test_validated_mongo_baseline_is_independent_of_later_excel_history(monkeypatch):
+    db = AsyncMongoMockClient()["accounting_baseline_test"]
+    monkeypatch.setattr(server, "db", db)
+
+    async def no_ledger():
+        return None
+
+    monkeypatch.setattr(server, "_vending_accounting_ledger_summary", no_ledger)
+    monkeypatch.setattr(server, "_latest_vending_accounting_snapshot", no_ledger)
+
+    async def scenario():
+        baseline = {
+            "id": "webapp-opening", "validated_at": "2026-10-01T12:00:00Z",
+            "effective_at": "2026-10-01T00:00:00Z", "shop_cash_sales_opening": 500,
+            "vending_payments_opening": {"CONTANTI": 100, "CARTE": 20},
+            "source_reference": "riconciliazione firmata", "note": "saldo verificato",
+        }
+        await db.accounting_baselines.insert_one(baseline)
+        await db.vendite.insert_many([
+            {"id": "old", "codice": "P", "data": "2026-09-30", "created_at": "2026-09-30T12:00:00Z",
+             "canale": "VENDING", "importo": 999, "pagamento": "CONTANTI"},
+            {"id": "new", "codice": "P", "data": "2026-10-02", "created_at": "2026-10-02T12:00:00Z",
+             "canale": "VENDING", "importo": 15, "pagamento": "CONTANTI"},
+            {"id": "shop", "codice": "P", "data": "2026-10-02", "created_at": "2026-10-02T12:00:00Z",
+             "canale": "NEGOZIO", "importo": 10, "pagamento": "CONTANTI"},
+        ])
+        before = await server._dashboard_balances(0)
+        shop_before = await server._supplemental_store_cash_sales(None, None, baseline)
+        await db.db_storico_vending_ext.insert_one(historical_row(5000, "Contanti"))
+        await db.db_storico_vend.insert_one({"codice": "P", "data": "2026-10-03", "quantita": 999})
+        after = await server._dashboard_balances(0)
+        shop_after = await server._supplemental_store_cash_sales(None, None, baseline)
+        return before, after, shop_before, shop_after
+
+    before, after, shop_before, shop_after = asyncio.run(scenario())
+    assert before == after
+    assert before["fonteVendingContabile"] == "BASELINE_MONGO"
+    assert before["venditeVendingContanti"] == 115
+    assert before["saldoVendingElettronico"] == 20
+    assert shop_before == shop_after == 10
 
 
 def test_latest_historical_vending_date_uses_date_then_datetime_fallback():

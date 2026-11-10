@@ -113,6 +113,49 @@ test("presenta il ciclo operativo senza import Excel obbligatorio", () => {
   expect(container.querySelector('[data-testid="ao-excel"]')).not.toBeNull();
 });
 
+test("mostra il confronto 3.0 in sola lettura senza sostituire la conferma 2.0", async () => {
+  const comparison = {
+    mode: "CONFRONTO_SENZA_CONFERMA", native_history_days: 60,
+    summary: { stockout_risk: 1, supplementary_orders: 1, already_on_order: 1,
+      vending_refills: 0, pieces_2: 5, pieces_3: 3, insufficient_data: 0,
+      known_purchase_cost: 9, missing_purchase_costs: 0 },
+    rows: [{ codice: "AUTO1", descrizione: "Prodotto automatico", quantita_2: 5,
+      quantita_suggerita: 3, metodo_previsione: "BASELINE 10/30",
+      motivazione: "Stock fisico 10; arrivi 20; fabbisogno netto 3.",
+      domanda_negozio_gg: 1, domanda_vending_gg: 0, scorta_sicurezza: 1,
+      inventory_position: 30, planned_vending_transfer: 0,
+      qualita_previsione: "OSSERVABILE", classe_rotazione: "NORMAL MOVER",
+      metodo_negozio: "BASELINE 10/30", metodo_vending: "BASELINE 10/30" }],
+  };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto" ? comparison
+    : url === "/auto-order" ? response : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  expect(container.textContent).toContain("Previsione e pianificazione");
+  expect(container.querySelector('[data-testid="ao-comparison-AUTO1"]').textContent)
+    .toContain("2.0 5 / 3.0 3");
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  await act(async () => confirm.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    righe: [{ codice: "AUTO1", quantita: 5 }],
+  }));
+});
+
+test("permette una riga integrativa datata e blocca quantità oltre il fabbisogno", async () => {
+  const supplementary = { ...automaticProduct, codice: "SUP1", descrizione: "Integrativo",
+    quantita_in_arrivo: 20, quantita_senza_data: 0, quantita_integrativa_massima: 30,
+    lotto_ordine: 10, qta_da_ordinare: 30 };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order" ? {
+    ...response, righe: [supplementary], esclusi: [],
+  } : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  expect(container.querySelector('[data-testid="ao-row-SUP1"]')).not.toBeNull();
+  await write(container.querySelector('[data-testid="ao-quantity-SUP1"]'), "40");
+  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(true);
+  await write(container.querySelector('[data-testid="ao-quantity-SUP1"]'), "30");
+  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(false);
+});
+
 test("cerca un prodotto per descrizione e lo aggiunge alla bozza con il lotto corretto", async () => {
   const search = container.querySelector('[data-testid="ao-add-product"]');
   await write(search, "manuale test");

@@ -6,6 +6,7 @@ export default function ConfirmDialog({
   cancelLabel = "Annulla",
   danger = false,
   loading = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }) {
@@ -21,7 +22,7 @@ export default function ConfirmDialog({
           <button onClick={onCancel} disabled={loading} className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-50 disabled:opacity-40">
             {cancelLabel}
           </button>
-          <button onClick={onConfirm} disabled={loading} className={`rounded-md px-4 py-2 text-sm font-bold text-white disabled:opacity-40 ${danger ? "bg-red-600 hover:bg-red-700" : "bg-slate-900 hover:bg-slate-800"}`}>
+          <button onClick={onConfirm} disabled={loading || confirmDisabled} className={`rounded-md px-4 py-2 text-sm font-bold text-white disabled:opacity-40 ${danger ? "bg-red-600 hover:bg-red-700" : "bg-slate-900 hover:bg-slate-800"}`}>
             {loading ? "Attendere..." : confirmLabel}
           </button>
         </div>

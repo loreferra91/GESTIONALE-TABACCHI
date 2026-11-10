@@ -319,7 +319,7 @@ async def fake_ao_two_rows():
         "esclusi": [
             {"codice": "X", "descrizione": "X", "categoria": "ACCESSORI", "stato": "ANOMALIA", "anomalia": True, "qta_da_ordinare": 0, "prezzo": 9, "totale": 0, "motivo": "TEST"},
             {"codice": "Y", "descrizione": "Y", "categoria": "ACCESSORI", "stato": "NESSUN ORDINE", "anomalia": False, "qta_da_ordinare": 0, "prezzo": 2, "totale": 0, "motivo": "TEST"},
-            {"codice": "U", "descrizione": "U", "categoria": "ACCESSORI", "stato": "CONTROLLO MANUALE", "anomalia": False, "qta_da_ordinare": 0, "prezzo": 2, "totale": 0, "motivo": "FORNITURA SENZA DATA"},
+            {"codice": "U", "descrizione": "U", "categoria": "ACCESSORI", "stato": "CONTROLLO MANUALE", "anomalia": False, "qta_da_ordinare": 0, "quantita_senza_data": 1, "prezzo": 2, "totale": 0, "motivo": "FORNITURA SENZA DATA"},
             {"codice": "P", "descrizione": "P", "categoria": "ACCESSORI", "stato": "ORDINE IN ARRIVO", "anomalia": False, "qta_da_ordinare": 0, "prezzo": 2, "totale": 0, "motivo": "FORNITURA PENDENTE"},
         ],
         "totale": 10,

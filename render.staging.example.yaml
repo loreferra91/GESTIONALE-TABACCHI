@@ -1,0 +1,21 @@
+# Blueprint example only. Validate Atlas database isolation before creating a service.
+services:
+  - type: web
+    name: gestionale-tabacchi-staging
+    runtime: docker
+    plan: free
+    autoDeploy: false
+    healthCheckPath: /api/
+    envVars:
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        value: gestionale_staging
+      - key: ENVIRONMENT
+        value: staging
+      - key: CORS_ORIGINS
+        value: "https://gestionale-tabacchi-staging.onrender.com"
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false

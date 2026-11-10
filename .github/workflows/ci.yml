@@ -2,7 +2,7 @@ name: Verify
 
 on:
   push:
-    branches: [main]
+    branches: [main, openclaw/render-staging-deploy, 'feature/**', 'codex/**']
   pull_request:
 
 permissions:
