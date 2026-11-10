@@ -17,7 +17,8 @@ test("gestisce il minimo operativo in Prodotti e mostra la soglia calcolata", as
   api.get.mockImplementation(url => Promise.resolve({ data: url === "/prodotti"
     ? [{ id: "product-1", codice: "P", descrizione: "Prodotto P", categoria: "SIGARETTE",
       prezzo: 5, giacenza_negozio: 40, giacenza_vending: 2, auto_order_version: minimum ? 1 : 0,
-      scorta_minima_negozio_auto_order: minimum }]
+      scorta_minima_negozio_auto_order: minimum },
+      { id: "change-1", codice: "0000001", descrizione: "resto non erogato", categoria: "SIGARETTE", prezzo: 1 }]
     : { righe: [], esclusi: [{ codice: "P", punto_riordino: 20, target_scorta: 40 }] } }));
   api.patch.mockImplementation(() => {
     minimum = 50;
@@ -29,6 +30,7 @@ test("gestisce il minimo operativo in Prodotti e mostra la soglia calcolata", as
   await act(async () => root.render(<Prodotti />));
   expect(container.querySelector('[data-testid="prod-row-P"]').textContent).toContain("20");
   expect(container.querySelector('[data-testid="prod-row-P"]').textContent).toContain("40");
+  expect(container.querySelector('[data-testid="prod-minimum-edit-0000001"]')).toBeNull();
   await act(async () => container.querySelector('[data-testid="prod-minimum-edit-P"]').click());
   const input = container.querySelector('[data-testid="prod-minimum-input-P"]');
   await act(async () => {

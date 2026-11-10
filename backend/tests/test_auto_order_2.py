@@ -80,6 +80,16 @@ def test_accounting_change_entries_are_not_orderable(isolated_database):
     assert not is_orderable_product({"descrizione": "resto non erogato"})
     assert not is_orderable_product({"descrizione": "vendibile", "ordinabile_auto_order": False})
 
+    async def reject_minimum_for_accounting_entry():
+        with pytest.raises(HTTPException) as rejected:
+            await server.auto_order_module["update_scorta_minima"](
+                "0000001", ScortaMinimaNegozioIn(minimo=10, version=0))
+        assert rejected.value.status_code == 422
+        product = await db.prodotti.find_one({"codice": "0000001"})
+        assert "scorta_minima_negozio_auto_order" not in product
+
+    asyncio.run(reject_minimum_for_accounting_entry())
+
 
 def test_existing_receipt_closes_legacy_supplier_order_without_reloading_stock(isolated_database):
     db = isolated_database

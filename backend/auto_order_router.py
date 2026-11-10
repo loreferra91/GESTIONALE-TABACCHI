@@ -122,6 +122,8 @@ def create_auto_order_router(
         product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
         if not product:
             raise HTTPException(404, "Prodotto non trovato")
+        if not is_orderable_product(product):
+            raise HTTPException(422, "Questa voce non è merce ordinabile")
         current = int(product.get("scorta_minima_negozio_auto_order", 0) or 0)
         version = int(product.get("auto_order_version", 0) or 0)
         if version != body.version:

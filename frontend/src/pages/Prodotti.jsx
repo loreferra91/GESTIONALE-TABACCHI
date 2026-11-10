@@ -226,7 +226,7 @@ export default function Prodotti() {
                   <td className="font-mono text-right">{planningRows[r.codice] ? formatNum(planningRows[r.codice].punto_riordino) : "—"}</td>
                   <td className="font-mono text-right">{planningRows[r.codice] ? formatNum(planningRows[r.codice].target_scorta) : "—"}</td>
                   <td className="text-right">
-                    {minimumEditor?.codice === r.codice ? <div className="flex items-center justify-end gap-1">
+                    {planningAvailable === true && !planningRows[r.codice] ? <span className="text-slate-400">—</span> : minimumEditor?.codice === r.codice ? <div className="flex items-center justify-end gap-1">
                       <input data-testid={`prod-minimum-input-${r.codice}`} type="number" min="0" step="1" value={minimumEditor.value} onChange={event => setMinimumEditor(current => ({ ...current, value: event.target.value }))} onKeyDown={event => { if (event.key === "Enter") saveMinimum(); if (event.key === "Escape") setMinimumEditor(null); }} className="w-20 rounded border px-2 py-1 text-right font-mono text-sm" aria-label={`Minimo operativo negozio ${r.descrizione}`} />
                       <button type="button" onClick={saveMinimum} disabled={savingMinimum} className="rounded bg-slate-900 px-2 py-1 text-xs text-white disabled:opacity-50">Salva</button>
                       <button type="button" onClick={() => setMinimumEditor(null)} disabled={savingMinimum} className="rounded border px-2 py-1 text-xs">Annulla</button>
