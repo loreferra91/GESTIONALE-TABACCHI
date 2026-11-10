@@ -376,3 +376,49 @@ test("3.1 senza parametri validi resta disabilitato e mantiene fallback 2.0", as
   expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("5");
   expect(container.textContent).toContain("Configurare il lead time reale del fornitore");
 });
+
+
+test("calendario venerdì: mostra mercoledì 11 come cutoff e usa data consegna ammessa", async () => {
+  const forecast = {
+    mode: "CONFRONTO_SENZA_CONFERMA",
+    operational_ready: true,
+    policy_snapshot_key: "auto-order-3-1:schedule-snapshot",
+    native_history_days: 90, operational_blockers: [],
+    delivery_schedule: {
+      delivery_date: "2026-11-13",
+      cutoff_datetime: "2026-11-11T11:00:00+01:00",
+      cutoff_local_time: "11:00",
+      late_for_this_friday: false,
+    },
+    summary: { stockout_risk: 0, supplementary_orders: 0, already_on_order: 0,
+      vending_refills: 0, pieces_2: 5, pieces_3: 3, insufficient_data: 0,
+      known_purchase_cost: 0, missing_purchase_costs: 0 },
+    rows: [{
+      codice: "AUTO1", descrizione: "Prodotto automatico",
+      quantita_2: 5, quantita_suggerita: 3, metodo_previsione: "BASELINE 10/30",
+      motivazione: "Consegna venerdì", qualita_previsione: "OSSERVABILE",
+      anomalie: [], domanda_negozio_gg: 1, domanda_vending_gg: 0,
+      scorta_sicurezza: 1, inventory_position: 0, planned_vending_transfer: 0,
+      metodo_negozio: "BASELINE 10/30", metodo_vending: "BASELINE 10/30",
+    }],
+  };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto"
+    ? forecast : url === "/auto-order" ? response : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  const calendar = container.querySelector('[data-testid="ao-friday-schedule"]');
+  expect(calendar.textContent).toContain("mercoledì");
+  expect(calendar.textContent).toContain("11:00");
+  expect(calendar.textContent).toContain("2026-11-13");
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const deliveryInput = [...container.querySelectorAll('input[type="date"]')]
+    .find(element => element.value === "2026-11-13");
+  expect(deliveryInput).toBeDefined();
+  expect(deliveryInput.readOnly).toBe(true);
+  const submit = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  await act(async () => submit.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    policy_version: "AUTO_ORDER_3_1",
+    data_consegna_prevista: "2026-11-13",
+    policy_snapshot_key: "auto-order-3-1:schedule-snapshot",
+  }));
+});
