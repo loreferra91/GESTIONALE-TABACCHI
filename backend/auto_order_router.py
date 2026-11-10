@@ -17,10 +17,12 @@ from pymongo.errors import DuplicateKeyError
 try:
     from .auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
     from .auto_order_3_service import compare_policies
+    from .auto_order_3_operational import POLICY_2, POLICY_31, readiness, policy_snapshot, select_operational_rows
     from .forecasting.demand_models import NativeSalesAccumulator
 except ImportError:  # pragma: no cover
     from auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
     from auto_order_3_service import compare_policies
+    from auto_order_3_operational import POLICY_2, POLICY_31, readiness, policy_snapshot, select_operational_rows
     from forecasting.demand_models import NativeSalesAccumulator
 
 
@@ -38,6 +40,8 @@ class AutoOrderConfermaIn(BaseModel):
     righe: Optional[List[AutoOrderRigaIn]] = None
     conferma_dati_parziali: bool = False
     motivo_deroga: Optional[str] = Field(default=None, max_length=500)
+    policy_version: str = POLICY_2
+    policy_snapshot_key: Optional[str] = None
 
 
 class FornituraUpdateIn(BaseModel):
@@ -701,10 +705,8 @@ def create_auto_order_router(
         response["snapshot_key"] = auto_order_snapshot_key(response)
         return response
 
-    @router.get("/auto-order/confronto")
-    async def confronto_auto_order():
-        """Read-only, cursor-backed comparison; no arbitrary 50k event cutoff."""
-        ao = await get_auto_order()
+    async def build_comparison(ao: Dict[str, Any]) -> Dict[str, Any]:
+        """Recompute authoritative 3.1 input for preview AND order confirmation."""
         db = get_database()
         today = commercial_day(ao.get("planning_day")) or datetime.now(ROME).date()
         first = today - timedelta(days=90)
@@ -755,7 +757,14 @@ def create_auto_order_router(
             "righe": [with_capacity(row) for row in ao.get("righe", [])],
             "esclusi": [with_capacity(row) for row in ao.get("esclusi", [])],
         }
-        return compare_policies(active, collector)
+        result = compare_policies(active, collector)
+        result.update(readiness(ao, result))
+        result["policy_snapshot_key"] = policy_snapshot(ao, result)
+        return result
+
+    @router.get("/auto-order/confronto")
+    async def confronto_auto_order():
+        return await build_comparison(await get_auto_order())
 
     def auto_order_selected_rows(
         ao: Dict[str, Any], requested: Optional[List[AutoOrderRigaIn]] = None
@@ -825,12 +834,20 @@ def create_auto_order_router(
         db = get_database()
         requested_rows = body.righe if body else None
         supplied_snapshot = body.snapshot_key if body else None
+        policy = (body.policy_version if body else POLICY_2) or POLICY_2
+        policy_key = body.policy_snapshot_key if body else None
+        if policy not in (POLICY_2, POLICY_31):
+            raise HTTPException(422, "Politica Auto-Order non riconosciuta")
+        if policy == POLICY_31 and (not requested_rows or not supplied_snapshot or not policy_key):
+            raise HTTPException(422, "Per Auto-Order 3.1 servono selezione e snapshot aggiornati")
         if requested_rows is not None and not supplied_snapshot:
             raise HTTPException(422, "Snapshot Auto-Order obbligatorio per confermare una selezione")
         if body and body.data_consegna_prevista and body.data_consegna_prevista <= datetime.now(ROME).date():
             raise HTTPException(422, "La consegna prevista deve essere futura")
         request_fingerprint = hashlib.sha256(json.dumps({
             "snapshot_key": supplied_snapshot,
+            "policy_version": policy,
+            "policy_snapshot_key": policy_key,
             "righe": [row.model_dump() for row in requested_rows] if requested_rows is not None else None,
             "fornitore": (body.fornitore or "").strip() if body else "",
             "data_consegna_prevista": body.data_consegna_prevista.isoformat() if body and body.data_consegna_prevista else None,
@@ -844,7 +861,7 @@ def create_auto_order_router(
                 [{"codice": item.codice.strip(), "quantita": item.quantita} for item in requested_rows],
                 ensure_ascii=False, sort_keys=True,
             ).encode("utf-8")).hexdigest()[:24]
-            explicit_key = f"{supplied_snapshot}:selezione:{early_selection}"
+            explicit_key = f"{policy_key if policy == POLICY_31 else supplied_snapshot}:selezione:{early_selection}"
 
         def replay(existing):
             if existing.get("request_fingerprint") != request_fingerprint:
@@ -865,7 +882,16 @@ def create_auto_order_router(
             raise HTTPException(409, "Dati Auto-Order incoerenti: correggere le anomalie prima di confermare")
         if supplied_snapshot and supplied_snapshot != ao["snapshot_key"]:
             raise HTTPException(409, "I dati di magazzino o vendita sono cambiati. Ricalcola Auto-Order prima di confermare.")
-        righe = auto_order_selected_rows(ao, requested_rows)
+        comparison = None
+        if policy == POLICY_31:
+            comparison = await build_comparison(ao)
+            if not comparison.get("operational_ready"):
+                raise HTTPException(409, "Auto-Order 3.1 non attivabile: " + "; ".join(comparison["operational_blockers"]))
+            if policy_key != comparison["policy_snapshot_key"]:
+                raise HTTPException(409, "Previsione 3.1 cambiata. Ricalcolare l'ordine prima della conferma.")
+            righe = select_operational_rows(ao, comparison, requested_rows, multiply_money)
+        else:
+            righe = auto_order_selected_rows(ao, requested_rows)
         if not righe:
             raise HTTPException(422, "Nessun articolo da confermare")
         partial_quality = ao.get("data_quality") == "DATI_PARZIALI" or any(
@@ -882,7 +908,7 @@ def create_auto_order_router(
             ).encode("utf-8")
         ).hexdigest()[:24]
         default_key = (
-            f"{ao['snapshot_key']}:selezione:{selection_key}"
+            f"{policy_key if policy == POLICY_31 else ao['snapshot_key']}:selezione:{selection_key}"
             if requested_rows is not None
             else ao["snapshot_key"]
         )
@@ -900,6 +926,8 @@ def create_auto_order_router(
             "id": str(uuid.uuid4()),
             "batch_key": batch_key,
             "snapshot_key": ao["snapshot_key"],
+            "policy_version": policy,
+            "policy_snapshot_key": policy_key if policy == POLICY_31 else None,
             "data": datetime.now(timezone.utc).isoformat(),
             "stato": "CONFERMATO",
             "version": 0,
@@ -958,6 +986,10 @@ def create_auto_order_router(
                     "costo_unitario_acquisto": row.get("costo_unitario_acquisto"),
                     "totale_costo_stimato": row.get("totale_costo_stimato"),
                     "motivo": row.get("motivo", ""),
+                    "policy_version": policy,
+                    "quantita_3_1_massima": row.get("quantita_3_1_massima") if policy == POLICY_31 else None,
+                    "modello_negozio": row.get("modello_negozio") if policy == POLICY_31 else None,
+                    "modello_vending": row.get("modello_vending") if policy == POLICY_31 else None,
                     }
                     await db.ordini_fornitore_righe.insert_one(document, **kwargs)
                 if partial_quality and getattr(db, "audit_events", None) is not None:
