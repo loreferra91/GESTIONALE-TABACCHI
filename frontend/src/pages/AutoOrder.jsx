@@ -98,6 +98,8 @@ export default function AutoOrder() {
     const nextRows = policy === "AUTO_ORDER_3_1" ? make31Draft(data, forecast) : (data.righe || []);
     orderPolicyRef.current = policy;
     setOrderPolicy(policy);
+    setExpectedDelivery(policy === "AUTO_ORDER_3_1"
+      ? (forecast?.delivery_schedule?.delivery_date || "") : "");
     draftRowsRef.current = nextRows;
     originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
     setDraftRows(nextRows);
@@ -131,6 +133,8 @@ export default function AutoOrder() {
         ? "AUTO_ORDER_3_1" : "AUTO_ORDER_2";
       orderPolicyRef.current = selected;
       setOrderPolicy(selected);
+      setExpectedDelivery(selected === "AUTO_ORDER_3_1"
+        ? (forecast?.delivery_schedule?.delivery_date || "") : "");
       const nextRows = selected === "AUTO_ORDER_3_1" ? make31Draft(r.data, forecast) : (r.data.righe || []);
       draftRowsRef.current = nextRows;
       originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
@@ -476,6 +480,12 @@ export default function AutoOrder() {
       <Card className="mb-4 p-4" data-testid="ao-planning-comparison">
         <h2 className="text-lg font-bold text-slate-900">Previsione e pianificazione</h2>
         <p className="mt-1 text-sm text-slate-600">L'algoritmo 3.1 usa lo storico nativo, le scorte reali, le consegne e le ricariche vending. Le conferme vengono ricalcolate dal backend. Nessun acquisto è automatico.</p>
+        {comparison?.delivery_schedule && <div data-testid="ao-friday-schedule" className="mt-2 rounded border border-sky-200 bg-sky-50 p-3 text-sm text-slate-800">
+          <p><b>Ordine settimanale tabacchi:</b> preferibilmente lunedì, entro mercoledì alle <b>11:00</b> (ora italiana) per ricevere venerdì della stessa settimana.</p>
+          <p>Prossima consegna ammissibile: <b>{comparison.delivery_schedule.delivery_date}</b>. Termine ultimo per questa consegna: <b>{new Date(comparison.delivery_schedule.cutoff_datetime).toLocaleString("it-IT", { timeZone: "Europe/Rome" })}</b>.</p>
+          {comparison.delivery_schedule.late_for_this_friday && <p className="font-semibold text-amber-800">Scadenza della settimana superata: la previsione considera il venerdì successivo.</p>}
+          <p className="text-xs text-slate-600">Il calendario considera la regola ordinaria, non festività o chiusure straordinarie del fornitore. Non indica un'ora effettiva di consegna.</p>
+        </div>}
         <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="ao-policy-selector">
           <button type="button" data-testid="ao-use-3-1" aria-pressed={orderPolicy === "AUTO_ORDER_3_1"} disabled={!comparison?.operational_ready || loading} onClick={() => applyPolicy("AUTO_ORDER_3_1")} className={`rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40 ${orderPolicy === "AUTO_ORDER_3_1" ? "border-emerald-700 bg-emerald-50 text-emerald-900" : "border-slate-300"}`}>Usa Auto-Order 3.1</button>
           <button type="button" data-testid="ao-use-2" aria-pressed={orderPolicy === "AUTO_ORDER_2"} disabled={loading} onClick={() => applyPolicy("AUTO_ORDER_2")} className={`rounded border px-3 py-2 text-sm font-semibold ${orderPolicy === "AUTO_ORDER_2" ? "border-slate-900 bg-slate-100" : "border-slate-300"}`}>Fallback 2.0</button>
@@ -605,7 +615,7 @@ export default function AutoOrder() {
         <p>Politica selezionata: <b>{orderPolicy === "AUTO_ORDER_3_1" ? "Auto-Order 3.1 (validazione server)" : "Auto-Order 2.0 (fallback)"}</b>. Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <label className="text-sm">Fornitore <input value={supplierName} onChange={event => setSupplierName(event.target.value)} maxLength={120} placeholder="Nome fornitore (facoltativo)" className="mt-1 w-full rounded border px-2 py-1" /></label>
-          <label className="text-sm">Consegna prevista <input type="date" value={expectedDelivery} onChange={event => setExpectedDelivery(event.target.value)} className="mt-1 w-full rounded border px-2 py-1" /></label>
+          <label className="text-sm">Consegna prevista <input type="date" value={expectedDelivery} readOnly={orderPolicy === "AUTO_ORDER_3_1" && Boolean(comparison?.delivery_schedule)} onChange={event => setExpectedDelivery(event.target.value)} className="mt-1 w-full rounded border px-2 py-1" /></label>
         </div>
         {data?.data_quality === "DATI_PARZIALI" && <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
           <p className="font-semibold">Fonti parziali: verifica i dati prima dell’ordine.</p>
