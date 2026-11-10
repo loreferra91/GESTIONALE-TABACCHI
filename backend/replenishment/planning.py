@@ -111,6 +111,11 @@ def plan_inventory(*, today: date, shop_stock: int, vending_stock: int,
                 risk_shop = day
             if vending < 0 and risk_vending is None:
                 risk_vending = day
+            # Lost demand is not a physical negative balance or an obligation
+            # to replenish past consumption. Record the stockout and continue
+            # projecting from zero rather than carrying fictitious backorders.
+            shop = max(0.0, shop)
+            vending = max(0.0, vending)
 
     # Planned internal transfers have zero effect on total inventory, but
     # require sufficient shop stock when the operation is actually performed.
