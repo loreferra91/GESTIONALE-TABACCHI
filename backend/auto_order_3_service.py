@@ -107,7 +107,14 @@ def compare_policies(active: dict, native_sales: list[dict], *, now: datetime | 
         model = "PREVISIONE ADATTIVA" if "PREVISIONE ADATTIVA" in (shop["quality"], vending["quality"]) else "BASELINE 10/30"
         if sum(shop_history) + sum(vending_history) == 0:
             model = "CONTROLLO MANUALE" if old.get("scorta_minima_negozio_auto_order") else "STORICO INSUFFICIENTE"
-        suggested = 0 if issues else plan["order_quantity"]
+        calculated = plan["order_quantity"]
+        block_reasons = sorted(set(issues))
+        if calculated > 0 and quality != "OSSERVABILE" and not block_reasons:
+            block_reasons.append(quality)
+        orderable = 0 if block_reasons else calculated
+        # Keep the existing field as the quantity that the confirmation endpoint
+        # can actually accept. The raw calculation is exposed separately.
+        suggested = orderable
         def simulate_proposal(proposed_quantity: int):
             if lead <= 0:
                 return None
@@ -141,8 +148,8 @@ def compare_policies(active: dict, native_sales: list[dict], *, now: datetime | 
             reasons.append("Rischio prima della consegna prevista: non assumere merce disponibile in anticipo.")
         if schedule:
             reasons.append(f"Ciclo settimanale: consegna prevista venerdì {schedule['delivery_date']}; limite ordine {schedule['cutoff_datetime']} ora italiana.")
-        if issues:
-            reasons.append("Proposta sospesa: " + ", ".join(sorted(set(issues))) + ".")
+        if block_reasons:
+            reasons.append("Proposta sospesa: " + ", ".join(block_reasons) + ".")
         unit_cost = old.get("costo_unitario_acquisto")
         rows.append({
             "codice": code, "descrizione": old.get("descrizione"), "categoria": old.get("categoria"),
@@ -169,11 +176,14 @@ def compare_policies(active: dict, native_sales: list[dict], *, now: datetime | 
             "scorta_sicurezza": plan["safety_stock"], "punto_riordino": plan["reorder_point"],
             "scorta_obiettivo": plan["order_up_to_level"], "fabbisogno_netto": plan["net_requirement"],
             "lotto_ordine": lot,
+            "quantita_calcolata_3_1": calculated,
+            "quantita_ordinabile_3_1": orderable,
+            "motivi_blocco_3_1": block_reasons,
             "quantita_suggerita": suggested, "quantita_2": old.get("qta_da_ordinare") or 0,
             "simulazione_2": simulated_2, "simulazione_3": simulated_3,
             "costo_acquisto_stimato": round(float(unit_cost) * suggested, 2) if unit_cost is not None else None,
             "valore_listino": round(float(old.get("prezzo") or 0) * suggested, 2),
-            "stato": "CONTROLLO MANUALE" if issues else "ORDINA" if suggested else "MONITORA",
+            "stato": "CONTROLLO MANUALE" if block_reasons else "ORDINA" if suggested else "MONITORA",
             "motivazione": " ".join(reasons), **plan,
         })
     errors_by_class = {}
@@ -200,6 +210,9 @@ def compare_policies(active: dict, native_sales: list[dict], *, now: datetime | 
             "already_on_order": sum(bool(row["ordini_pendenti"]) for row in rows),
             "pieces_2": sum(row["quantita_2"] for row in rows),
             "pieces_3": sum(row["quantita_suggerita"] for row in rows),
+            "pieces_3_calculated": sum(row["quantita_calcolata_3_1"] for row in rows),
+            "pieces_3_blocked": sum(row["quantita_calcolata_3_1"] - row["quantita_ordinabile_3_1"] for row in rows),
+            "products_3_blocked": sum(bool(row["quantita_calcolata_3_1"] and row["motivi_blocco_3_1"]) for row in rows),
             "insufficient_data": sum(row["qualita_previsione"] != "OSSERVABILE" for row in rows),
             "vending_refills": sum(bool(row["planned_vending_transfer"]) for row in rows),
             "known_purchase_cost": round(sum(row["costo_acquisto_stimato"] or 0 for row in rows), 2),

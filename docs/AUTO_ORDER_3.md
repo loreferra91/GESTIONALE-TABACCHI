@@ -238,6 +238,15 @@ la completezza dei flussi; il controllo operativo resta necessario.
 Gli articoli con quantità proposta positiva, qualità `OSSERVABILE`, senza
 anomalie, possono essere inclusi. Un articolo senza dati sufficienti o con
 forniture ambigue resta escluso da 3.1 e richiede un controllo esplicito.
+Il confronto espone per ogni riga `quantita_calcolata_3_1` (risultato della
+simulazione prima dei controlli), `quantita_ordinabile_3_1` (quantità ammessa
+dalla conferma) e `motivi_blocco_3_1`. Il campo storico
+`quantita_suggerita` coincide con la quantità ordinabile. Nel riepilogo,
+`pieces_3_calculated` e `pieces_3_blocked` distinguono il fabbisogno
+matematico dalla parte sospesa. Uno zero ordinabile con fabbisogno calcolato
+positivo indica un blocco esplicito, non scorta sufficiente.
+Se un articolo con fabbisogno o rischio non è certificabile, 3.1 non diventa
+la bozza operativa predefinita; il motivo è mostrato e resta disponibile 2.0.
 Il programma non sostituisce automaticamente una quantità 3.1 non verificata
 con una 2.0, anche quando la categoria risulta già selezionata.
 

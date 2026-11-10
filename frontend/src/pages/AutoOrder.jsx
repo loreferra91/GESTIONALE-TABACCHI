@@ -504,17 +504,21 @@ export default function AutoOrder() {
             <div>Già in arrivo <b>{comparison.summary.already_on_order}</b></div>
             <div>Da ricaricare vending <b>{comparison.summary.vending_refills}</b></div>
             <div>Quantità 2.0 <b>{formatNum(comparison.summary.pieces_2)}</b></div>
-            <div>Quantità 3.1 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
+            <div>3.1 calcolata <b>{formatNum(comparison.summary.pieces_3_calculated ?? comparison.summary.pieces_3)}</b></div>
+            <div>3.1 ordinabile <b>{formatNum(comparison.summary.pieces_3)}</b></div>
+            <div>3.1 sospesa dai controlli <b>{formatNum(comparison.summary.pieces_3_blocked ?? 0)}</b>{comparison.summary.products_3_blocked ? ` · ${comparison.summary.products_3_blocked} ${comparison.summary.products_3_blocked === 1 ? "articolo" : "articoli"}` : ""}</div>
             {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.1 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
             {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.1 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
             <div>Dati da verificare <b>{comparison.summary.insufficient_data}</b></div>
             <div>Costo noto 3.1 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
           </div>
+          <p className="mt-2 text-xs text-slate-600">La quantità calcolata è il risultato matematico prima dei controlli e può basarsi su dati da verificare. La quantità ordinabile è quella che il backend può accettare; i motivi di sospensione sono nel dettaglio di ogni articolo.</p>
           <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
           <div className="mt-3 max-h-80 overflow-y-auto rounded border">
             {comparison.rows.map(row => <details key={row.codice} className="border-b px-3 py-2 text-sm last:border-b-0" data-testid={`ao-comparison-${row.codice}`}>
-              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.1 {row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
+              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.1 calcolata {row.quantita_calcolata_3_1 ?? row.quantita_suggerita}</b> / <b>ordinabile {row.quantita_ordinabile_3_1 ?? row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
               <div className="mt-2 space-y-1 text-slate-600">
+                {(row.motivi_blocco_3_1 || []).length > 0 && <p className="font-semibold text-amber-800">Motivi blocco 3.1: {row.motivi_blocco_3_1.join(", ")}</p>}
                 <p>{row.motivazione}</p>
                 <p>Negozio {formatNum(row.domanda_negozio_gg, 2)}/gg · Vending {formatNum(row.domanda_vending_gg, 2)}/gg · Sicurezza {row.scorta_sicurezza} · Posizione {row.inventory_position} · Trasferimento vending {row.planned_vending_transfer}</p>
                 <p>Qualità: {row.qualita_previsione} · Classe: {row.classe_rotazione} · Modello negozio: {row.metodo_negozio} · Modello vending: {row.metodo_vending}</p>
