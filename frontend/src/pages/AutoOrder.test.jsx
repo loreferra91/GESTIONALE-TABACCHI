@@ -132,7 +132,7 @@ test("mostra il confronto 3.0 in sola lettura senza sostituire la conferma 2.0",
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
   expect(container.textContent).toContain("Previsione e pianificazione");
   expect(container.querySelector('[data-testid="ao-comparison-AUTO1"]').textContent)
-    .toContain("2.0 5 / 3.0 3");
+    .toContain("2.0 5 / 3.1 3");
   await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
   const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
   await act(async () => confirm.click());
