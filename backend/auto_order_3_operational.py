@@ -21,10 +21,14 @@ def readiness(ao: dict, comparison: dict) -> dict:
     reasons = []
     if int(params.get("AUTO_ORDER_3_1_ENABLED") or 0) != 1:
         reasons.append("Attivare esplicitamente AUTO_ORDER_3_1_ENABLED=1 nei Parametri.")
-    if int(params.get("AUTO_ORDER_LEAD_TIME_GG") or 0) <= 0:
-        reasons.append("Configurare il lead time reale del fornitore (giorni > 0).")
-    if int(params.get("AUTO_ORDER_REVIEW_PERIOD_GG") or 0) <= 0:
-        reasons.append("Configurare il periodo reale tra revisioni ordine (giorni > 0).")
+    weekly_friday = int(params.get("AUTO_ORDER_WEEKLY_FRIDAY") or 0) == 1
+    if not weekly_friday:
+        if int(params.get("AUTO_ORDER_LEAD_TIME_GG") or 0) <= 0:
+            reasons.append("Configurare il lead time reale del fornitore (giorni > 0).")
+        if int(params.get("AUTO_ORDER_REVIEW_PERIOD_GG") or 0) <= 0:
+            reasons.append("Configurare il periodo reale tra revisioni ordine (giorni > 0).")
+    elif not comparison.get("delivery_schedule"):
+        reasons.append("Calendario consegne del venerdì non disponibile.")
     if ao.get("data_quality") != "DATI_AFFIDABILI":
         reasons.append("Verificare la qualità delle vendite e delle forniture operative.")
     if int(comparison.get("native_history_days") or 0) < 60:
@@ -68,6 +72,8 @@ def policy_snapshot(ao: dict, comparison: dict) -> str:
         "enabled": int(params.get("AUTO_ORDER_3_1_ENABLED") or 0),
         "lead": int(params.get("AUTO_ORDER_LEAD_TIME_GG") or 0),
         "review": int(params.get("AUTO_ORDER_REVIEW_PERIOD_GG") or 0),
+        "weekly_friday": int(params.get("AUTO_ORDER_WEEKLY_FRIDAY") or 0),
+        "delivery_schedule": comparison.get("delivery_schedule"),
         "quality": ao.get("data_quality"),
         "history": comparison.get("native_history_days"),
         "rows": rows,
