@@ -884,12 +884,24 @@ def create_auto_order_router(
         if supplied_snapshot and supplied_snapshot != ao["snapshot_key"]:
             raise HTTPException(409, "I dati di magazzino o vendita sono cambiati. Ricalcola Auto-Order prima di confermare.")
         comparison = None
+        effective_delivery = body.data_consegna_prevista if body else None
         if policy == POLICY_31:
             comparison = await build_comparison(ao)
             if not comparison.get("operational_ready"):
                 raise HTTPException(409, "Auto-Order 3.1 non attivabile: " + "; ".join(comparison["operational_blockers"]))
             if policy_key != comparison["policy_snapshot_key"]:
                 raise HTTPException(409, "Previsione 3.1 cambiata. Ricalcolare l'ordine prima della conferma.")
+            delivery_schedule = comparison.get("delivery_schedule")
+            if delivery_schedule:
+                scheduled_date = date.fromisoformat(delivery_schedule["delivery_date"])
+                if effective_delivery and effective_delivery != scheduled_date:
+                    raise HTTPException(
+                        422,
+                        "Consegna non compatibile con la scadenza settimanale: venerdì previsto "
+                        + scheduled_date.isoformat()
+                        + ". Dopo mercoledì ore 11 si passa al venerdì successivo.",
+                    )
+                effective_delivery = scheduled_date
             righe = select_operational_rows(ao, comparison, requested_rows, multiply_money)
         else:
             righe = auto_order_selected_rows(ao, requested_rows)
@@ -939,7 +951,8 @@ def create_auto_order_router(
             "totale": sum_money(row.get("totale", 0) or 0 for row in righe),
             "data_riferimento_domanda": ao.get("data_riferimento_domanda"),
             "fornitore": (body.fornitore or "").strip() if body else "",
-            "data_consegna_prevista": body.data_consegna_prevista.isoformat() if body and body.data_consegna_prevista else None,
+            "data_consegna_prevista": effective_delivery.isoformat() if effective_delivery else None,
+            "calendario_consegne": comparison.get("delivery_schedule") if policy == POLICY_31 and comparison else None,
             "totale_costo_stimato": sum_money(row["totale_costo_stimato"] for row in righe if row.get("totale_costo_stimato") is not None) if all(row.get("totale_costo_stimato") is not None for row in righe) else None,
             "costi_non_disponibili": sum(1 for row in righe if row.get("totale_costo_stimato") is None),
             "deroga_qualita": {"motivo": override_reason, "stato": ao.get("data_quality"),
