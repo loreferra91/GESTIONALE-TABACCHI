@@ -23,6 +23,7 @@ PARAM_BOUNDS = {
     "AUTO_ORDER_LEAD_TIME_GG": (0.0, 366.0, "0 ≤ giorni ≤ 365"),
     "AUTO_ORDER_REVIEW_PERIOD_GG": (0.0, 366.0, "0 ≤ giorni ≤ 365"),
     "AUTO_ORDER_3_1_ENABLED": (0.0, 2.0, "0=disabilitato, 1=abilitato"),
+    "AUTO_ORDER_WEEKLY_FRIDAY": (0.0, 2.0, "0=lead time fisso, 1=consegne venerdì con cutoff mercoledì ore 11"),
     "AUTO_ORDER_MAX_ETA_IMPORT_GG": (0.0, 366.0, "0 ≤ giorni ≤ 365"),
     "PERIODO_VENDUTI_GG": (1.0, 3650.0, "1 ≤ giorni ≤ 3650"),
     "SLOW_TARGET_FACTOR": (0.0, 5.0, "0 ≤ SLOW_TARGET_FACTOR ≤ 5"),
@@ -88,8 +89,8 @@ def create_parameters_router(
                 )
         if nome == "SCORTA_MINIMA_NEGOZIO_VENDING" and not float(body.valore).is_integer():
             raise HTTPException(422, "SCORTA_MINIMA_NEGOZIO_VENDING deve essere un numero intero")
-        if nome == "AUTO_ORDER_3_1_ENABLED" and value not in (0, 1):
-            raise HTTPException(422, "AUTO_ORDER_3_1_ENABLED deve essere 0 oppure 1")
+        if nome in {"AUTO_ORDER_3_1_ENABLED", "AUTO_ORDER_WEEKLY_FRIDAY"} and value not in (0, 1):
+            raise HTTPException(422, f"{nome} deve essere 0 oppure 1")
         if nome in {"AUTO_ORDER_LEAD_TIME_GG", "AUTO_ORDER_REVIEW_PERIOD_GG", "AUTO_ORDER_MAX_ETA_IMPORT_GG"} and not float(body.valore).is_integer():
             raise HTTPException(422, f"{nome} deve essere un numero intero di giorni")
 
