@@ -17,7 +17,7 @@ os.environ.setdefault("DB_NAME", "gestionale_test")
 from backend import server
 from backend.auto_order_planning import commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
 from backend.auto_order_migrations import AUTO_ORDER_2_SCHEMA_ID, migrate_auto_order_2_schema
-from backend.auto_order_router import RiconciliaCaricoIn
+from backend.auto_order_router import RiconciliaCaricoIn, ScortaMinimaNegozioIn
 from backend.orders_router import parse_auto_order_excel
 
 
@@ -302,6 +302,67 @@ def test_excel_history_presence_and_changes_do_not_affect_native_sales(isolated_
         assert row["copertura_vending_gg"] > row["copertura_negozio_gg"]
         assert row["fonte_domanda"] == "VENDITE"
         assert "ultimo_import_excel" not in proposal["source_watermarks"]
+
+
+def test_product_shop_minimum_uses_shop_stock_and_is_independent_of_excel_history(isolated_database):
+    db = isolated_database
+
+    async def scenario():
+        await db.prodotti.insert_one({
+            "id": "product", "codice": "P", "descrizione": "P", "categoria": "SIGARETTE",
+            "giacenza_negozio": 12, "prezzo": 5,
+        })
+        await db.vending.insert_one({"id": "column", "codice": "P", "giacenza": 100})
+        before = await server.auto_order()
+        changed = await server.auto_order_module["update_scorta_minima"](
+            "P", ScortaMinimaNegozioIn(minimo=50, version=0))
+        with pytest.raises(HTTPException) as stale:
+            await server.auto_order_module["update_scorta_minima"](
+                "P", ScortaMinimaNegozioIn(minimo=60, version=0))
+        after = await server.auto_order()
+        await db.db_storico_vend.insert_one({"codice": "P", "quantita": 900, "data": "2026-11-09"})
+        with_excel = await server.auto_order()
+        await db.db_storico_vend.update_one({"codice": "P"}, {"$set": {"quantita": 9000}})
+        changed_excel = await server.auto_order()
+        return before, changed, stale.value.status_code, after, with_excel, changed_excel, await db.prodotti.find_one({"codice": "P"})
+
+    before, changed, stale_status, after, with_excel, changed_excel, product = asyncio.run(scenario())
+    assert next(row for row in before["esclusi"] if row["codice"] == "P")["stato"] == "NESSUN ORDINE"
+    assert changed == {"codice": "P", "minimo": 50, "version": 1}
+    assert stale_status == 409
+    row = next(row for row in after["righe"] if row["codice"] == "P")
+    assert row["giacenza_negozio"] == 12 and row["giacenza_vending"] == 100
+    assert row["fabbisogno_scorta_minima_negozio"] == 38
+    assert row["qta_da_ordinare"] == 40
+    assert "SCORTA MINIMA NEGOZIO 50" in row["motivo"]
+    assert product["giacenza_negozio"] == 12 and product["auto_order_version"] == 1
+    assert before["snapshot_key"] != after["snapshot_key"]
+    assert after["snapshot_key"] == with_excel["snapshot_key"] == changed_excel["snapshot_key"]
+
+
+def test_product_shop_minimum_does_not_duplicate_dated_incoming_supply(isolated_database):
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def scenario():
+        await db.prodotti.insert_one({
+            "id": "product", "codice": "P", "descrizione": "P", "categoria": "SIGARETTE",
+            "giacenza_negozio": 12, "scorta_minima_negozio_auto_order": 50,
+        })
+        await db.ordini_fornitore.insert_one({
+            "id": "order", "batch_key": "order", "stato": "INVIATO", "status": "COMPLETED",
+        })
+        await db.ordini_fornitore_righe.insert_one({
+            "id": "line", "batch_key": "order", "codice": "P", "quantita": 40,
+            "quantita_ricevuta": 0, "data_consegna_prevista": (today + timedelta(days=2)).isoformat(),
+        })
+        result = await server.auto_order()
+        return next(row for row in [*result["righe"], *result["esclusi"]] if row["codice"] == "P")
+
+    row = asyncio.run(scenario())
+    assert row["quantita_in_arrivo"] == 40
+    assert row["fabbisogno_scorta_minima_negozio"] == 0
+    assert row["qta_da_ordinare"] == 0
 
 
 def test_native_italian_dates_are_counted_in_configured_long_window(isolated_database):

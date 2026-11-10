@@ -68,6 +68,17 @@ fabbisogno netto = max(0, target - posizione utilizzabile)
 quantità proposta = ceil(fabbisogno netto / lotto) × lotto
 ```
 
+L'operatore può impostare in Auto-Order una **scorta minima per singolo
+prodotto nel negozio**. Il valore è conservato in `prodotti` nel database;
+0 disattiva la regola. Quando `giacenza_negozio + forniture affidabili entro
+l'orizzonte` scende sotto il minimo, il fabbisogno considera anche questa
+differenza, arrotondata al lotto. La giacenza vending non copre il minimo del
+negozio. Una regola esplicita può proporre merce anche senza vendite recenti,
+senza inventare domanda; anomalie di stock, vendite sovrapposte e forniture
+senza data futura affidabile continuano a richiedere controllo. Dopo una
+modifica l'ordine deve essere ricalcolato prima della conferma. La scorta
+minima guida gli ordini futuri e non modifica le giacenze fisiche.
+
 Con lead time configurato si ordina quando la posizione utilizzabile è sotto
 il punto di riordino; in modalità legacy resta la soglia di copertura 7 giorni.
 La domanda è ripartita tra negozio e vending in base ai canali delle vendite

@@ -131,6 +131,32 @@ export default function AutoOrder() {
     }
   };
 
+  const updateMinimum = async row => {
+    const answer = window.prompt(`Scorta minima da tenere in negozio per ${row.descrizione} (${row.codice}). Inserisci 0 per disattivarla:`, String(row.scorta_minima_negozio_auto_order || 0));
+    if (answer === null) return;
+    const minimo = Number(answer.trim());
+    if (!answer.trim() || !Number.isInteger(minimo) || minimo < 0 || minimo > 100000) {
+      toast.error("Inserisci un numero intero tra 0 e 100000");
+      return;
+    }
+    try {
+      const response = await api.patch(`/auto-order/prodotti/${encodeURIComponent(row.codice)}/scorta-minima`, {
+        minimo, version: row.auto_order_version || 0,
+      });
+      const updated = item => item.codice === row.codice ? {
+        ...item, scorta_minima_negozio_auto_order: response.data.minimo,
+        auto_order_version: response.data.version,
+      } : item;
+      setData(current => current ? { ...current, righe: current.righe.map(updated), esclusi: current.esclusi.map(updated) } : current);
+      if (minimo !== (row.scorta_minima_negozio_auto_order || 0)) {
+        setSupplierChanged(true);
+        toast.success("Scorta minima aggiornata. Ricalcola Auto-Order per vedere la proposta.");
+      }
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Impossibile aggiornare la scorta minima"));
+    }
+  };
+
   const findExistingReceipts = async batch => {
     try {
       const response = await api.get(`/auto-order/forniture/${encodeURIComponent(batch.batch_key)}/carichi-esistenti`);
@@ -255,7 +281,7 @@ export default function AutoOrder() {
         <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel {categoria ? "selezione" : "fornitore"}
         </button>
-        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica delle forniture" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || Boolean(categoria) || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={categoria ? "Seleziona Tutte le categorie per confermare l'intero ordine" : alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Salvataggio..." : alreadyConfirmed ? "Ordine fornitore salvato" : "Salva ordine fornitore"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
@@ -263,7 +289,7 @@ export default function AutoOrder() {
         </button>
       </div>
       {invalidRows.length > 0 && <p role="alert" className="mb-4 text-sm font-semibold text-red-700">Quantità non valide: {invalidRows.map(row => `${row.codice} (lotto ${row.lotto_ordine || 1})`).join(", ")}. Inserisci multipli interi del lotto.</p>}
-      {supplierChanged && <p role="alert" className="mb-4 text-sm font-semibold text-amber-800">Fornitura modificata: ricalcola Auto-Order per aggiornare la proposta.</p>}
+      {supplierChanged && <p role="alert" className="mb-4 text-sm font-semibold text-amber-800">Dati di pianificazione modificati: ricalcola Auto-Order per aggiornare la proposta.</p>}
       {data?.data_quality && <p className={`mb-4 rounded border p-3 text-sm ${data.data_quality === "DATI_AFFIDABILI" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}>Qualità dati: <b>{data.data_quality.replaceAll("_", " ")}</b>. {data.data_quality === "DATI_INCOERENTI" ? "Correggi le anomalie di forniture prima di confermare." : data.data_quality === "DATI_PARZIALI" ? "Verifica le vendite native e gli articoli segnalati prima di procedere." : "Vendite e giacenze operative disponibili nel database."}</p>}
       {data?.giorni_ritardo_dati > 1 && <p className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Ultima vendita nativa registrata {data.giorni_ritardo_dati} giorni fa. Verifica che le vendite siano aggiornate prima di confermare.</p>}
 
@@ -358,7 +384,7 @@ export default function AutoOrder() {
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
         Il magazzino reale è la <b>giacenza negozio fisica</b> registrata nella WebApp. Il fabbisogno complessivo considera separatamente vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
         Le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
-        Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale.
+        Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale. Puoi impostare una scorta minima per articolo nella colonna “Scorta min. neg.”: considera solo il negozio e gli arrivi affidabili; 0 la disattiva.
       </div>
 
       <div className="flex flex-col sm:flex-row sm:items-end gap-3 mb-4">
@@ -391,6 +417,7 @@ export default function AutoOrder() {
                 <Th sortKey="copertura_gg" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Cop. min. (gg)</Th>
                 <Th sortKey="quantita_in_arrivo" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">In arrivo</Th>
                 <Th sortKey="target_scorta" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Target</Th>
+                <Th sortKey="scorta_minima_negozio_auto_order" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Scorta min. neg.</Th>
                 <Th sortKey="lotto_ordine" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Lotto</Th>
                 <Th sortKey="qta_da_ordinare" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Qta da ordinare</Th>
                 <Th sortKey="totale" currentKey={sortKey} dir={sortDir} onClick={toggle} align="right">Val. listino</Th>
@@ -400,7 +427,7 @@ export default function AutoOrder() {
               </tr>
             </thead>
             <tbody>
-              {loading && !data && <tr><td colSpan={19} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
+              {loading && !data && <tr><td colSpan={20} className="text-center py-8 text-slate-400">Elaborazione…</td></tr>}
               {righe.map(r => (
                 <tr key={r.codice} data-testid={`ao-row-${r.codice}`}>
                   <td className="font-mono">{r.codice}</td>
@@ -416,6 +443,7 @@ export default function AutoOrder() {
                   <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`} title={`Negozio: ${r.copertura_negozio_gg ?? '∞'} gg · Vending: ${r.copertura_vending_gg ?? '∞'} gg`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
                   <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
+                  <td className="text-right"><button type="button" data-testid={`ao-minimum-${r.codice}`} onClick={() => updateMinimum(r)} className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50" aria-label={`Imposta scorta minima negozio per ${r.descrizione}`} title="Soglia fisica minima in negozio; 0 la disattiva">{formatNum(r.scorta_minima_negozio_auto_order || 0)} ✎</button></td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
                   <td className="text-right">
                     {draftCodes.has(r.codice) ? <input data-testid={`ao-quantity-${r.codice}`} type="number" min="1" step="1" value={r.qta_da_ordinare} onChange={e => changeQuantity(r.codice, e.target.value)} className="w-20 rounded border border-slate-300 px-2 py-1 text-right font-mono font-bold" aria-label={`Quantità ${r.descrizione}`} /> : "—"}
@@ -432,7 +460,7 @@ export default function AutoOrder() {
                   </td>
                 </tr>
               ))}
-              {!loading && !error && righe.length === 0 && <tr><td colSpan={19} className="text-center py-8 text-slate-400">{categoria ? "Nessun articolo nella categoria selezionata." : "Nessun articolo nella bozza d'ordine."}</td></tr>}
+              {!loading && !error && righe.length === 0 && <tr><td colSpan={20} className="text-center py-8 text-slate-400">{categoria ? "Nessun articolo nella categoria selezionata." : "Nessun articolo nella bozza d'ordine."}</td></tr>}
             </tbody>
           </table>
         </div>

@@ -45,6 +45,11 @@ class RiconciliaCaricoIn(BaseModel):
     conferma_differenze: bool = False
 
 
+class ScortaMinimaNegozioIn(BaseModel):
+    minimo: int = Field(ge=0, le=100000)
+    version: int = Field(ge=0)
+
+
 def relevant_auto_order_params(params: Dict[str, Any]) -> Dict[str, Any]:
     names = {
         "GIORNI_COPERTURA_MIN", "GIORNI_COPERTURA_TARGET",
@@ -72,6 +77,7 @@ def auto_order_snapshot_key(ao: Dict[str, Any]) -> str:
                 "giacenza_negozio": row.get("giacenza_negozio"),
                 "giacenza_vending": row.get("giacenza_vending"),
                 "auto_order_version": row.get("auto_order_version"),
+                "scorta_minima_negozio_auto_order": row.get("scorta_minima_negozio_auto_order"),
                 "venduto_breve": row.get("venduto_breve"),
                 "venduto_lungo": row.get("venduto_lungo"),
                 "quantita_in_arrivo": row.get("quantita_in_arrivo"),
@@ -109,6 +115,29 @@ def create_auto_order_router(
     session_kwargs: Callable[[Any], Dict[str, Any]],
 ) -> Dict[str, Any]:
     router = APIRouter()
+
+    @router.patch("/auto-order/prodotti/{codice}/scorta-minima")
+    async def update_scorta_minima(codice: str, body: ScortaMinimaNegozioIn):
+        db = get_database()
+        product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
+        if not product:
+            raise HTTPException(404, "Prodotto non trovato")
+        current = int(product.get("scorta_minima_negozio_auto_order", 0) or 0)
+        version = int(product.get("auto_order_version", 0) or 0)
+        if version != body.version:
+            raise HTTPException(409, "Prodotto modificato nel frattempo: ricalcola Auto-Order")
+        if current == body.minimo:
+            return {"codice": codice, "minimo": current, "version": version}
+        version_filter = {"auto_order_version": version} if version else {"$or": [{"auto_order_version": 0}, {"auto_order_version": {"$exists": False}}]}
+        changed = await db.prodotti.update_one(
+            {"codice": codice, **version_filter},
+            {"$set": {"scorta_minima_negozio_auto_order": body.minimo}, "$inc": {"auto_order_version": 1}},
+        )
+        if changed.matched_count != 1:
+            raise HTTPException(409, "Prodotto modificato nel frattempo: ricalcola Auto-Order")
+        await record_audit_event("MODIFICATO", "PRODOTTO", product.get("id", codice), prima=product,
+                                 dopo={**product, "scorta_minima_negozio_auto_order": body.minimo, "auto_order_version": version + 1})
+        return {"codice": codice, "minimo": body.minimo, "version": version + 1}
 
     @router.get("/auto-order/forniture")
     async def list_forniture():
@@ -404,6 +433,7 @@ def create_auto_order_router(
             giac_vending = int(prodotto.get("giacenza_vending", 0) or 0)
             venduti_vending = int(prodotto.get("venduti_vending", 0) or 0)
             giac_tot = giac_negozio + giac_vending
+            scorta_minima_negozio = max(0, int(prodotto.get("scorta_minima_negozio_auto_order", 0) or 0))
             magazzino_reale_lordo = giac_negozio
             magazzino_reale = max(0, magazzino_reale_lordo)
             anomalia_stock = giac_negozio < 0
@@ -468,7 +498,8 @@ def create_auto_order_router(
             punto_riordino = target_scorta if lead_time > 0 else math.ceil(domanda_gg * gg_min)
             # An order is usable for target coverage only if due within the planning horizon.
             inventory_position = giac_tot + incoming
-            fabbisogno_grezzo = max(0, target_scorta - inventory_position)
+            fabbisogno_scorta_minima = max(0, scorta_minima_negozio - (giac_negozio + incoming))
+            fabbisogno_grezzo = max(0, target_scorta - inventory_position, fabbisogno_scorta_minima)
             shortage_day = projected_shortage(giac_tot, domanda_gg, receipts, planning_today, int(target_days)) if domanda_gg > 0 else None
             shop_shortage_day = projected_shortage(giac_negozio, domanda_negozio_gg, receipts, planning_today, int(target_days)) if domanda_negozio_gg > 0 else None
             vending_shortage_day = projected_shortage(giac_vending, domanda_vending_gg, [], planning_today, int(target_days)) if domanda_vending_gg > 0 else None
@@ -482,7 +513,7 @@ def create_auto_order_router(
             elif supply_anomalies:
                 stato = "ANOMALIA"
                 motivo = "ORDINE FORNITORE CON QUANTITÀ INCOERENTI · VERIFICARE RICEZIONI"
-            elif venduto_lungo <= 0:
+            elif venduto_lungo <= 0 and fabbisogno_scorta_minima == 0:
                 if magazzino_reale < lotto:
                     stato = "CONTROLLO MANUALE"
                     motivo = (
@@ -494,12 +525,16 @@ def create_auto_order_router(
             elif sales and sales["anomalie_riconciliazione"]:
                 stato = "CONTROLLO MANUALE"
                 motivo = "VENDITE CON FONTI SOVRAPPOSTE O RETTIFICHE · VERIFICARE RICONCILIAZIONE"
-            elif undated and giac_tot < target_scorta:
+            elif undated and (giac_tot < target_scorta or fabbisogno_scorta_minima > 0):
                 stato = "CONTROLLO MANUALE"
                 motivo = f"{undated} PEZZI ORDINATI SENZA DATA FUTURA AFFIDABILE · VERIFICARE FORNITORE"
             elif incoming and shortage_day and fabbisogno_grezzo == 0:
                 stato = "CONTROLLO MANUALE"
                 motivo = f"FORNITURA GIÀ ORDINATA MA STOCK IN ESAURIMENTO IL {shortage_day} · SOLLECITARE CONSEGNA"
+            elif fabbisogno_scorta_minima > 0:
+                stato = "ORDINA ORA"
+                motivo = f"SCORTA MINIMA NEGOZIO {scorta_minima_negozio} · DISPONIBILI {giac_negozio + incoming} · FABBISOGNO {fabbisogno_grezzo}"
+                qta = rounded_order_quantity(fabbisogno_grezzo, lotto)
             elif copertura_negozio_gg is not None and copertura_negozio_gg < gg_min and fabbisogno_grezzo == 0 and giac_vending > 0 and not incoming:
                 stato = "CONTROLLO MANUALE"
                 motivo = "NEGOZIO SOTTO SOGLIA; SCORTA VENDING NON DISPONIBILE DIRETTAMENTE IN NEGOZIO"
@@ -542,6 +577,8 @@ def create_auto_order_router(
                 "venduti_vending": venduti_vending,
                 "giacenza_vending": giac_vending,
                 "auto_order_version": int(prodotto.get("auto_order_version", 0) or 0),
+                "scorta_minima_negozio_auto_order": scorta_minima_negozio,
+                "fabbisogno_scorta_minima_negozio": fabbisogno_scorta_minima,
                 "magazzino_reale_lordo": magazzino_reale_lordo,
                 "magazzino_reale": magazzino_reale,
                 "venduto_periodo": venduto_breve,
@@ -1159,6 +1196,7 @@ def create_auto_order_router(
         "carichi_esistenti": carichi_esistenti,
         "chiudi_con_carico": chiudi_con_carico,
         "update_fornitura": update_fornitura,
+        "update_scorta_minima": update_scorta_minima,
         "auto_order_selected_rows": auto_order_selected_rows,
         "auto_order_rows_from_query": auto_order_rows_from_query,
         "conferma_auto_order": conferma_auto_order,

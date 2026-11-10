@@ -54,7 +54,9 @@ eventi o quantità per colmare i vuoti.
 1. Registrare la vendita in negozio nella WebApp o acquisire il CSV del
    distributore. Entrambi aggiornano `vendite` e le rispettive scorte.
 2. Aprire Auto-Order: domanda e posizione inventariale sono calcolate dal
-   database operativo, con finestra che termina nel giorno corrente.
+   database operativo, con finestra che termina nel giorno corrente. Se il
+   controllo fisico richiede una scorta di banco superiore alla previsione,
+   impostare il minimo del singolo articolo nella WebApp e ricalcolare.
 3. Salvare l'ordine fornitore dalla WebApp. PDF ed Excel sono export facoltativi.
 4. In Carico Merce usare **Precompila da Auto-Order**, indicare il riferimento
    ordine e confermare il carico. Il residuo dell'ordine e lo stock negozio si

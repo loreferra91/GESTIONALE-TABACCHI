@@ -166,6 +166,19 @@ test("Ricalcola chiede prima di sostituire una bozza modificata", async () => {
   confirm.mockRestore();
 });
 
+test("salva la scorta minima del negozio e richiede il ricalcolo", async () => {
+  const prompt = jest.spyOn(window, "prompt").mockReturnValue("50");
+  api.patch.mockResolvedValue({ data: { codice: "AMMS100", minimo: 50, version: 1 } });
+  const show = [...container.querySelectorAll("button")].find(button => button.textContent.includes("Mostra esclusi"));
+  await act(async () => show.click());
+  await act(async () => container.querySelector('[data-testid="ao-minimum-AMMS100"]').click());
+  expect(api.patch).toHaveBeenCalledWith("/auto-order/prodotti/AMMS100/scorta-minima", { minimo: 50, version: 0 });
+  expect(container.querySelector('[data-testid="ao-minimum-AMMS100"]').textContent).toContain("50");
+  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(true);
+  expect(container.querySelector('[role="alert"]').textContent).toContain("ricalcola Auto-Order");
+  prompt.mockRestore();
+});
+
 test("una quantità frazionaria blocca la conferma senza arrotondamenti silenziosi", async () => {
   await write(container.querySelector('[data-testid="ao-quantity-AUTO1"]'), "1.5");
   expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("1.5");
