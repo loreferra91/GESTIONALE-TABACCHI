@@ -260,3 +260,38 @@ def test_vending_capacity_is_respected_and_inconsistent_capacity_suspends():
     row = compare_policies(active, [])["rows"][0]
     assert "CAPACITA_VENDING_INCOERENTE" in row["anomalie"]
     assert row["quantita_suggerita"] == 0
+
+
+
+def test_incremental_history_no_50000_event_cutoff():
+    """Exceed the previous HTTP cap without accumulating raw event documents."""
+    collector = NativeSalesAccumulator(TODAY, 90)
+    for index in range(50001):
+        collector.add({
+            "id": f"sale-{index}", "codice": "P",
+            "data": TODAY.isoformat(), "canale": "NEGOZIO", "quantita": 1,
+        })
+    series, evidence = collector.finish()
+    assert sum(series["P"]["NEGOZIO"]) == 50001
+    assert evidence["P"]["issues"] == []
+
+
+def test_missing_vending_capacity_blocks_shadow_order():
+    active = {
+        "planning_day": TODAY.isoformat(), "parametri": {},
+        "finestra_breve_gg": 10, "finestra_lunga_gg": 30,
+        "righe": [], "esclusi": [
+            {"codice": "P", "descrizione": "P", "giacenza_negozio": 20,
+             "giacenza_vending": 0, "lotto_ordine": 1,
+             "qta_da_ordinare": 0}
+        ],
+    }
+    native = [{
+        "id": f"vending-{day}", "codice": "P",
+        "data": (TODAY - timedelta(days=day)).isoformat(),
+        "canale": "VENDING", "sorgente": "CSV_VENDING",
+        "csv_event_key": f"event-{day}", "quantita": 2,
+    } for day in range(30)]
+    row = compare_policies(active, native)["rows"][0]
+    assert "CAPACITA_VENDING_NON_VERIFICATA" in row["anomalie"]
+    assert row["quantita_suggerita"] == 0
