@@ -134,7 +134,9 @@ def test_comparison_is_read_only_and_legacy_history_is_not_an_input():
                "canale": "NEGOZIO", "sorgente": "MANUALE", "quantita": 1}
               for day in range(30)]
     before = compare_policies(active, native)
-    assert before["rows"][0]["quantita_suggerita"] > 0
+    assert before["rows"][0]["quantita_calcolata_3_1"] > 0
+    assert before["rows"][0]["quantita_ordinabile_3_1"] == 0
+    assert "STORICO INSUFFICIENTE" in before["rows"][0]["motivi_blocco_3_1"]
     assert before["rows"][0]["domanda_prevista_gg"] > 0
     assert active["esclusi"][0]["qta_da_ordinare"] == 0
     assert compare_policies(active, native) == before
@@ -295,6 +297,34 @@ def test_missing_vending_capacity_blocks_shadow_order():
     row = compare_policies(active, native)["rows"][0]
     assert "CAPACITA_VENDING_NON_VERIFICATA" in row["anomalie"]
     assert row["quantita_suggerita"] == 0
+
+
+def test_comparison_separates_mathematical_need_from_csv_quality_block():
+    active = {
+        "planning_day": TODAY.isoformat(), "parametri": {},
+        "righe": [], "esclusi": [{
+            "codice": "P", "descrizione": "P", "giacenza_negozio": 0,
+            "giacenza_vending": 0, "vending_capacity": 10,
+            "lotto_ordine": 10, "qta_da_ordinare": 70,
+        }],
+    }
+    native = [{
+        "id": f"shop-{day}", "codice": "P",
+        "data": (TODAY - timedelta(days=day)).isoformat(),
+        "canale": "NEGOZIO", "sorgente": "MANUALE", "quantita": 1,
+    } for day in range(90)]
+    native.append({
+        "id": "old-csv", "codice": "P", "data": TODAY.isoformat(),
+        "canale": "VENDING", "sorgente": "CSV_VENDING", "quantita": 1,
+    })
+    comparison = compare_policies(active, native)
+    row = comparison["rows"][0]
+    assert row["quantita_calcolata_3_1"] > 0
+    assert row["quantita_ordinabile_3_1"] == row["quantita_suggerita"] == 0
+    assert row["motivi_blocco_3_1"] == ["CSV_SENZA_EVENT_KEY"]
+    assert comparison["summary"]["pieces_3_calculated"] == row["quantita_calcolata_3_1"]
+    assert comparison["summary"]["pieces_3_blocked"] == row["quantita_calcolata_3_1"]
+    assert comparison["summary"]["products_3_blocked"] == 1
 
 
 

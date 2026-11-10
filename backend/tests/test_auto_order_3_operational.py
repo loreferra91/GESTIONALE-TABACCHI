@@ -72,6 +72,27 @@ def test_readiness_needs_explicit_opt_in_real_supplier_schedule_and_native_histo
     assert readiness(fixture_ao(data_quality="DATI_PARZIALI"), comparison)["operational_ready"] is False
 
 
+def test_readiness_rejects_31_when_quality_suppresses_a_needed_product():
+    ao = fixture_ao()
+    comparison = fixture_comparison(rows=[
+        {"codice": "SAFE", "quantita_suggerita": 30, "quantita_2": 20,
+         "qualita_previsione": "OSSERVABILE", "anomalie": []},
+        {"codice": "AMMS2214", "quantita_suggerita": 0, "quantita_2": 70,
+         "fabbisogno_netto": 61, "data_rischio_esaurimento": "2026-11-11",
+         "qualita_previsione": "DATI_AMBIGUI", "anomalie": ["CSV_SENZA_EVENT_KEY"]},
+    ])
+    result = readiness(ao, comparison)
+    assert result["operational_ready"] is False
+    assert result["active_policy"] == POLICY_2
+    assert result["unverified_needed_products"] == 1
+    assert "AMMS2214" in result["operational_blockers"][-1]
+
+    comparison["rows"][1].update(
+        quantita_2=0, fabbisogno_netto=0, data_rischio_esaurimento=None
+    )
+    assert readiness(ao, comparison)["operational_ready"] is True
+
+
 def test_31_selector_allows_verified_supplementary_order_not_unbounded_override():
     ao, comparison = fixture_ao(), fixture_comparison()
     rows = select_operational_rows(

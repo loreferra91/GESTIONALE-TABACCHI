@@ -117,10 +117,12 @@ test("mostra il confronto 3.0 in sola lettura senza sostituire la conferma 2.0",
   const comparison = {
     mode: "CONFRONTO_SENZA_CONFERMA", native_history_days: 60,
     summary: { stockout_risk: 1, supplementary_orders: 1, already_on_order: 1,
-      vending_refills: 0, pieces_2: 5, pieces_3: 3, insufficient_data: 0,
+      vending_refills: 0, pieces_2: 5, pieces_3: 3, pieces_3_calculated: 3,
+      pieces_3_blocked: 0, insufficient_data: 0,
       known_purchase_cost: 9, missing_purchase_costs: 0 },
     rows: [{ codice: "AUTO1", descrizione: "Prodotto automatico", quantita_2: 5,
-      quantita_suggerita: 3, metodo_previsione: "BASELINE 10/30",
+      quantita_suggerita: 3, quantita_calcolata_3_1: 3,
+      quantita_ordinabile_3_1: 3, motivi_blocco_3_1: [], metodo_previsione: "BASELINE 10/30",
       motivazione: "Stock fisico 10; arrivi 20; fabbisogno netto 3.",
       domanda_negozio_gg: 1, domanda_vending_gg: 0, scorta_sicurezza: 1,
       inventory_position: 30, planned_vending_transfer: 0,
@@ -132,13 +134,39 @@ test("mostra il confronto 3.0 in sola lettura senza sostituire la conferma 2.0",
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
   expect(container.textContent).toContain("Previsione e pianificazione");
   expect(container.querySelector('[data-testid="ao-comparison-AUTO1"]').textContent)
-    .toContain("2.0 5 / 3.1 3");
+    .toContain("2.0 5 / 3.1 calcolata 3 / ordinabile 3");
   await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
   const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
   await act(async () => confirm.click());
   expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
     righe: [{ codice: "AUTO1", quantita: 5 }],
   }));
+});
+
+test("mostra fabbisogno calcolato e blocco CSV senza confondere zero con scorta sufficiente", async () => {
+  const comparison = {
+    mode: "CONFRONTO_SENZA_CONFERMA",
+    operational_ready: false, operational_blockers: ["Vendite CSV da verificare"],
+    native_history_days: 90,
+    summary: { pieces_2: 70, pieces_3: 0, pieces_3_calculated: 60,
+      pieces_3_blocked: 60, products_3_blocked: 1 },
+    rows: [{ codice: "AUTO1", descrizione: "Prodotto automatico", quantita_2: 70,
+      quantita_suggerita: 0, quantita_calcolata_3_1: 60,
+      quantita_ordinabile_3_1: 0, motivi_blocco_3_1: ["CSV_SENZA_EVENT_KEY"],
+      metodo_previsione: "BASELINE 10/30", motivazione: "Fabbisogno netto 56; lotto 10.",
+      domanda_negozio_gg: 2, domanda_vending_gg: 1, scorta_sicurezza: 5,
+      inventory_position: 0, planned_vending_transfer: 0,
+      qualita_previsione: "DATI_AMBIGUI", classe_rotazione: "FAST MOVER",
+      metodo_negozio: "BASELINE 10/30", metodo_vending: "BASELINE 10/30" }],
+  };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto" ? comparison
+    : url === "/auto-order" ? response : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  const detail = container.querySelector('[data-testid="ao-comparison-AUTO1"]');
+  expect(detail.textContent).toContain("2.0 70 / 3.1 calcolata 60 / ordinabile 0");
+  expect(detail.textContent).toContain("Motivi blocco 3.1: CSV_SENZA_EVENT_KEY");
+  expect(container.textContent).toContain("3.1 sospesa dai controlli 60 · 1 articolo");
+  expect(container.querySelector('[data-testid="ao-use-3-1"]').disabled).toBe(true);
 });
 
 test("permette una riga integrativa datata e blocca quantità oltre il fabbisogno", async () => {
