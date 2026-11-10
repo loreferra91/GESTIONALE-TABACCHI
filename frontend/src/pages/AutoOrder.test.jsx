@@ -132,7 +132,7 @@ test("mostra il confronto 3.0 in sola lettura senza sostituire la conferma 2.0",
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
   expect(container.textContent).toContain("Previsione e pianificazione");
   expect(container.querySelector('[data-testid="ao-comparison-AUTO1"]').textContent)
-    .toContain("2.0 5 / 3.0 3");
+    .toContain("2.0 5 / 3.1 3");
   await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
   const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
   await act(async () => confirm.click());
@@ -322,4 +322,57 @@ test("annulla una fornitura segnata inviata solo dopo conferma e la rimuove dall
   expect(api.patch).toHaveBeenCalledWith("/auto-order/forniture/draft-key", { version: 2, stato: "ANNULLATO" });
   expect(container.textContent).not.toContain("Forniture pendenti");
   confirm.mockRestore();
+});
+
+
+test("3.1 pronto carica la quantita prevista e conferma con snapshot politica", async () => {
+  const forecast = {
+    mode: "CONFRONTO_SENZA_CONFERMA", operational_ready: true,
+    policy_snapshot_key: "auto-order-3-1:test-snapshot",
+    native_history_days: 90,
+    operational_blockers: [],
+    summary: { stockout_risk: 0, supplementary_orders: 0, already_on_order: 0,
+      vending_refills: 0, pieces_2: 5, pieces_3: 3, insufficient_data: 0,
+      known_purchase_cost: 0, missing_purchase_costs: 0 },
+    rows: [{ codice: "AUTO1", descrizione: "Prodotto automatico",
+      quantita_2: 5, quantita_suggerita: 3, metodo_previsione: "BASELINE 10/30",
+      motivazione: "Riordina tre pezzi", qualita_previsione: "OSSERVABILE",
+      anomalie: [], domanda_negozio_gg: 1, domanda_vending_gg: 0,
+      scorta_sicurezza: 1, inventory_position: 0, planned_vending_transfer: 0,
+      metodo_negozio: "BASELINE 10/30", metodo_vending: "BASELINE 10/30" }],
+  };
+  api.get.mockImplementation(url => Promise.resolve({
+    data: url === "/auto-order/confronto" ? forecast :
+      url === "/auto-order" ? response : [],
+  }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  await act(async () => container.querySelector('[data-testid="ao-use-3-1"]').click());
+  expect(container.querySelector('[data-testid="ao-use-3-1"]').getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("3");
+  expect(container.querySelector('[data-testid="ao-pdf"]').disabled).toBe(true);
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const submit = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  await act(async () => submit.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    policy_version: "AUTO_ORDER_3_1",
+    policy_snapshot_key: "auto-order-3-1:test-snapshot",
+    righe: [{ codice: "AUTO1", quantita: 3 }],
+  }));
+});
+
+test("3.1 senza parametri validi resta disabilitato e mantiene fallback 2.0", async () => {
+  const forecast = {
+    mode: "CONFRONTO_SENZA_CONFERMA",
+    operational_ready: false,
+    policy_snapshot_key: "snapshot-disabled",
+    operational_blockers: ["Configurare il lead time reale del fornitore"],
+    native_history_days: 90, summary: { pieces_2: 5, pieces_3: 3 }, rows: [],
+  };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto"
+    ? forecast : url === "/auto-order" ? response : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  expect(container.querySelector('[data-testid="ao-use-3-1"]').disabled).toBe(true);
+  expect(container.querySelector('[data-testid="ao-use-2"]').getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("5");
+  expect(container.textContent).toContain("Configurare il lead time reale del fornitore");
 });

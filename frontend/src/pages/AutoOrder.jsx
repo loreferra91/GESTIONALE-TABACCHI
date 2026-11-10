@@ -19,6 +19,8 @@ export default function AutoOrder() {
   const [error, setError] = useState("");
   const [comparison, setComparison] = useState(null);
   const [comparisonError, setComparisonError] = useState("");
+  const [orderPolicy, setOrderPolicy] = useState("AUTO_ORDER_2");
+  const orderPolicyRef = useRef(null);
   const [excludedCategories, setExcludedCategories] = useState([]);
   const [mostraEsclusi, setMostraEsclusi] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -57,9 +59,9 @@ export default function AutoOrder() {
   const lungoGg = data?.finestra_lunga_gg || 30;
   const snapshotKey = data?.snapshot_key || "";
   const draftSignature = JSON.stringify(allRighe.map(r => [r.codice, r.qta_da_ordinare]).sort((a, b) => a[0].localeCompare(b[0])));
-  const confirmationKey = `${snapshotKey}:${draftSignature}`;
+  const confirmationKey = `${orderPolicy}:${snapshotKey}:${orderPolicy === "AUTO_ORDER_3_1" ? comparison?.policy_snapshot_key || "" : ""}:${draftSignature}`;
   const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(confirmationKey));
-  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0 || (Number(row.quantita_in_arrivo || 0) > 0 && Number(row.qta_da_ordinare) > Number(row.quantita_integrativa_massima || 0)));
+  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0 || ((orderPolicy === "AUTO_ORDER_3_1" || Number(row.quantita_in_arrivo || 0) > 0) && Number(row.qta_da_ordinare) > Number(row.quantita_integrativa_massima || 0)));
   const pendingPieces = [...(data?.righe || []), ...(data?.esclusi || [])].reduce((sum, row) => sum + (Number(row.quantita_in_arrivo) || 0) + (Number(row.quantita_senza_data) || 0), 0);
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
@@ -68,6 +70,40 @@ export default function AutoOrder() {
     initial: "totale", dir: "desc",
     searchFields: ["codice", "descrizione", "categoria", "stato", "motivo"],
   });
+
+  const make31Draft = (nativeData, forecast) => {
+    const original = new Map([...(nativeData.righe || []), ...(nativeData.esclusi || [])].map(row => [row.codice, row]));
+    return (forecast?.rows || [])
+      .filter(row => Number(row.quantita_suggerita) > 0 && row.qualita_previsione === "OSSERVABILE" && !(row.anomalie || []).length)
+      .map(row => {
+        const source = original.get(row.codice);
+        if (!source || source.anomalia || (source.anomalie_riconciliazione || []).length || (source.anomalie_forniture || []).length || Number(source.quantita_senza_data || 0) > 0) return null;
+        const quantity = Number(row.quantita_suggerita);
+        return {
+          ...source, stato: "ORDINA ORA", qta_da_ordinare: quantity,
+          totale: Math.round(Number(source.prezzo || 0) * quantity * 100) / 100,
+          quantita_integrativa_massima: quantity, motivo: row.motivazione,
+        };
+      }).filter(Boolean);
+  };
+
+  const applyPolicy = (policy, forecast = comparison) => {
+    if (!data) return;
+    if (policy === "AUTO_ORDER_3_1" && !forecast?.operational_ready) {
+      toast.error("3.1 non attivabile: controlla parametri, storico e qualità dei dati");
+      return;
+    }
+    if (JSON.stringify(draftRows.map(row => [row.codice, row.qta_da_ordinare])) !== originalDraftRef.current &&
+        !window.confirm("La bozza corrente ha modifiche non salvate. Sostituirla con le proposte della politica selezionata?")) return;
+    const nextRows = policy === "AUTO_ORDER_3_1" ? make31Draft(data, forecast) : (data.righe || []);
+    orderPolicyRef.current = policy;
+    setOrderPolicy(policy);
+    draftRowsRef.current = nextRows;
+    originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
+    setDraftRows(nextRows);
+    setSavedBatchKey("");
+    setSavedConfirmationKey("");
+  };
 
   const load = useCallback(async (refresh = false) => {
     if (refresh && JSON.stringify(draftRowsRef.current.map(row => [row.codice, row.qta_da_ordinare])) !== originalDraftRef.current) {
@@ -79,21 +115,29 @@ export default function AutoOrder() {
     try {
       const r = await api.get("/auto-order", { timeout: 20000 });
       setData(r.data);
-      const nextRows = r.data.righe || [];
-      draftRowsRef.current = nextRows;
-      originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
-      setDraftRows(nextRows);
-      setSupplierChanged(false);
       const comparisonRequest = api.get("/auto-order/confronto", { timeout: 30000 })
-        .then(response => setComparison(response.data?.mode === "CONFRONTO_SENZA_CONFERMA" ? response.data : null))
-        .catch(() => { setComparison(null); setComparisonError("Confronto 3.0 temporaneamente non disponibile."); });
+        .then(response => response.data?.mode === "CONFRONTO_SENZA_CONFERMA" ? response.data : null)
+        .catch(() => { setComparisonError("Previsione 3.1 non disponibile: continua a usare 2.0."); return null; });
       try {
         const supplies = await api.get("/auto-order/forniture", { timeout: 20000 });
         setPendingOrders(Array.isArray(supplies.data) ? supplies.data : []);
       } catch {
         setPendingOrders([]);
       }
-      await comparisonRequest;
+      const forecast = await comparisonRequest;
+      setComparison(forecast);
+      const preferred = orderPolicyRef.current || (forecast?.operational_ready ? "AUTO_ORDER_3_1" : "AUTO_ORDER_2");
+      const selected = preferred === "AUTO_ORDER_3_1" && forecast?.operational_ready
+        ? "AUTO_ORDER_3_1" : "AUTO_ORDER_2";
+      orderPolicyRef.current = selected;
+      setOrderPolicy(selected);
+      const nextRows = selected === "AUTO_ORDER_3_1" ? make31Draft(r.data, forecast) : (r.data.righe || []);
+      draftRowsRef.current = nextRows;
+      originalDraftRef.current = JSON.stringify(nextRows.map(row => [row.codice, row.qta_da_ordinare]));
+      setDraftRows(nextRows);
+      setSavedBatchKey("");
+      setSavedConfirmationKey("");
+      setSupplierChanged(false);
     } catch (err) {
       const timedOut = err.code === "ECONNABORTED";
       const message = timedOut
@@ -112,6 +156,8 @@ export default function AutoOrder() {
     try {
       const r = await api.post("/auto-order/conferma", {
         snapshot_key: snapshotKey,
+        policy_version: orderPolicy,
+        policy_snapshot_key: orderPolicy === "AUTO_ORDER_3_1" ? comparison?.policy_snapshot_key : null,
         fornitore: supplierName.trim() || null,
         data_consegna_prevista: expectedDelivery || null,
         righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare })),
@@ -178,6 +224,10 @@ export default function AutoOrder() {
     if (savedBatchKey && savedConfirmationKey === confirmationKey) {
       params.set("batch_key", savedBatchKey);
     } else {
+      if (orderPolicy === "AUTO_ORDER_3_1") {
+        toast.error("Conferma prima l'ordine 3.1 per esportare un documento valido.");
+        return;
+      }
       params.set("snapshot_key", snapshotKey);
       params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare }))));
     }
@@ -200,7 +250,12 @@ export default function AutoOrder() {
     setDraftRows(rows => { const next = rows.filter(row => row.codice !== codice); draftRowsRef.current = next; return next; });
   };
 
-  const canManuallyAdd = row => Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
+  const canManuallyAdd = row => orderPolicy === "AUTO_ORDER_3_1"
+    ? Boolean(row && comparison?.operational_ready && !draftCodes.has(row.codice) &&
+        comparison.rows.some(candidate => candidate.codice === row.codice &&
+          candidate.quantita_suggerita > 0 && candidate.qualita_previsione === "OSSERVABILE" &&
+          !(candidate.anomalie || []).length))
+    : Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
     && (!Number(row.quantita_in_arrivo || 0) || (row.stato === "ORDINA ORA" && Number(row.quantita_integrativa_massima || 0) > 0))
     && !Number(row.quantita_senza_data || 0)
     && row.stato !== "ORDINE IN ARRIVO" && !excludedCategories.includes(row.categoria)
@@ -215,7 +270,12 @@ export default function AutoOrder() {
       toast.error(`Per ${row.descrizione} inserisci una quantità positiva multipla del lotto ${lotto}`);
       return;
     }
-    if (Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) {
+    const forecastMax = comparison?.rows?.find(item => item.codice === codice)?.quantita_suggerita;
+    if (orderPolicy === "AUTO_ORDER_3_1" && (forecastMax == null || quantity > Number(forecastMax))) {
+      toast.error(`La quantità massima 3.1 per ${row.descrizione} è ${forecastMax ?? 0}`);
+      return;
+    }
+    if (orderPolicy !== "AUTO_ORDER_3_1" && Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) {
       toast.error(`La quantità integrativa massima per ${row.descrizione} è ${row.quantita_integrativa_massima}`);
       return;
     }
@@ -224,6 +284,7 @@ export default function AutoOrder() {
       stato: "ORDINA ORA",
       motivo: `AGGIUNTO MANUALMENTE · ${row.motivo}`,
       qta_da_ordinare: quantity,
+      quantita_integrativa_massima: orderPolicy === "AUTO_ORDER_3_1" ? Number(forecastMax) : row.quantita_integrativa_massima,
       totale: Math.round(quantity * (row.prezzo || 0) * 100) / 100,
     }]; draftRowsRef.current = next; return next; });
     setSelectedToAdd("");
@@ -287,13 +348,13 @@ export default function AutoOrder() {
 
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={() => load(true)} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF fornitore
         </button>
-        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel fornitore
         </button>
-        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI"} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI" || (orderPolicy === "AUTO_ORDER_3_1" && (!comparison?.operational_ready || !comparison?.policy_snapshot_key))} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Salvataggio..." : alreadyConfirmed ? "Ordine fornitore salvato" : "Salva ordine fornitore"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
@@ -414,7 +475,17 @@ export default function AutoOrder() {
 
       <Card className="mb-4 p-4" data-testid="ao-planning-comparison">
         <h2 className="text-lg font-bold text-slate-900">Previsione e pianificazione</h2>
-        <p className="mt-1 text-sm text-slate-600">Confronto senza effetti sul magazzino: gli ordini reali continuano a usare Auto-Order 2.0. La proposta 3.0 usa solo vendite WebApp e simula arrivi, consumo e ricariche vending.</p>
+        <p className="mt-1 text-sm text-slate-600">L'algoritmo 3.1 usa lo storico nativo, le scorte reali, le consegne e le ricariche vending. Le conferme vengono ricalcolate dal backend. Nessun acquisto è automatico.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="ao-policy-selector">
+          <button type="button" data-testid="ao-use-3-1" aria-pressed={orderPolicy === "AUTO_ORDER_3_1"} disabled={!comparison?.operational_ready || loading} onClick={() => applyPolicy("AUTO_ORDER_3_1")} className={`rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40 ${orderPolicy === "AUTO_ORDER_3_1" ? "border-emerald-700 bg-emerald-50 text-emerald-900" : "border-slate-300"}`}>Usa Auto-Order 3.1</button>
+          <button type="button" data-testid="ao-use-2" aria-pressed={orderPolicy === "AUTO_ORDER_2"} disabled={loading} onClick={() => applyPolicy("AUTO_ORDER_2")} className={`rounded border px-3 py-2 text-sm font-semibold ${orderPolicy === "AUTO_ORDER_2" ? "border-slate-900 bg-slate-100" : "border-slate-300"}`}>Fallback 2.0</button>
+          <span className="text-xs font-semibold text-slate-600">Bozza attiva: {orderPolicy === "AUTO_ORDER_3_1" ? "3.1 — conferma validata" : "2.0"}</span>
+        </div>
+        {comparison && !comparison.operational_ready && <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" data-testid="ao-policy-blockers">
+          <b>3.1 non ancora attivabile per gli ordini reali.</b>
+          <ul className="mt-1 list-disc pl-4">{(comparison.operational_blockers || []).map((reason, i) => <li key={i}>{reason}</li>)}</ul>
+          <p className="mt-1">Configura i parametri reali in Parametri; nel frattempo resta disponibile 2.0. Il passaggio a 3.1 non avviene mai silenziosamente durante una bozza già modificata.</p>
+        </div>}
         {comparisonError && <p className="mt-2 text-sm text-amber-700">{comparisonError}</p>}
         {comparison && <>
           <div className="mt-3 grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
@@ -423,21 +494,21 @@ export default function AutoOrder() {
             <div>Già in arrivo <b>{comparison.summary.already_on_order}</b></div>
             <div>Da ricaricare vending <b>{comparison.summary.vending_refills}</b></div>
             <div>Quantità 2.0 <b>{formatNum(comparison.summary.pieces_2)}</b></div>
-            <div>Quantità 3.0 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
-            {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.0 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
-            {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.0 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
+            <div>Quantità 3.1 <b>{formatNum(comparison.summary.pieces_3)}</b></div>
+            {comparison.summary.simulated_stockouts_2 != null && <div>Rotture simulate 2.0 / 3.1 <b>{comparison.summary.simulated_stockouts_2} / {comparison.summary.simulated_stockouts_3}</b></div>}
+            {comparison.summary.mean_positive_ending_stock_2 != null && <div>Giacenza finale media 2.0 / 3.1 <b>{formatNum(comparison.summary.mean_positive_ending_stock_2, 1)} / {formatNum(comparison.summary.mean_positive_ending_stock_3, 1)}</b></div>}
             <div>Dati da verificare <b>{comparison.summary.insufficient_data}</b></div>
-            <div>Costo noto 3.0 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
+            <div>Costo noto 3.1 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
           </div>
           <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
           <div className="mt-3 max-h-80 overflow-y-auto rounded border">
             {comparison.rows.map(row => <details key={row.codice} className="border-b px-3 py-2 text-sm last:border-b-0" data-testid={`ao-comparison-${row.codice}`}>
-              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.0 {row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
+              <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.1 {row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
               <div className="mt-2 space-y-1 text-slate-600">
                 <p>{row.motivazione}</p>
                 <p>Negozio {formatNum(row.domanda_negozio_gg, 2)}/gg · Vending {formatNum(row.domanda_vending_gg, 2)}/gg · Sicurezza {row.scorta_sicurezza} · Posizione {row.inventory_position} · Trasferimento vending {row.planned_vending_transfer}</p>
                 <p>Qualità: {row.qualita_previsione} · Classe: {row.classe_rotazione} · Modello negozio: {row.metodo_negozio} · Modello vending: {row.metodo_vending}</p>
-                {row.simulazione_2 && <p>Fine orizzonte 2.0: {formatNum(row.simulazione_2.ending_stock, 1)} pezzi; 3.0: {formatNum(row.simulazione_3.ending_stock, 1)} pezzi. Rischio 2.0: {row.simulazione_2.stockout_date || "nessuno"}; 3.0: {row.simulazione_3.stockout_date || "nessuno"}.</p>}
+                {row.simulazione_2 && <p>Fine orizzonte 2.0: {formatNum(row.simulazione_2.ending_stock, 1)} pezzi; 3.1: {formatNum(row.simulazione_3.ending_stock, 1)} pezzi. Rischio 2.0: {row.simulazione_2.stockout_date || "nessuno"}; 3.1: {row.simulazione_3.stockout_date || "nessuno"}.</p>}
                 {Object.keys(row.backtest_negozio || {}).length > 0 && <p>Backtest negozio MAE: {Object.entries(row.backtest_negozio).map(([name, score]) => `${name} ${score.mae}`).join(" · ")}</p>}
               </div>
             </details>)}
@@ -524,14 +595,14 @@ export default function AutoOrder() {
       </Card>
       <ConfirmDialog
         open={confirmOpen}
-        title="Confermare Auto-Order?"
+        title={`Confermare Auto-Order ${orderPolicy === "AUTO_ORDER_3_1" ? "3.1" : "2.0"}?`}
         confirmLabel="Crea ordine fornitore"
         loading={confirming}
         confirmDisabled={data?.data_quality === "DATI_PARZIALI" && (!acknowledgePartial || partialReason.trim().length < 10)}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={conferma}
       >
-        <p>Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
+        <p>Politica selezionata: <b>{orderPolicy === "AUTO_ORDER_3_1" ? "Auto-Order 3.1 (validazione server)" : "Auto-Order 2.0 (fallback)"}</b>. Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <label className="text-sm">Fornitore <input value={supplierName} onChange={event => setSupplierName(event.target.value)} maxLength={120} placeholder="Nome fornitore (facoltativo)" className="mt-1 w-full rounded border px-2 py-1" /></label>
           <label className="text-sm">Consegna prevista <input type="date" value={expectedDelivery} onChange={event => setExpectedDelivery(event.target.value)} className="mt-1 w-full rounded border px-2 py-1" /></label>
