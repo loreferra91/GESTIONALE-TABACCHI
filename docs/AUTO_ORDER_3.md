@@ -135,3 +135,78 @@ esistente usi un cluster/database isolato. Prima di eseguire prove con dati
 di staging occorre verificare in Render e Atlas i valori effettivi senza
 esporre segreti, oltre a backup e procedura di rollback. Nessun deploy o
 migrazione sono parte di questo branch.
+
+
+## Hardening 3.1 (branch feature/auto-order-3-1-hardening)
+
+**Stato: ancora shadow / sola lettura.** Queste correzioni non attivano 3.1
+per la conferma degli ordini, non modificano le giacenze e non eseguono
+migrazioni contabili.
+
+### Fotografia temporale
+
+Lo stock ottenuto da MongoDB è lo stock fisico **già aggiornato** dalle
+vendite registrate durante la giornata. La simulazione non sottrae una
+seconda giornata intera di consumi oggi: il primo giorno commerciale
+completo previsto è **domani** (`forecast_first_full_day`).
+
+La domanda residua di oggi non può essere inferita senza dati infragiornalieri
+validati. Per questo `intraday_demand_not_modelled` espone il limite.
+Le consegne datate sono trattate come disponibili all'inizio della loro data
+nella simulazione; l'ora effettiva non è nota. Una stima di stockout non è
+una garanzia di consegna né una prova di disponibilità intragiornaliera.
+
+Dopo una rottura simulata, la disponibilità viene riportata a zero:
+la domanda inevasa **non** diventa inventario fisico negativo né un carico
+da recuperare automaticamente nella fornitura successiva.
+
+### Trasferimenti interni vending
+
+Le ricariche interne possono essere simulate in **più giorni** e dopo
+una consegna fornitori. `vending_transfer_schedule` contiene le quantità
+e le date consigliate. Si tutela `minimum_shop` e la domanda del banco
+fino alla successiva ricezione nota, senza doppia allocazione.
+
+Il confronto recupera `capacita_max` dalle colonne operative `vending` e
+somma le capacità per codice; non assume una capacità fisica arbitraria.
+Se una vending ha domanda ma non è verificabile la capacità, la proposta
+3.1 è sospesa (`CAPACITA_VENDING_NON_VERIFICATA`). Lo stesso vale quando
+la capacità dichiarata è inferiore alla giacenza fisica
+(`CAPACITA_VENDING_INCOERENTE`). Nessuna ricarica simulata viene eseguita.
+
+### Storico nativo: lettura incrementale
+
+L'endpoint `/api/auto-order/confronto` non tronca più la richiesta
+a 50.000 eventi. Utilizza un cursore MongoDB e
+`NativeSalesAccumulator` per aggregare la domanda a grana
+prodotto/giorno/canale senza creare una lista completa delle transazioni.
+
+La memoria **non è costante**: la deduplicazione conserva gli identificativi
+espliciti degli eventi; con centinaia di migliaia di chiavi distinte
+il consumo cresce. Anche la query sui formati data legacy richiede ancora
+una strategia di normalizzazione e indicizzazione prima di certificare
+prestazioni su dataset molto grandi.
+
+I benchmark di carico reali, Atlas e l'isolamento di Render staging
+non sono attestati da queste modifiche. La suite sintetica verifica
+correttezza e assenza del precedente limite, non rappresenta un
+benchmark aziendale o la certificazione delle vendite reali.
+
+### Contabilità e autonomia dalla migrazione Excel
+
+La baseline Mongo validata rimane il percorso autorevole per saldi
+operativi dopo il cutover. In assenza della baseline, il fallback legacy
+**non è stato rimosso**: farlo senza un saldo iniziale verificato
+rischierebbe di alterare la cassa. Lo stato contabile va riconciliato
+su uno staging isolato con evidenza documentale prima del taglio definitivo.
+
+### Criteri residui prima dell'abilitazione degli acquisti 3.1
+
+- Eseguire backtest temporali su dati reali di staging, autorizzati e verificati.
+- Verificare capacità, scorte e colonne reali della vending.
+- Confrontare la pianificazione con gli orari effettivi delle consegne.
+- Verificare prestazioni MongoDB su almeno 100.000 e 500.000 eventi.
+- Riesaminare gli skip della CI e testare concorrenza su Atlas isolato.
+- Registrare e validare le baseline contabili senza supposizioni.
+
+In mancanza di tali verifiche: **PASS CON RISERVE, non pronto per produzione**.
