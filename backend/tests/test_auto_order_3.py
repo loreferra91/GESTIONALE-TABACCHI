@@ -295,3 +295,27 @@ def test_missing_vending_capacity_blocks_shadow_order():
     row = compare_policies(active, native)["rows"][0]
     assert "CAPACITA_VENDING_NON_VERIFICATA" in row["anomalie"]
     assert row["quantita_suggerita"] == 0
+
+
+
+def test_3_1_planner_respects_global_vending_shop_reserve():
+    active = {
+        "planning_day": TODAY.isoformat(), "parametri": {},
+        "finestra_breve_gg": 10, "finestra_lunga_gg": 30,
+        "righe": [], "esclusi": [
+            {"codice": "P", "descrizione": "P",
+             "giacenza_negozio": 2, "giacenza_vending": 0,
+             "vending_capacity": 5, "scorta_riservata": 2,
+             "scorta_minima_negozio_auto_order": 0,
+             "lotto_ordine": 1, "qta_da_ordinare": 0}
+        ],
+    }
+    native = [{
+        "id": f"vending-{day}", "codice": "P",
+        "data": (TODAY - timedelta(days=day)).isoformat(),
+        "canale": "VENDING", "sorgente": "CSV_VENDING",
+        "csv_event_key": f"csv-{day}", "quantita": 2
+    } for day in range(30)]
+    row = compare_policies(active, native)["rows"][0]
+    assert row["planned_vending_transfer"] == 0
+    assert row["vending_stockout_date"] is not None
