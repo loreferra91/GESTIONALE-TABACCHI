@@ -285,3 +285,55 @@ sono necessari confronto storico su staging e prova transazionale Atlas.
 Per disattivare in ogni momento nuove **conferme** 3.1:
 impostare `AUTO_ORDER_3_1_ENABLED=0`. Gli ordini 3.1 già confermati
 restano storicizzati e ricevibili, senza cancellazioni o riconteggi.
+
+
+## Calendario commerciale tabacchi — forniture settimanali del venerdì
+
+La regola comunicata dall'operatore prevale sul vecchio **lead time
+costante** per Auto-Order 3.1 quando `AUTO_ORDER_WEEKLY_FRIDAY=1`
+(valore di default per questa installazione).
+
+- **Ordine preferito:** lunedì della settimana.
+- **Ultima scadenza ordinaria:** mercoledì alle **11:00 Europe/Rome,
+  escluso l'istante esatto delle 11:00**, per la consegna il venerdì
+  della stessa settimana.
+- **Ordini lunedì/martedì o mercoledì prima delle 11:00:** venerdì
+  della stessa settimana.
+- **Dalle 11:00 di mercoledì a domenica:** venerdì della settimana
+  seguente. Nessun ordine successivo alla scadenza può essere salvato
+  con la data di consegna del venerdì ormai non disponibile.
+- **Cadenza di revisione:** 7 giorni, indipendente dal giorno corrente.
+- **Lead time effettivo:** calcolato fino al venerdì eleggibile
+  (esempio lunedì 4 giorni, martedì 3, mercoledì 10:59 2,
+  mercoledì 11:00 9, giovedì 8).
+
+La previsione in `GET /api/auto-order/confronto` restituisce il campo
+`delivery_schedule`, con data di consegna eleggibile, cutoff italiano,
+giorno preferito e periodo di 7 giorni. Lo snapshot 3.1 include
+l'intero calendario; quando cambia la settimana o scatta il cutoff
+la precedente proposta diventa **obsoleta** e va ricalcolata.
+
+Durante la conferma 3.1 il server:
+
+1. ricostruisce la previsione e la scadenza correnti;
+2. respinge un'eventuale data indicata dall'utente se diversa dal
+   venerdì ammesso;
+3. se la data non è specificata, salva automaticamente il venerdì
+   eleggibile nel batch e nelle righe dell'ordine;
+4. registra i dettagli del calendario nell'ordine per audit.
+
+Le date rappresentano **previsioni operative**, non una garanzia
+contrattuale di arrivo; il calendario non incorpora festività,
+interruzioni del fornitore né orari di consegna effettivi.
+
+Per confermare ordini 3.1 serve sempre
+`AUTO_ORDER_3_1_ENABLED=1`, oltre a storico e qualità dati
+verificati. Con `AUTO_ORDER_WEEKLY_FRIDAY=1` **non occorre inserire
+manualmente** `AUTO_ORDER_LEAD_TIME_GG` o
+`AUTO_ORDER_REVIEW_PERIOD_GG`: vengono sostituiti dalla regola
+dinamica sopra. Se il calendario settimanale viene disattivato
+(`AUTO_ORDER_WEEKLY_FRIDAY=0`), tornano obbligatori i parametri
+di lead time e review period del fornitore.
+
+L'algoritmo non invia l'ordine a un fornitore, non crea ordini
+automaticamente e non aggiorna giacenze prima del carico fisico.
