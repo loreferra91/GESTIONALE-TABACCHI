@@ -714,7 +714,7 @@ def create_auto_order_router(
         cursor = db.vendite.find(
             {"$or": [
                 {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
-                {"data": {"$regex": r"^\\d{2}[/\\-]\\d{2}[/\\-]\\d{4}"}},
+                {"data": {"$regex": r"^\d{2}[/\-]\d{2}[/\-]\d{4}"}},
             ]},
             {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1,
              "canale": 1, "sorgente": 1, "csv_event_key": 1},
