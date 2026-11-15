@@ -466,7 +466,7 @@ export default function AutoOrder() {
               <Plus size={16} /> Aggiungi all’ordine
             </button>
           </div>
-          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. Una fornitura datata consente un ordine integrativo soltanto per il fabbisogno netto residuo; le forniture senza data affidabile richiedono verifica.</p>
+          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. Il calcolo legge le giacenze reali, i carichi merce completati e le vendite registrate: la fornitura già arrivata viene quindi considerata disponibile e ciò che è stato venduto viene sottratto dalla previsione. Una fornitura senza data affidabile resta invece da verificare.</p>
         </div>
       </Card>
 
@@ -534,7 +534,7 @@ export default function AutoOrder() {
       <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
         Il magazzino reale è la <b>giacenza negozio fisica</b> registrata nella WebApp. Il fabbisogno complessivo considera separatamente vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
-        Le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
+        Il calcolo interpreta i dati reali: giacenza e carichi completati rappresentano ciò che è arrivato, le vendite rappresentano ciò che è uscito e la domanda recente viene usata per stimare il fabbisogno futuro. Solo le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
         Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale. La scorta minima facoltativa si gestisce in Magazzino → Prodotti.
       </div>
 
@@ -584,7 +584,7 @@ export default function AutoOrder() {
                   <td className="font-mono text-right">{formatNum(r.venduto_lungo ?? r.venduto_30gg)}</td>
                   <td className="font-mono text-right">{formatNum(r.domanda_gg, 2)}</td>
                   <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`} title={`Negozio: ${r.copertura_negozio_gg ?? '∞'} gg · Vending: ${r.copertura_vending_gg ?? '∞'} gg`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
-                  <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
+                  <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi ancora non riconciliati come arrivati o senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
                   <td className="text-right">

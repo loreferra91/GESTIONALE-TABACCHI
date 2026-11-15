@@ -430,6 +430,37 @@ def create_auto_order_router(
             order_rows = await db.ordini_fornitore_righe.find(
                 {"batch_key": {"$in": keys}}, {"_id": 0}
             ).to_list(None) if keys else []
+            # Rebuild received quantities from the real completed loads as well
+            # as from the cached order-line counter. This matters for historical
+            # loads: the load ledger is the source of truth for what physically
+            # arrived, while sales remain the source of truth for what went out.
+            # Use max, not sum, because the line counter is updated by the same
+            # load transaction and summing would double-count it.
+            if keys and hasattr(db, "ricezioni_merce") and hasattr(db, "storico_ordini"):
+                completed_receipts = await db.ricezioni_merce.find(
+                    {"status": "completed", "supplier_order_batch_key": {"$in": keys}},
+                    {"_id": 0, "id": 1, "supplier_order_batch_key": 1},
+                ).to_list(None)
+                receipt_ids = [row.get("id") for row in completed_receipts if row.get("id")]
+                if receipt_ids:
+                    receipt_movements = await db.storico_ordini.find(
+                        {"batch_id": {"$in": receipt_ids}, "annullato": {"$ne": True}},
+                        {"_id": 0, "batch_id": 1, "codice": 1, "quantita": 1},
+                    ).to_list(None)
+                    receipt_to_order = {
+                        row.get("id"): row.get("supplier_order_batch_key")
+                        for row in completed_receipts if row.get("id")
+                    }
+                    loaded = {}
+                    for movement in receipt_movements:
+                        batch_key = receipt_to_order.get(movement.get("batch_id"))
+                        code = str(movement.get("codice") or "")
+                        if not batch_key or not code:
+                            continue
+                        loaded[(batch_key, code)] = loaded.get((batch_key, code), 0) + int(movement.get("quantita") or 0)
+                    for line in order_rows:
+                        key = (line.get("batch_key"), str(line.get("codice") or ""))
+                        line["quantita_ricevuta"] = max(int(line.get("quantita_ricevuta", 0) or 0), loaded.get(key, 0))
             pending = pending_by_code(batch_rows, order_rows, planning_today, planning_days)
             orders_version = hashlib.sha256(json.dumps({
                 "batches": sorted(((row.get("batch_key"), row.get("stato"), row.get("version"), row.get("data_consegna_prevista")) for row in batch_rows), key=lambda item: json.dumps(item, default=str)),
