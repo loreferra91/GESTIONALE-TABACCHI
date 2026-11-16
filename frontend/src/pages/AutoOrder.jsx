@@ -494,7 +494,7 @@ export default function AutoOrder() {
         {comparison && !comparison.operational_ready && <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" data-testid="ao-policy-blockers">
           <b>3.1 non ancora attivabile per gli ordini reali.</b>
           <ul className="mt-1 list-disc pl-4">{(comparison.operational_blockers || []).map((reason, i) => <li key={i}>{reason}</li>)}</ul>
-          <p className="mt-1">Configura i parametri reali in Parametri; nel frattempo resta disponibile 2.0. Il passaggio a 3.1 non avviene mai silenziosamente durante una bozza già modificata.</p>
+          <p className="mt-1">Risolvi le segnalazioni elencate; nel frattempo resta disponibile 2.0. Il passaggio a 3.1 non avviene mai silenziosamente durante una bozza già modificata.</p>
         </div>}
         {comparisonError && <p className="mt-2 text-sm text-amber-700">{comparisonError}</p>}
         {comparison && <>
@@ -513,7 +513,10 @@ export default function AutoOrder() {
             <div>Costo noto 3.1 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
           </div>
           <p className="mt-2 text-xs text-slate-600">La quantità calcolata è il risultato matematico prima dei controlli e può basarsi su dati da verificare. La quantità ordinabile è quella che il backend può accettare; i motivi di sospensione sono nel dettaglio di ogni articolo.</p>
-          <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
+          <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. {comparison.delivery_schedule ? "La previsione usa il calendario di consegna del venerdì." : "La data di arrivo del nuovo ordine dipende dal lead time configurato."}</p>
+          {comparison.legacy_vending_reconciliation?.matched_rows > 0 ? <p data-testid="ao-vending-reconciled" className="mt-2 text-xs text-emerald-800">
+            Storico vending verificato: {comparison.legacy_vending_reconciliation.canonical_events} vendite effettive ricostruite dal registro CSV; {comparison.legacy_vending_reconciliation.duplicate_copies} copie di import ripetuti escluse dalla previsione. Giacenze e incassi invariati.
+          </p> : null}
           <div className="mt-3 max-h-80 overflow-y-auto rounded border">
             {comparison.rows.map(row => <details key={row.codice} className="border-b px-3 py-2 text-sm last:border-b-0" data-testid={`ao-comparison-${row.codice}`}>
               <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.1 calcolata {row.quantita_calcolata_3_1 ?? row.quantita_suggerita}</b> / <b>ordinabile {row.quantita_ordinabile_3_1 ?? row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>

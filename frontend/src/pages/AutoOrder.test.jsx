@@ -359,6 +359,8 @@ test("3.1 pronto carica la quantita prevista e conferma con snapshot politica", 
     policy_snapshot_key: "auto-order-3-1:test-snapshot",
     native_history_days: 90,
     operational_blockers: [],
+    legacy_vending_reconciliation: { matched_rows: 10, canonical_events: 2, duplicate_copies: 8 },
+    delivery_schedule: { delivery_date: "2026-11-20", cutoff_datetime: "2026-11-18T11:00:00+01:00" },
     summary: { stockout_risk: 0, supplementary_orders: 0, already_on_order: 0,
       vending_refills: 0, pieces_2: 5, pieces_3: 3, insufficient_data: 0,
       known_purchase_cost: 0, missing_purchase_costs: 0 },
@@ -376,6 +378,9 @@ test("3.1 pronto carica la quantita prevista e conferma con snapshot politica", 
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
   await act(async () => container.querySelector('[data-testid="ao-use-3-1"]').click());
   expect(container.querySelector('[data-testid="ao-use-3-1"]').getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelector('[data-testid="ao-vending-reconciled"]').textContent).toContain("2 vendite effettive");
+  expect(container.querySelector('[data-testid="ao-vending-reconciled"]').textContent).toContain("8 copie");
+  expect(container.textContent).toContain("La previsione usa il calendario di consegna del venerdì.");
   expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("3");
   expect(container.querySelector('[data-testid="ao-pdf"]').disabled).toBe(true);
   await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());

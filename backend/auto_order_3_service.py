@@ -83,7 +83,7 @@ def compare_policies(active: dict, native_sales: list[dict], *, now: datetime | 
         if vending_capacity is not None:
             try:
                 capacity = int(vending_capacity)
-                if capacity < stock_vending or capacity < 0 or float(vending_capacity) != capacity:
+                if isinstance(vending_capacity, bool) or capacity < 0 or float(vending_capacity) != capacity:
                     raise ValueError("inconsistent vending capacity")
                 vending_capacity = capacity
             except (ValueError, TypeError):

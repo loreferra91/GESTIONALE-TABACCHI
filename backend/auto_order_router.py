@@ -19,11 +19,13 @@ try:
     from .auto_order_3_service import compare_policies
     from .auto_order_3_operational import POLICY_2, POLICY_31, readiness, policy_snapshot, select_operational_rows
     from .forecasting.demand_models import NativeSalesAccumulator
+    from .forecasting.legacy_vending import LegacyVendingReconciler
 except ImportError:  # pragma: no cover
     from auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
     from auto_order_3_service import compare_policies
     from auto_order_3_operational import POLICY_2, POLICY_31, readiness, policy_snapshot, select_operational_rows
     from forecasting.demand_models import NativeSalesAccumulator
+    from forecasting.legacy_vending import LegacyVendingReconciler
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -124,6 +126,7 @@ def create_auto_order_router(
     record_audit_event: Callable[..., Any],
     create_backup_snapshot: Callable[..., Any],
     session_kwargs: Callable[[Any], Dict[str, Any]],
+    csv_vending_compatibility_key: Callable[[Dict[str, Any]], str],
 ) -> Dict[str, Any]:
     router = APIRouter()
 
@@ -745,22 +748,37 @@ def create_auto_order_router(
         last = today + timedelta(days=2)
 
         collector = NativeSalesAccumulator(today, 90)
-        cursor = db.vendite.find(
-            {"$or": [
+        date_filter = {"$or": [
                 {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
                 {"data": {"$regex": r"^\d{2}[/\-]\d{2}[/\-]\d{4}"}},
-            ]},
-            {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1,
-             "canale": 1, "sorgente": 1, "csv_event_key": 1},
-        )
+            ]}
+        projection = {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1,
+                      "canale": 1, "sorgente": 1, "csv_event_key": 1,
+                      "importo": 1, "pagamento": 1, "colonna": 1}
+        legacy_rows = await db.vendite.find(
+            {"$and": [date_filter, {"sorgente": "CSV_VENDING", "csv_event_key": {"$in": [None, ""]}}]},
+            projection,
+        ).to_list(None)
+        reconciler = LegacyVendingReconciler(collector, csv_vending_compatibility_key, legacy_rows)
+        cursor = db.vendite.find(date_filter, projection)
         # Batch the network I/O; keep 90-day totals and explicit event keys,
         # not the full transaction payload, in application memory.
         async for document in cursor:
-            collector.add(document)
+            reconciler.add(document)
 
         columns = await db.vending.find(
-            {}, {"_id": 0, "codice": 1, "capacita_max": 1}
+            {}, {"_id": 0, "codice": 1, "colonna": 1, "capacita_max": 1}
         ).to_list(None)
+        ledger = []
+        if reconciler.legacy:
+            ledger = await db.vending_accounting_events.find(
+                {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
+                {"_id": 0, "data": 1, "importo": 1, "pagamento": 1,
+                 "csv_event_key": 1, "csv_event_compatibility_key": 1,
+                 "csv_accounting_key": 1, "csv_accounting_occurrence": 1,
+                 "rebuilt_from_complete_csv": 1, "file_sha256": 1, "file_name": 1},
+            ).to_list(None)
+        reconciliation = reconciler.finish(ledger, columns)
         capacity_by_code: Dict[str, int] = {}
         incomplete_capacity = set()
         for column in columns:
@@ -790,6 +808,7 @@ def create_auto_order_router(
             "esclusi": [with_capacity(row) for row in ao.get("esclusi", [])],
         }
         result = compare_policies(active, collector)
+        result["legacy_vending_reconciliation"] = reconciliation
         result.update(readiness(ao, result))
         result["policy_snapshot_key"] = policy_snapshot(ao, result)
         return result

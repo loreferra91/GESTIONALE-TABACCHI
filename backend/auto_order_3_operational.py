@@ -95,6 +95,7 @@ def policy_snapshot(ao: dict, comparison: dict) -> str:
         "delivery_schedule": comparison.get("delivery_schedule"),
         "quality": ao.get("data_quality"),
         "history": comparison.get("native_history_days"),
+        "legacy_vending_reconciliation": comparison.get("legacy_vending_reconciliation"),
         "rows": rows,
     }
     return "auto-order-3-1:" + hashlib.sha256(

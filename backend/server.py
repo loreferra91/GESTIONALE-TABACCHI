@@ -1497,6 +1497,7 @@ parameters_router, get_params, list_parametri, update_parametro = create_paramet
     record_audit_event=_record_audit_event,
 )
 auto_order_module = create_auto_order_router(
+    csv_vending_compatibility_key=_csv_vending_compatibility_key,
     get_database=lambda: db,
     get_params=lambda: get_params(),
     param_value=_param,
