@@ -867,7 +867,7 @@ def create_auto_order_router(
             )
         return selected
 
-    def auto_order_rows_from_query(ao: Dict[str, Any], selection: Optional[str]) -> List[Dict[str, Any]]:
+    def auto_order_rows_from_query(ao: Dict[str, Any], selection: Optional[str], comparison=None) -> List[Dict[str, Any]]:
         if not selection:
             return auto_order_selected_rows(ao)
         try:
@@ -875,6 +875,8 @@ def create_auto_order_router(
             requested = [AutoOrderRigaIn.model_validate(item) for item in raw]
         except Exception as exc:
             raise HTTPException(422, "Selezione Auto-Order non valida") from exc
+        if comparison is not None:
+            return select_operational_rows(ao, comparison, requested, multiply_money)
         return auto_order_selected_rows(ao, requested)
 
     @router.post("/auto-order/conferma")
@@ -1101,7 +1103,7 @@ def create_auto_order_router(
         except Exception as exc:
             raise HTTPException(500, "Creazione batch Auto-Order non completata") from exc
 
-    async def export_rows(ao, selezione, snapshot_key, batch_key):
+    async def export_rows(ao, selezione, snapshot_key, batch_key, policy_version=POLICY_2, policy_snapshot_key=None):
         if batch_key:
             db = get_database()
             batch = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
@@ -1113,6 +1115,17 @@ def create_auto_order_router(
             return [{**line, "qta_da_ordinare": int(line["quantita"])} for line in lines], batch
         if snapshot_key and snapshot_key != ao.get("snapshot_key"):
             raise HTTPException(409, "Proposta cambiata: ricalcola Auto-Order prima di esportare")
+        if policy_version not in (POLICY_2, POLICY_31):
+            raise HTTPException(422, "Politica Auto-Order non riconosciuta")
+        if policy_version == POLICY_31:
+            if not selezione or not snapshot_key or not policy_snapshot_key:
+                raise HTTPException(422, "Per esportare la bozza 3.1 servono selezione e snapshot aggiornati")
+            comparison = await build_comparison(ao)
+            if not comparison.get("operational_ready"):
+                raise HTTPException(409, "Auto-Order 3.1 non attivabile: " + "; ".join(comparison["operational_blockers"]))
+            if policy_snapshot_key != comparison["policy_snapshot_key"]:
+                raise HTTPException(409, "Previsione 3.1 cambiata. Ricalcola Auto-Order prima di esportare.")
+            return auto_order_rows_from_query(ao, selezione, comparison), None
         return auto_order_rows_from_query(ao, selezione), None
 
     @router.get("/auto-order/pdf")
@@ -1122,6 +1135,8 @@ def create_auto_order_router(
         selezione: Optional[str] = None,
         snapshot_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        policy_version: str = POLICY_2,
+        policy_snapshot_key: Optional[str] = None,
     ):
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -1135,7 +1150,7 @@ def create_auto_order_router(
         categoria_safe = xml_escape(categoria_filtro)
 
         ao = await get_auto_order()
-        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key)
+        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key, policy_version, policy_snapshot_key)
         if categoria_filtro:
             righe = [row for row in righe if row.get("categoria") == categoria_filtro]
         totale = sum_money(row.get("totale", 0) or 0 for row in righe)
@@ -1226,7 +1241,7 @@ def create_auto_order_router(
             )
         )
         story.append(table)
-        footer = Paragraph(
+        footer_text = (
             "Calcolo Auto-Order: domanda ponderata {peso_breve:.0f}% ultimi {breve}gg + "
             "{peso_lungo:.0f}% ultimi {lungo}gg fino al {riferimento}; giacenza negozio = "
             "stock fisico libero gia normalizzato dall'import; ordine sotto {copertura}gg "
@@ -1241,9 +1256,15 @@ def create_auto_order_router(
                 target=int(ao["parametri"].get("GIORNI_COPERTURA_TARGET", 14)),
                 fattore=float(ao.get("fattore_sicurezza", 1.15)),
                 riferimento_ordine=xml_escape((exported_batch or {}).get("batch_key") or "bozza"),
-            ),
-            subtitle_style,
+            )
         )
+        if (exported_batch or {}).get("policy_version", policy_version) == POLICY_31:
+            footer_text = (
+                "Auto-Order 3.1: previsione su storico nativo, scorte reali, consegne e ricariche vending. "
+                "Quantità della selezione esportata. Riferimento: "
+                + xml_escape((exported_batch or {}).get("batch_key") or "bozza non salvata") + "."
+            )
+        footer = Paragraph(footer_text, subtitle_style)
 
         def draw_footer(canvas, current_document):
             footer.wrap(current_document.width, 14 * mm)
@@ -1271,6 +1292,8 @@ def create_auto_order_router(
         selezione: Optional[str] = None,
         snapshot_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        policy_version: str = POLICY_2,
+        policy_snapshot_key: Optional[str] = None,
     ):
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -1280,7 +1303,7 @@ def create_auto_order_router(
         categoria_filtro = (categoria or "").strip()[:120]
 
         ao = await get_auto_order()
-        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key)
+        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key, policy_version, policy_snapshot_key)
         if categoria_filtro:
             righe = [row for row in righe if row.get("categoria") == categoria_filtro]
         totale = sum_money(row.get("totale", 0) or 0 for row in righe)
@@ -1357,6 +1380,7 @@ def create_auto_order_router(
         metadata.append(["Campo", "Valore"])
         metadata.append(["origine", "AUTO-ORDER"])
         metadata.append(["stato", "CONFERMATO" if exported_batch else "BOZZA"])
+        metadata.append(["policy_version", (exported_batch or {}).get("policy_version", policy_version)])
         metadata.append(["snapshot_key", excel_text((exported_batch or {}).get("snapshot_key") or ao.get("snapshot_key"))])
         metadata.append(["batch_key", excel_text((exported_batch or {}).get("batch_key") or "")])
         metadata.append(["data_generazione_utc", datetime.now(timezone.utc).isoformat()])

@@ -229,8 +229,8 @@ export default function AutoOrder() {
       params.set("batch_key", savedBatchKey);
     } else {
       if (orderPolicy === "AUTO_ORDER_3_1") {
-        toast.error("Conferma prima l'ordine 3.1 per esportare un documento valido.");
-        return;
+        params.set("policy_version", orderPolicy);
+        params.set("policy_snapshot_key", comparison?.policy_snapshot_key || "");
       }
       params.set("snapshot_key", snapshotKey);
       params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare }))));
@@ -352,10 +352,10 @@ export default function AutoOrder() {
 
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={() => load(true)} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF fornitore
         </button>
-        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel fornitore
         </button>
         <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI" || (orderPolicy === "AUTO_ORDER_3_1" && (!comparison?.operational_ready || !comparison?.policy_snapshot_key))} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
@@ -489,7 +489,7 @@ export default function AutoOrder() {
         <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="ao-policy-selector">
           <button type="button" data-testid="ao-use-3-1" aria-pressed={orderPolicy === "AUTO_ORDER_3_1"} disabled={!comparison?.operational_ready || loading} onClick={() => applyPolicy("AUTO_ORDER_3_1")} className={`rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40 ${orderPolicy === "AUTO_ORDER_3_1" ? "border-emerald-700 bg-emerald-50 text-emerald-900" : "border-slate-300"}`}>Usa Auto-Order 3.1</button>
           <button type="button" data-testid="ao-use-2" aria-pressed={orderPolicy === "AUTO_ORDER_2"} disabled={loading} onClick={() => applyPolicy("AUTO_ORDER_2")} className={`rounded border px-3 py-2 text-sm font-semibold ${orderPolicy === "AUTO_ORDER_2" ? "border-slate-900 bg-slate-100" : "border-slate-300"}`}>Fallback 2.0</button>
-          <span className="text-xs font-semibold text-slate-600">Bozza attiva: {orderPolicy === "AUTO_ORDER_3_1" ? "3.1 — conferma validata" : "2.0"}</span>
+          <span className="text-xs font-semibold text-slate-600">Bozza attiva: {orderPolicy === "AUTO_ORDER_3_1" ? "3.1 — validazione al salvataggio" : "2.0"}</span>
         </div>
         {comparison && !comparison.operational_ready && <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" data-testid="ao-policy-blockers">
           <b>3.1 non ancora attivabile per gli ordini reali.</b>

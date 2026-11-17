@@ -3,12 +3,15 @@
 All MongoDB operations use mongomock-motor; never open production connections.
 """
 import asyncio
+import io
+import json
 import os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
 
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:27017")
@@ -143,6 +146,75 @@ def isolated_database(monkeypatch):
     database = AsyncMongoMockClient()["auto_order_live_test"]
     monkeypatch.setattr(server, "db", database)
     return database
+
+
+@pytest.mark.parametrize("format", ["pdf", "excel"])
+def test_31_draft_export_preserves_selection_without_saving_order(isolated_database, format):
+    import openpyxl
+    db = isolated_database
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+    async def seed():
+        await db.prodotti.insert_many([
+            {"id": code, "codice": code, "descrizione": "Prodotto " + code,
+             "categoria": "SIGARETTE", "prezzo": 5, "giacenza_negozio": 0}
+            for code in ("P", "Q")
+        ])
+        await db.parametri.insert_many([
+            {"nome": "AUTO_ORDER_3_1_ENABLED", "valore": 1},
+            {"nome": "AUTO_ORDER_LEAD_TIME_GG", "valore": 2},
+            {"nome": "AUTO_ORDER_REVIEW_PERIOD_GG", "valore": 12},
+        ])
+        await db.vendite.insert_many([
+            {"id": f"{code}-{n}", "codice": code,
+             "data": (today - timedelta(days=n)).isoformat() + "T12:00:00",
+             "quantita": 2, "canale": "NEGOZIO", "sorgente": "MANUALE"}
+            for code in ("P", "Q") for n in range(90)
+        ])
+        ao = await server.auto_order()
+        comparison = await server.auto_order_module["build_comparison"](ao)
+        assert comparison["operational_ready"]
+        return ao, comparison, await db.prodotti.find({}, {"_id": 0}).to_list(None)
+
+    ao, comparison, original_products = asyncio.run(seed())
+    maximum = next(r["quantita_suggerita"] for r in comparison["rows"] if r["codice"] == "P")
+    assert maximum >= 10
+    params = {"policy_version": POLICY_31, "snapshot_key": ao["snapshot_key"],
+              "policy_snapshot_key": comparison["policy_snapshot_key"],
+              "selezione": json.dumps([{"codice": "P", "quantita": 10}])}
+    client = TestClient(server.app)
+    url = f"/api/auto-order/{format}"
+    exported = client.get(url, params=params)
+    assert exported.status_code == 200, exported.text
+    if format == "excel":
+        book = openpyxl.load_workbook(io.BytesIO(exported.content), data_only=True)
+        assert book["Ordine fornitore"]["C5"].value == 10
+        assert book["Ordine fornitore"]["A5"].value == "P"
+        assert "Q" not in [row[0] for row in book["Ordine fornitore"].values]
+        metadata = dict(list(book["Metadati Auto-Order"].values)[1:])
+        assert metadata["stato"] == "BOZZA"
+        assert metadata["policy_version"] == POLICY_31
+        assert not metadata["batch_key"]
+    else:
+        assert exported.content.startswith(b"%PDF")
+
+    for changed, status in [
+        ({"snapshot_key": "stale"}, 409),
+        ({"policy_snapshot_key": "stale"}, 409),
+        ({"policy_snapshot_key": ""}, 422),
+        ({"policy_version": "unknown"}, 422),
+        ({"selezione": "[]"}, 422),
+        ({"selezione": "invalid"}, 422),
+        ({"selezione": json.dumps([{"codice": "P", "quantita": maximum + 10}])}, 422),
+        ({"selezione": json.dumps([{"codice": "P", "quantita": 7}])}, 422),
+    ]:
+        assert client.get(url, params={**params, **changed}).status_code == status
+
+    async def unchanged():
+        assert await db.ordini_fornitore.count_documents({}) == 0
+        assert await db.ordini_fornitore_righe.count_documents({}) == 0
+        assert await db.prodotti.find({}, {"_id": 0}).to_list(None) == original_products
+    asyncio.run(unchanged())
 
 
 def test_31_end_to_end_shadow_to_confirm_replay_and_server_revalidation(isolated_database):
