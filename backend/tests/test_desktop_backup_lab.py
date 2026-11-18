@@ -30,6 +30,12 @@ def test_encrypted_backup_restore_and_fail_closed(tmp_path):
             {"_id": "sale-2", "status": "STAGED", "importo_cents": 5678},
         ])
         source.lab_inventory.insert_one({"_id": "product-a", "quantity": 5})
+        source.desktop_outbox.create_index("status", name="status_unique", unique=True)
+        source.create_collection(
+            "validated_lab",
+            validator={"$jsonSchema": {"bsonType": "object", "required": ["_id"]}},
+            validationAction="error",
+        )
         result = encrypted_backup(source, archive, PASSWORD)
         assert result["verified"] and result["collections"]["desktop_outbox"] == 2
         assert archive.read_bytes().startswith(b"GTBK-LAB")
@@ -53,6 +59,13 @@ def test_encrypted_backup_restore_and_fail_closed(tmp_path):
         assert restored["restored"] and restored["verified"]
         assert restored["counts"]["desktop_outbox"] == 2
         assert target.desktop_outbox.find_one({"_id": "sale-2"})["status"] == "STAGED"
+        restored_index = target.desktop_outbox.index_information()["status_unique"]
+        assert restored_index["unique"] is True
+        restored_opts = list(target.list_collections(filter={"name": "validated_lab"}))[0]["options"]
+        assert "validator" in restored_opts
+        # Unique constraint is live after recovery, not just in backup metadata.
+        with pytest.raises(Exception):
+            target.desktop_outbox.insert_one({"_id": "sale-3", "status": "STAGED"})
         with pytest.raises(BackupLaboratoryError, match="not empty"):
             restore_into_empty_lab(target, archive, PASSWORD)
         assert target.desktop_outbox.count_documents({}) == 2

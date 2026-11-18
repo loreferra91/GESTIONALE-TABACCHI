@@ -18,3 +18,18 @@ This commit implements a **bounded, encrypted logical snapshot and test restore*
 
 ## Tests
 The new real-replica test `backend/tests/test_desktop_backup_lab.py` demonstrates encrypted backup, verified restore, no overwrite, incorrect passphrase, tampered ciphertext, missing opt-in marker, and preservation of the source.
+
+
+## Gate 4B laboratory extension: collection indexes and options
+
+The authenticated backup manifest is now version 2 and includes a validated
+allowlist of collection options and non-default index definitions. Restore
+recreates indexes (including unique/TTL where supported) and checks the
+reconstructed catalog before claiming `verified=true`. Unsupported options
+are **rejected** instead of silently dropped. A CI replica-set test checks that
+a unique index is enforced and JSON schema validator metadata is preserved.
+
+This remains limited to a small disposable database and is NOT a
+mongodump/mongorestore equivalent. Namespace metadata capture happens outside
+the document snapshot transaction; concurrent DDL is not certified. The format
+is not guaranteed compatible with earlier v1 laboratory archives.

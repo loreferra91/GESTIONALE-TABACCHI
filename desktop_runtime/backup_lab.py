@@ -36,6 +36,85 @@ VALID_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,62}$")
 class BackupLaboratoryError(RuntimeError):
     pass
 
+# Fail closed on collection types/options that this bounded logical lab cannot
+# faithfully round-trip. Full production backups still require MongoDB tools.
+_COLLECTION_OPTIONS = frozenset({
+    "validator", "validationLevel", "validationAction", "collation",
+    "capped", "size", "max",
+})
+_INDEX_OPTIONS = frozenset({
+    "name", "unique", "sparse", "expireAfterSeconds",
+    "partialFilterExpression", "collation", "hidden",
+})
+
+
+def _capture_metadata(db: Any, names: list[str]) -> dict:
+    metadata: dict[str, dict] = {}
+    info_by_name = {item["name"]: item for item in db.list_collections()}
+    for name in names:
+        info = info_by_name[name]
+        if info.get("type") != "collection":
+            raise BackupLaboratoryError("Views and non-standard collections unsupported in lab")
+        options = dict(info.get("options", {}))
+        if any(key not in _COLLECTION_OPTIONS for key in options):
+            raise BackupLaboratoryError("Collection has unsupported options; refusing incomplete backup")
+        indexes = []
+        for index in db[name].list_indexes():
+            if index["name"] == "_id_":
+                continue
+            details = dict(index)
+            details.pop("v", None)
+            keys = list(details.pop("key").items())
+            if any(key not in _INDEX_OPTIONS for key in details):
+                raise BackupLaboratoryError("Index has unsupported options; refusing incomplete backup")
+            if not keys or "name" not in details:
+                raise BackupLaboratoryError("Index definition is incomplete")
+            indexes.append({"keys": [[k, v] for k, v in keys], "options": details})
+        metadata[name] = {"options": options, "indexes": indexes}
+    return metadata
+
+
+def _check_metadata(metadata: Any, names: dict) -> None:
+    if not isinstance(metadata, dict) or set(metadata) != set(names):
+        raise BackupLaboratoryError("Missing or extra collection metadata")
+    for collection, specs in metadata.items():
+        if not isinstance(specs, dict) or set(specs) != {"options", "indexes"}:
+            raise BackupLaboratoryError("Invalid collection metadata structure")
+        if not isinstance(specs["options"], dict) or any(
+            k not in _COLLECTION_OPTIONS for k in specs["options"]
+        ):
+            raise BackupLaboratoryError("Unsupported authenticated collection options")
+        indexes = specs["indexes"]
+        if not isinstance(indexes, list):
+            raise BackupLaboratoryError("Invalid authenticated index list")
+        index_names = set()
+        for entry in indexes:
+            if not isinstance(entry, dict) or set(entry) != {"keys", "options"}:
+                raise BackupLaboratoryError("Invalid index metadata")
+            keys, opts = entry["keys"], entry["options"]
+            if (not isinstance(keys, list) or not keys or not isinstance(opts, dict)
+                or not isinstance(opts.get("name"), str)
+                or opts["name"] in index_names
+                or any(k not in _INDEX_OPTIONS for k in opts)):
+                raise BackupLaboratoryError("Invalid authenticated index options")
+            index_names.add(opts["name"])
+            if any(not isinstance(pair, list) or len(pair) != 2
+                   or not isinstance(pair[0], str) for pair in keys):
+                raise BackupLaboratoryError("Invalid authenticated index keys")
+
+
+def _restore_indexes(db: Any, metadata: dict) -> None:
+    for name, spec in metadata.items():
+        for index in spec["indexes"]:
+            db[name].create_index(
+                [(key, order) for key, order in index["keys"]],
+                **index["options"],
+            )
+    # Compare normalized indexes after the recreation, excluding MongoDB's
+    # server-managed default _id index.
+    if _capture_metadata(db, sorted(metadata)) != metadata:
+        raise BackupLaboratoryError("Restored indexes/options differ from authenticated archive")
+
 
 def _validate_name(name: str, prefix: str) -> None:
     if (not isinstance(name, str) or not name.startswith(prefix)
@@ -89,8 +168,10 @@ def _encode_snapshot(db: Any) -> bytes:
                     if output.tell() > MAX_PLAINTEXT - 8192:
                         raise BackupLaboratoryError("Snapshot too large for bounded laboratory archive")
     payload = output.getvalue()
-    manifest = {"type": "manifest", "version": 1, "source": db.name,
+    metadata = _capture_metadata(db, names)
+    manifest = {"type": "manifest", "version": 2, "source": db.name,
                 "replica_set": "rsDesktopCert", "counts": counts,
+                "metadata": metadata,
                 "documents_sha256": sha256(payload).hexdigest(),
                 "created_at": datetime.now(timezone.utc)}
     combined = _frame(manifest) + payload
@@ -119,7 +200,7 @@ def _parse_snapshot(raw: bytes) -> tuple[dict, dict[str, list[dict]]]:
             raise BackupLaboratoryError("Invalid BSON record") from exc
         items.append((doc, struct.pack(">I", count) + blob))
     manifest = items[0][0]
-    if (manifest.get("type") != "manifest" or manifest.get("version") != 1
+    if (manifest.get("type") != "manifest" or manifest.get("version") != 2
         or manifest.get("replica_set") != "rsDesktopCert"
         or not isinstance(manifest.get("counts"), dict)
         or not isinstance(manifest.get("documents_sha256"), str)):
@@ -129,6 +210,7 @@ def _parse_snapshot(raw: bytes) -> tuple[dict, dict[str, list[dict]]]:
     if not names or any(not VALID_NAME.fullmatch(n) or type(c) is not int or c < 0
                         for n, c in names.items()):
         raise BackupLaboratoryError("Invalid collection counts")
+    _check_metadata(manifest.get("metadata"), names)
     rows: dict[str, list[dict]] = {name: [] for name in names}
     digest = sha256()
     for obj, frame in items[1:]:
@@ -198,8 +280,9 @@ def restore_into_empty_lab(db: Any, source: Path, passphrase: str) -> dict:
     manifest, rows = read_encrypted_backup(source, passphrase)
     if db.list_collection_names():
         raise BackupLaboratoryError("Target is not empty; restore refuses overwrite")
+    metadata = manifest["metadata"]
     for name in rows:
-        db.create_collection(name)
+        db.create_collection(name, **metadata[name]["options"])
     # A failure in any collection aborts all inserted documents, leaving only
     # empty collections in the disposable restore namespace for inspection.
     with db.client.start_session() as session:
@@ -207,6 +290,7 @@ def restore_into_empty_lab(db: Any, source: Path, passphrase: str) -> dict:
             for name, documents in rows.items():
                 if documents:
                     db[name].insert_many(documents, ordered=True, session=session)
+    _restore_indexes(db, metadata)
     observed = {name: db[name].count_documents({}) for name in rows}
     if observed != manifest["counts"]:
         raise BackupLaboratoryError("Restored collection counts differ from authenticated archive")
