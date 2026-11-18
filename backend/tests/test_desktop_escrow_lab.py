@@ -14,7 +14,7 @@ from backend.tests.test_desktop_staging_replica import _safe_target, sample_even
 
 async def _scenario(url):
     client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=4000)
-    db_name = "desktop_sync_staging_escrow_cert_" + uuid4().hex
+    db_name = "desktop_sync_staging_ec_" + uuid4().hex
     db = client[db_name]
     try:
         hello = await client.admin.command("hello")
