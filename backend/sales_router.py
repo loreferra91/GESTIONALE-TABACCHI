@@ -127,6 +127,8 @@ def create_sales_router(
         channel = str(vendita.canale or "").strip().upper()
         if channel not in {"NEGOZIO", "VENDING"}:
             raise HTTPException(422, "Canale vendita non valido")
+        if desktop_device_id and channel != "NEGOZIO":
+            raise HTTPException(423, "Vendite Vending offline non ancora certificate")
         codice = product_code_text(vendita.codice)
         if not codice:
             raise HTTPException(422, "Codice prodotto obbligatorio")
