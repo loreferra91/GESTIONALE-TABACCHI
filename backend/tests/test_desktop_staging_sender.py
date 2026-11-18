@@ -105,3 +105,57 @@ async def test_sender_rejects_tampered_outbox_without_network():
     ) as http:
         result = await stage_pending(db, http, device=device, token="s"*40, dry_run=False)
     assert result["staged"] == 0 and result["failures"] and not calls
+
+
+@pytest.mark.anyio
+async def test_network_failure_keeps_pending_and_retry_preserves_operation_id():
+    """A lost reply must never generate a replacement business operation."""
+    device = str(uuid4())
+    db = AsyncMongoMockClient()["local_sender_partition"]
+    record = _record(device)
+    await db.desktop_outbox.insert_one(dict(record))
+    submissions = []
+
+    def handler(request):
+        submissions.append(request.content)
+        if len(submissions) == 1:
+            raise httpx.ReadError("simulated connection dropped after sending request")
+        return httpx.Response(200, json={
+            "operation_id": record["operation_id"], "status": "STAGED",
+            "business_applied": False, "replayed": True,
+        })
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://localhost",
+    ) as http:
+        failed = await stage_pending(db, http, device=device, token="s"*40, dry_run=False)
+        assert failed["staged"] == 0 and failed["failures"]
+        pending = await db.desktop_outbox.find_one({"operation_id": record["operation_id"]})
+        assert pending["status"] == "PENDING"
+        recovered = await stage_pending(db, http, device=device, token="s"*40, dry_run=False)
+        assert recovered["staged"] == 1 and not recovered["failures"]
+        nothing = await stage_pending(db, http, device=device, token="s"*40, dry_run=False)
+        assert nothing["considered"] == 0
+    assert len(submissions) == 2 and submissions[0] == submissions[1]
+    recovered_record = await db.desktop_outbox.find_one({"operation_id": record["operation_id"]})
+    assert recovered_record["status"] == "STAGED"
+    assert recovered_record["operation_id"] == record["operation_id"]
+    assert recovered_record["event_payload"] == record["event_payload"]
+
+
+@pytest.mark.anyio
+async def test_untrusted_applied_receipt_is_never_accepted_as_staging():
+    device = str(uuid4())
+    db = AsyncMongoMockClient()["local_sender_fake_ack"]
+    record = _record(device)
+    await db.desktop_outbox.insert_one(dict(record))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={
+            "operation_id": record["operation_id"],
+            "status": "ACKNOWLEDGED", "business_applied": True,
+        })), base_url="http://localhost",
+    ) as http:
+        outcome = await stage_pending(db, http, device=device, token="s"*40, dry_run=False)
+    assert outcome["staged"] == 0 and outcome["failures"]
+    assert (await db.desktop_outbox.find_one(
+        {"operation_id": record["operation_id"]}))["status"] == "PENDING"

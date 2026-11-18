@@ -14,7 +14,7 @@ This commit implements a **bounded, encrypted logical snapshot and test restore*
 - It is a logical *document* drill. Restored MongoDB secondary indexes and collection options are not yet reconstructed. The restore is intentionally into an isolated namespace; the production application must NEVER point to it directly.
 - Input is capped at 32 MiB and buffers the snapshot in memory. A future production tool must support large streaming backups, retained external encrypted copies, atomic quiescence or oplog-consistent backups, actual authentication, and tested disaster recovery.
 - Restore target collections are created before the insertion transaction. If restoration fails mid-transaction, inserted documents roll back, but empty collections can remain; the operator must create a fresh disposable target on retry. No destructive cleanup is automated.
-- This is one piece of Gate 4. Network outage drills, backup rotation and secure local process hardening remain future gates.
+- This is one piece of Gate 4. Dedicated sender tests now simulate a lost HTTP reply and retry with the exact immutable operation identity; this is not a full operating-system network partition drill. Backup rotation, crash recovery of the actual desktop process, and secure local process hardening remain future gates.
 
 ## Tests
 The new real-replica test `backend/tests/test_desktop_backup_lab.py` demonstrates encrypted backup, verified restore, no overwrite, incorrect passphrase, tampered ciphertext, missing opt-in marker, and preservation of the source.
