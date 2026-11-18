@@ -6,6 +6,11 @@ on:
     paths:
       - 'desktop-app/**'
       - '.github/workflows/desktop-preview.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'desktop-app/**'
+      - '.github/workflows/desktop-preview.yml'
   workflow_dispatch:
 
 permissions:
