@@ -6,6 +6,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 use tauri::Manager;
 use tauri::{webview::WebviewWindowBuilder, WebviewUrl};
+mod sidecar;
 
 const LOCAL_PORT: u16 = 18085;
 const LOCAL_URL: &str = "http://127.0.0.1:18085/";
@@ -75,7 +76,7 @@ fn probe_local_backend() -> ProbeResult {
 }
 
 #[tauri::command]
-fn open_local_backend(app: tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn open_local_backend(app: tauri::AppHandle) -> Result<(), String> {
     // Repeat immediately before opening. Does not prevent a local port-swap
     // race: do not use this preview on a shared/untrusted OS account.
     check_loopback_service()?;
@@ -110,9 +111,15 @@ mod tests {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(sidecar::RuntimeState::default())
+        .on_window_event(sidecar::stop_on_main_close)
         .invoke_handler(tauri::generate_handler![
             probe_local_backend,
-            open_local_backend
+            open_local_backend,
+            sidecar::start_experimental_runtime,
+            sidecar::stop_experimental_runtime,
+            sidecar::open_owned_local_backend
         ])
         .run(tauri::generate_context!())
         .expect("failed to start isolated desktop preview");
