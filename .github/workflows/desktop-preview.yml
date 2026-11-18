@@ -30,7 +30,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             bundle: nsis
           - label: macos-arm64
-            os: macos-latest
+            os: macos-15-intel
             target: aarch64-apple-darwin
             bundle: dmg
           - label: macos-intel
