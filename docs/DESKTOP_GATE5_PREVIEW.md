@@ -35,3 +35,12 @@ Each GitHub Actions job uploads a separate downloadable **workflow artifact**. A
 ## Release decision
 
 The PR remains **DRAFT**. The workflow has `contents: read`, uploads artifacts with 7-day retention and cannot publish a release or touch Render/Atlas. No merge to `main` is permitted.
+
+## macOS HTTP loopback exception
+
+The Tauri `src-tauri/Info.plist` adds only `NSAppTransportSecurity /
+NSAllowsLocalNetworking` for the local 127.0.0.1 FastAPI page. It does
+not enable arbitrary HTTP internet navigation. This is necessary to test
+loading a loopback-served React UI in WKWebView. A real macOS UI smoke test
+is still required; compiling a DMG alone does not prove remote local-page
+navigation works.
