@@ -4,6 +4,15 @@ on:
   push:
     branches:
       - feature/desktop-hybrid-offline-sync
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/desktop_sync/**'
+      - 'backend/sales_router.py'
+      - 'backend/tests/test_desktop_*'
+      - 'desktop_runtime/**'
+      - 'frontend/src/lib/offlineManualSale*'
+      - '.github/workflows/desktop-cert.yml'
   workflow_dispatch:
 
 permissions:
