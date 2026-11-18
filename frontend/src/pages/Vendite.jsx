@@ -5,6 +5,7 @@ import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
 import { parseBulkSales } from "../lib/bulkSales";
+import { pendingManualSale, stageManualSale, acknowledgeManualSale } from "../lib/offlineManualSale";
 
 function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
   return (
@@ -34,7 +35,13 @@ export default function Vendite() {
   const [rows, setRows] = useState([]);
   const [giorno, setGiorno] = useState(new Date().toISOString().slice(0, 10));
   const today = new Date().toISOString().slice(0, 10);
-  const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 1, importo: 0, canale: "NEGOZIO", pagamento: "CONTANTI", colonna: "" });
+  const [form, setForm] = useState(() => {
+    const empty = { data: today, codice: "", descrizione: "", quantita: 1, importo: 0, canale: "NEGOZIO", pagamento: "CONTANTI", colonna: "" };
+    try { return pendingManualSale()?.payload || empty; } catch { return empty; }
+  });
+  const [pendingSale, setPendingSale] = useState(() => {
+    try { return pendingManualSale(); } catch { return { invalid: true }; }
+  });
   const [vendingColumns, setVendingColumns] = useState([]);
   const [tab, setTab] = useState("manuale"); // manuale | bulk | csv
   const [bulkText, setBulkText] = useState("");
@@ -50,7 +57,6 @@ export default function Vendite() {
   const [lastManualSale, setLastManualSale] = useState(undefined);
   const [manualUndoing, setManualUndoing] = useState(false);
   const [manualSaving, setManualSaving] = useState(false);
-  const manualIdempotencyKey = useRef(null);
   const csvRef = useRef(null);
   const [csvResult, setCsvResult] = useState(null);
   const [csvPag, setCsvPag] = useState("CONTANTI");
@@ -114,13 +120,17 @@ export default function Vendite() {
     if (manualUndoing || manualSaving) return;
     if (!form.codice || !form.importo) { toast.error("Compila codice e importo"); return; }
     if (form.canale === "VENDING" && !form.colonna) { toast.error("Seleziona la colonna Vending"); return; }
-    manualIdempotencyKey.current ||= crypto.randomUUID();
     setManualSaving(true);
     try {
-      const r = await api.post("/vendite", form, {
-        headers: { "X-Idempotency-Key": manualIdempotencyKey.current },
+      // Persist the exact payload and key before any request is sent. Retries,
+      // reloads and uncertain responses must never generate a second sale.
+      const receipt = stageManualSale(form);
+      setPendingSale(receipt);
+      const r = await api.post("/vendite", receipt.payload, {
+        headers: { "X-Idempotency-Key": receipt.key },
       });
-      manualIdempotencyKey.current = null;
+      acknowledgeManualSale(receipt.key);
+      setPendingSale(null);
       setLastManualSale(r.data);
       toast.success("Vendita registrata");
       setForm({ ...form, codice: "", descrizione: "", quantita: 1, importo: 0, colonna: "" });
@@ -350,6 +360,18 @@ export default function Vendite() {
 
       {tab === "manuale" && (
       <Card className="p-4 mb-6">
+        {pendingSale && (
+          <div role="alert" data-testid="manual-sale-pending" className="mb-3 rounded-md border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900">
+            <strong>Vendita in sospeso.</strong> {pendingSale.invalid
+              ? "Archivio locale incoerente: intervenire prima di registrare nuove vendite."
+              : "La richiesta potrebbe essere già stata registrata. Verifica lo storico; per ritentare usa esattamente la stessa vendita."}
+            {!pendingSale.invalid && (
+              <button type="button" className="ml-3 underline font-semibold" onClick={() => setForm({ ...pendingSale.payload })}>
+                Ripristina richiesta
+              </button>
+            )}
+          </div>
+        )}
         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
           <input data-testid="vend-data" type="date" value={form.data} onChange={e => setForm({...form, data: e.target.value})} className="border rounded-md px-3 py-2 text-sm" />
           <input data-testid="vend-codice" placeholder="Codice" value={form.codice} onChange={e => setForm({...form, codice: e.target.value})} onBlur={lookupPrezzo} className="border rounded-md px-3 py-2 text-sm font-mono" />

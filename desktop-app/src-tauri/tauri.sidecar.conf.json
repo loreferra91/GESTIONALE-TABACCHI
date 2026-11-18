@@ -1,0 +1,9 @@
+{
+  "productName": "Gestionale Tabacchi Runtime Lab",
+  "identifier": "it.gestionale.tabacchi.runtime.lab",
+  "bundle": {
+    "externalBin": [
+      "binaries/gestionale-runtime"
+    ]
+  }
+}

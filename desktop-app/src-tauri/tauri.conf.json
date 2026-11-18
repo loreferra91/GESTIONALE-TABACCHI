@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Gestionale Tabacchi Desktop Preview",
+  "version": "0.1.0",
+  "identifier": "it.gestionale.tabacchi.desktop.preview",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Gestionale Tabacchi — Anteprima desktop",
+        "width": 860,
+        "height": 620,
+        "minWidth": 650,
+        "minHeight": 500,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; connect-src 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "shortDescription": "Anteprima di diagnostica desktop, non operativa",
+    "longDescription": "Launcher sperimentale per un backend locale già avviato. Non include MongoDB o FastAPI.",
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  }
+}

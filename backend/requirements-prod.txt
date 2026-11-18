@@ -12,3 +12,4 @@ python-multipart==0.0.32
 reportlab==5.0.1
 requests==2.34.2
 uvicorn[standard]==0.25.0
+cryptography>=44.0.0,<48.0.0

@@ -12,8 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import DuplicateKeyError
 
 if __package__:
+    from .desktop_sync.local_outbox import (sale_payload, payload_hash, operation_id,
+                                            check_sale_replay, record_sale_outbox)
     from .money import NonNegativeMoney
 else:
+    from desktop_sync.local_outbox import (sale_payload, payload_hash, operation_id,
+                                           check_sale_replay, record_sale_outbox)
     from money import NonNegativeMoney
 
 
@@ -95,6 +99,7 @@ def create_sales_router(
     request_operator: Callable[[Optional[Request]], str],
     cash_movement_model: Any,
     create_backup_snapshot: Callable[..., Any],
+    desktop_device_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     router = APIRouter()
 
@@ -122,13 +127,17 @@ def create_sales_router(
         channel = str(vendita.canale or "").strip().upper()
         if channel not in {"NEGOZIO", "VENDING"}:
             raise HTTPException(422, "Canale vendita non valido")
+        if desktop_device_id and channel != "NEGOZIO":
+            raise HTTPException(423, "Vendite Vending offline non ancora certificate")
         codice = product_code_text(vendita.codice)
         if not codice:
             raise HTTPException(422, "Codice prodotto obbligatorio")
         key = str(idempotency_key or "").strip() or None
+        if desktop_device_id and not key:
+            raise HTTPException(422, "Desktop offline: X-Idempotency-Key obbligatoria")
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "X-Idempotency-Key deve contenere da 10 a 160 caratteri")
-        if key:
+        if key and not desktop_device_id:
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
                 return existing
@@ -156,14 +165,33 @@ def create_sales_router(
         sale_doc = VenditaGiornaliera(**payload).model_dump()
         if key:
             sale_doc["idempotency_key"] = key
+        desktop_id = None
+        desktop_hash = None
+        if desktop_device_id:
+            try:
+                desktop_id = operation_id(desktop_device_id, key)
+                desktop_hash = payload_hash(sale_payload(
+                    data=sale_doc["data"], codice=codice, quantita=vendita.quantita,
+                    importo=sale_doc["importo"], canale=channel,
+                    pagamento=payload["pagamento"], colonna=column_code,
+                ))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
 
         async def operation(session):
             kwargs = session_kwargs(session)
+            if desktop_id:
+                replay = await check_sale_replay(
+                    db, op_id=desktop_id, digest=desktop_hash, session=session)
+                if replay is not None:
+                    return replay
             if key:
                 existing = await db.vendite.find_one(
                     {"idempotency_key": key}, {"_id": 0}, **kwargs
                 )
                 if existing:
+                    if desktop_id:
+                        raise HTTPException(409, "Vendita esistente senza ricevuta offline: riconciliazione necessaria")
                     return existing
 
             column_changed = False
@@ -203,6 +231,22 @@ def create_sales_router(
                     raise HTTPException(409, f"Giacenza insufficiente per il prodotto {codice}")
                 product_changed = True
                 await db.vendite.insert_one(sale_doc.copy(), **kwargs)
+                if desktop_id:
+                    await record_sale_outbox(
+                        db, session=session, op_id=desktop_id,
+                        device_id=desktop_device_id, digest=desktop_hash,
+                        sale_id=sale_doc["id"],
+                        event_payload={
+                            **sale_payload(
+                                data=sale_doc["data"], codice=codice,
+                                quantita=vendita.quantita,
+                                importo=sale_doc["importo"], canale=channel,
+                                pagamento=payload["pagamento"], colonna=column_code,
+                            ),
+                            "sale_id": sale_doc["id"],
+                            "created_at": sale_doc["created_at"],
+                        },
+                    )
                 return sale_doc
             except Exception:
                 if session is None:
@@ -228,6 +272,14 @@ def create_sales_router(
         except DuplicateKeyError:
             if not key:
                 raise
+            if desktop_id:
+                async def replay_only(session):
+                    existing_sale = await check_sale_replay(
+                        db, op_id=desktop_id, digest=desktop_hash, session=session)
+                    if existing_sale is None:
+                        raise HTTPException(409, "Scrittura simultanea: riprovare con stessa chiave")
+                    return existing_sale
+                return await run_transactionally(replay_only)
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if not existing:
                 raise

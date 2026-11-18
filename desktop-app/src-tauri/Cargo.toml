@@ -1,0 +1,21 @@
+[package]
+name = "gestionale_tabacchi_desktop_preview"
+version = "0.1.0"
+description = "Non-operational desktop launcher preview for Gestionale Tabacchi"
+authors = ["Gestionale Tabacchi"]
+license = "UNLICENSED"
+edition = "2021"
+rust-version = "1.78"
+
+[lib]
+name = "gestionale_tabacchi_desktop_preview_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

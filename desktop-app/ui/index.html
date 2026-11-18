@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gestionale Tabacchi — Desktop Preview</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="frame">
+    <header class="top"><div class="glyph" aria-hidden="true">GT</div><div><p class="eyebrow">GESTIONALE TABACCHI</p><h1>Desktop Preview</h1></div><span class="pill">LABORATORIO</span></header>
+    <div class="notice" role="note"><strong>Anteprima non operativa.</strong> Le build diagnostiche non includono FastAPI; le build Runtime Lab includono un sidecar Python, ma richiedono MongoDB locale già autenticato. Nessuna versione include MongoDB o sincronizzazione cloud. Non utilizzare dati reali.</div>
+    <section class="panel">
+      <p class="kicker">Diagnostica locale</p>
+      <h2>Collegamento al gestionale</h2>
+      <p>Riconosce esclusivamente il servizio FastAPI già avviato sul tuo computer, all'indirizzo <code>127.0.0.1:18085</code>. Non contatta Render né MongoDB Atlas.</p>
+      <div class="status" id="status" role="status" aria-live="polite"><span class="dot" id="dot"></span><span id="message">Premi «Verifica servizio» per iniziare.</span></div>
+      <div class="controls">
+        <button type="button" id="start">Avvia backend integrato (lab)</button>
+        <button type="button" class="secondary" id="stop" disabled>Arresta backend integrato</button>
+        <button type="button" id="check" class="secondary">Verifica servizio</button>
+        <button type="button" class="secondary" id="open" disabled>Apri il gestionale locale</button>
+      </div>
+      <p class="footnote">L'apertura usa una seconda finestra nativa, senza concedere comandi privilegiati alla pagina web.</p>
+    </section>
+    <section class="info">
+      <h2>Perché non si avvia automaticamente?</h2>
+      <p>Il backend Python confezionato è previsto solo nella variante Runtime Lab. Richiede un MongoDB locale autenticato già avviato e credenziali nel portachiavi di sistema; nessuna variante avvia automaticamente MongoDB. Gli installer non sono ancora certificati per uso operativo.</p>
+      <p>Per un test con dati sintetici, consulta <code>docs/DESKTOP_GATE5_PREVIEW.md</code> nel repository GitHub e avvia separatamente il runtime locale sperimentale.</p>
+    </section>
+    <footer>Versione 0.1.0-preview.1 · Nessuna sincronizzazione attiva · Nessuna modifica ai dati</footer>
+  </main>
+</body>
+</html>
