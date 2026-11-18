@@ -72,6 +72,14 @@ async def scenario(url):
                 assert replay.status_code == 200
                 assert replay.json()["replayed"] is True
 
+                # Mutation of metadata outside payload_hash must not count as replay.
+                metadata_changed = {**event, "event_payload": {
+                    **event["event_payload"], "created_at": "2026-11-18T12:01:00+00:00",
+                }}
+                tampered_replay = await api.post(endpoint, headers=headers, json=metadata_changed)
+                assert tampered_replay.status_code == 409
+                assert tampered_replay.json()["reason"] == "OPERATION_ID_REUSED_WITH_DIFFERENT_CONTENT"
+
                 edited = {**event, "event_payload": {**event["event_payload"], "quantita": 3}}
                 mismatch = await api.post(endpoint, headers=headers, json=edited)
                 assert mismatch.status_code == 422  # digest mismatch

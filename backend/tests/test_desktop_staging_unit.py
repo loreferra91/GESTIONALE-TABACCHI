@@ -72,3 +72,12 @@ def test_remote_access_requires_separate_opt_in(monkeypatch):
     monkeypatch.delenv("DESKTOP_SYNC_STAGING_ALLOW_REMOTE", raising=False)
     with pytest.raises(RuntimeError, match="opt-in"):
         StagingConfig.from_env()
+
+
+def test_immutable_record_fingerprint_covers_metadata():
+    from backend.desktop_sync.staging_receiver import _immutable_record_digest
+    item = sample_record()
+    same = {**item, "event_payload": dict(item["event_payload"])}
+    assert _immutable_record_digest(item) == _immutable_record_digest(same)
+    same["event_payload"]["created_at"] = "2026-11-18T12:00:00+00:00"
+    assert _immutable_record_digest(item) != _immutable_record_digest(same)

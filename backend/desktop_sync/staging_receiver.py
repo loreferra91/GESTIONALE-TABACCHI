@@ -6,6 +6,8 @@ future authoritative service must resolve stock ownership and revisions.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 import re
 import secrets
 from typing import Any, Mapping
@@ -89,6 +91,13 @@ def validate_event(record: Mapping[str, Any], expected_device: str) -> dict:
     return {**record, "event_payload": dict(payload)}
 
 
+def _immutable_record_digest(record: Mapping[str, Any]) -> str:
+    """Hash all wire fields, not only sale monetary fields. Fails closed on mutations."""
+    canonical = json.dumps(dict(record), sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class StagingReceiver:
     """One explicitly registered staging device + isolated workspace only."""
 
@@ -127,7 +136,8 @@ class StagingReceiver:
             return None
         if (existing["device_id"] == record["device_id"] and
             existing["sale_id"] == record["entity_id"] and
-            secrets.compare_digest(existing["payload_hash"], record["payload_hash"])):
+            isinstance(existing.get("record_digest"), str) and
+            secrets.compare_digest(existing["record_digest"], _immutable_record_digest(record))):
             return self._response(existing, replay=True)
         raise StagingConflict("OPERATION_ID_REUSED_WITH_DIFFERENT_CONTENT")
 
@@ -152,6 +162,7 @@ class StagingReceiver:
                 "kind": record["kind"],
                 "schema_version": record["schema_version"],
                 "payload_hash": record["payload_hash"],
+                "record_digest": _immutable_record_digest(record),
                 "event_payload": record["event_payload"],
                 "status": "STAGED",
                 "business_applied": False,
