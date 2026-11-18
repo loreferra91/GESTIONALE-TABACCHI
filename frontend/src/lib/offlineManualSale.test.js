@@ -1,6 +1,27 @@
 import { stageManualSale, pendingManualSale, acknowledgeManualSale } from "./offlineManualSale";
 
-beforeEach(() => localStorage.clear());
+let serial = 0;
+let priorCrypto;
+
+beforeAll(() => {
+  priorCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: {
+      randomUUID: () => `00000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`,
+    },
+  });
+});
+
+afterAll(() => {
+  if (priorCrypto) Object.defineProperty(globalThis, "crypto", priorCrypto);
+  else delete globalThis.crypto;
+});
+
+beforeEach(() => {
+  serial = 0;
+  localStorage.clear();
+});
 
 test("persists immutable retry across page reloads and clears after acknowledgment", () => {
   const sale = { data: "2026-11-18", codice: "A1", quantita: 1, importo: 5.50, canale: "NEGOZIO" };
