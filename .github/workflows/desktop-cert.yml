@@ -75,10 +75,56 @@ jobs:
             backend/tests/test_desktop_escrow_lab.py \
             backend/tests/test_desktop_backup_lab.py \
             backend/tests/test_desktop_staging_sender.py \
+            backend/tests/test_desktop_mongo_auth_unit.py \
             -q -ra
       - name: Show isolated MongoDB logs on failure
         if: failure()
         run: docker logs --tail 160 desktop-cert-mongo
+      - name: Prepare separate authenticated MongoDB laboratory
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker volume create desktop-cert-auth-key
+          docker run --rm -v desktop-cert-auth-key:/secure mongo:7 bash -c \
+            'umask 077; head -c 384 /dev/urandom | base64 > /secure/keyfile; chmod 400 /secure/keyfile; chown mongodb:mongodb /secure/keyfile'
+          docker run -d --name desktop-cert-auth \
+            -p 127.0.0.1:27020:27017 -v desktop-cert-auth-key:/secure:ro mongo:7 \
+            --replSet rsDesktopAuthCert --keyFile /secure/keyfile --auth --bind_ip_all
+          for i in $(seq 1 80); do
+            if docker exec desktop-cert-auth mongosh --quiet --eval \
+              'db.adminCommand({ping:1}).ok' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+      - name: First-boot authenticated replica test
+        env:
+          CERT_DESKTOP_AUTH_ALLOW_TEST: '1'
+          CERT_AUTH_MONGO_URL: 'mongodb://127.0.0.1:27020/?directConnection=true'
+        run: python -m backend.tests.desktop_auth_crash_lab initialize
+      - name: Simulate abrupt Mongo process crash and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker kill --signal=KILL desktop-cert-auth
+          docker start desktop-cert-auth
+          for i in $(seq 1 80); do
+            if docker exec desktop-cert-auth mongosh --quiet --eval \
+              'db.adminCommand({ping:1}).ok' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+      - name: Verify authenticated recovery after crash
+        env:
+          CERT_DESKTOP_AUTH_ALLOW_TEST: '1'
+          CERT_AUTH_MONGO_URL: 'mongodb://127.0.0.1:27020/?directConnection=true'
+        run: python -m backend.tests.desktop_auth_crash_lab verify
+      - name: Remove authenticated laboratory
+        if: always()
+        run: |
+          docker rm -f desktop-cert-auth || true
+          docker volume rm desktop-cert-auth-key || true
       - name: Remove disposable MongoDB
         if: always()
         run: docker rm -f desktop-cert-mongo || true
