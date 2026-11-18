@@ -1,0 +1,101 @@
+name: Desktop bundled backend lab (NOT for production)
+
+on:
+  push:
+    branches: [feature/desktop-hybrid-offline-sync]
+    paths:
+      - 'desktop-app/**'
+      - 'desktop_runtime/packaged_entry.py'
+      - 'backend/tests/test_desktop_packaged_entry.py'
+      - '.github/workflows/desktop-sidecar-lab.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'desktop-app/**'
+      - 'desktop_runtime/packaged_entry.py'
+      - '.github/workflows/desktop-sidecar-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sidecar-lab:
+    name: Bundled Python and Tauri ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+          - label: macos-intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundle: dmg
+          - label: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bundle: dmg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'desktop-app/src-tauri -> target'
+
+      - name: Build original React application
+        working-directory: frontend
+        run: |
+          yarn install --frozen-lockfile
+          yarn build
+
+      - name: Install Python backend, native keychain and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-prod.txt
+          python -m pip install "keyring==25.6.0" "pyinstaller==6.16.0"
+
+      - name: Freeze backend and validate sidecar assets (no DB/network)
+        run: python desktop-app/scripts/build_sidecar.py --target ${{ matrix.target }}
+
+      - name: Generate preview icons
+        run: |
+          python -m pip install "Pillow==12.3.0"
+          python desktop-app/scripts/generate_icons.py
+
+      - name: Install Tauri CLI
+        working-directory: desktop-app
+        run: npm install --no-audit --no-fund
+
+      - name: Build runtime-lab native installer
+        working-directory: desktop-app
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} --config src-tauri/tauri.sidecar.conf.json
+
+      - name: Archive unsigned lab installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: gestionale-sidecar-lab-${{ matrix.label }}
+          path: |
+            desktop-app/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+            desktop-app/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
