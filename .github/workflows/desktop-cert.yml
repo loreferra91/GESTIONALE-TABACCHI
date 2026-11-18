@@ -70,6 +70,8 @@ jobs:
             backend/tests/test_desktop_outbox.py \
             backend/tests/test_desktop_sync_protocol.py \
             backend/tests/test_desktop_local_runtime.py \
+            backend/tests/test_desktop_staging_unit.py \
+            backend/tests/test_desktop_staging_replica.py \
             -q -ra
       - name: Show isolated MongoDB logs on failure
         if: failure()
