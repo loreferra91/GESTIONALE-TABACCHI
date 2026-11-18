@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 import webbrowser
@@ -41,6 +42,19 @@ def credentials(root: Path) -> tuple[str, str]:
     if len(password) < 32:
         raise LocalMongoError("Invalid desktop auth secret; refuse startup")
     return "desktop", password
+
+
+def device_identity(root: Path) -> str:
+    device_file = root / "device.id"
+    try:
+        create_private_file(device_file, str(uuid.uuid4()))
+    except FileExistsError:
+        pass
+    value = device_file.read_text(encoding="utf-8").strip()
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise LocalMongoError("Corrupt desktop device identity") from exc
 
 
 def wait_api(url: str, process: subprocess.Popen, seconds: float = 30) -> None:
@@ -72,6 +86,7 @@ def main() -> int:
     if not (ROOT / "frontend" / "build" / "index.html").is_file():
         raise LocalMongoError("Missing frontend build; run yarn build in frontend/ first")
     username, password = credentials(root)
+    device_id = device_identity(root)
     mongo_proc = None
     api_proc = None
     try:
@@ -80,6 +95,8 @@ def main() -> int:
         env.update({
             "MONGO_URL": uri,
             "DB_NAME": "gestionale_desktop",
+            "GESTIONALE_DESKTOP_STRICT_MODE": "1",
+            "GESTIONALE_DESKTOP_DEVICE_ID": device_id,
             "ENVIRONMENT": "local",
             "APP_USERNAME": username,
             "APP_PASSWORD": password,

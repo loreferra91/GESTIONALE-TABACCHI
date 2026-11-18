@@ -24,6 +24,7 @@ if __package__:
         parse_italian_money,
     )
     from .fit_tariff import fetch_and_parse_fit_tariff_sync
+    from .desktop_sync.local_outbox import create_indexes as create_desktop_outbox_indexes
     from .audit_router import create_audit_router
     from .agent_integration_router import create_agent_integration_router
     from .auto_order_router import (
@@ -115,6 +116,7 @@ else:
         parse_italian_money,
     )
     from fit_tariff import fetch_and_parse_fit_tariff_sync
+    from desktop_sync.local_outbox import create_indexes as create_desktop_outbox_indexes
     from audit_router import create_audit_router
     from agent_integration_router import create_agent_integration_router
     from auto_order_router import (
@@ -227,6 +229,10 @@ def _requires_secure_runtime() -> bool:
     return not _is_local_environment()
 
 
+def _desktop_strict_mode() -> bool:
+    return os.environ.get("GESTIONALE_DESKTOP_STRICT_MODE") == "1"
+
+
 def _validate_runtime_security() -> None:
     """Fuori dall'ambiente locale credenziali e CORS espliciti sono obbligatori."""
     if not _requires_secure_runtime():
@@ -273,6 +279,12 @@ async def lifespan(_app: FastAPI):
     transaction_capability = await _verify_transaction_capability()
     logging.info("MongoDB transaction capability: %s", transaction_capability)
     await on_start()
+    if _desktop_strict_mode():
+        if not transaction_capability["transactions"]:
+            raise RuntimeError("Desktop offline richiede un replica set transazionale")
+        if not os.environ.get("GESTIONALE_DESKTOP_DEVICE_ID"):
+            raise RuntimeError("Identità desktop assente")
+        await create_desktop_outbox_indexes(db)
     try:
         yield
     finally:
@@ -290,6 +302,18 @@ AGENT_SERVICE_PATHS = frozenset({
 audit_router, _record_audit_event, list_audit_events = create_audit_router(
     get_database=lambda: db,
 )
+
+
+@app.middleware("http")
+async def desktop_offline_write_guard(request: Request, call_next):
+    """Block uninstrumented offline business writes pending full outbox coverage."""
+    if _desktop_strict_mode() and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        # A single instrumented sale path only; all other writes fail closed.
+        if request.url.path != "/api/vendite" or request.method.upper() != "POST":
+            return JSONResponse(status_code=423, content={
+                "detail": "Operazione non ancora certificata per desktop offline",
+            })
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -673,25 +697,27 @@ async def _run_transactionally(operation):
     """
     database_client = getattr(db, "client", None)
     if database_client is None or "mongomock" in type(database_client).__module__.lower():
+        if _desktop_strict_mode():
+            raise RuntimeError("Desktop offline vieta database simulato")
         return await operation(None)
 
     start_session = getattr(database_client, "start_session", None)
     if start_session is None:
-        if _requires_secure_runtime():
+        if _requires_secure_runtime() or _desktop_strict_mode():
             raise RuntimeError("MongoDB non espone sessioni transazionali")
         return await operation(None)
 
     try:
         session = await start_session()
     except (AttributeError, NotImplementedError):
-        if _requires_secure_runtime():
+        if _requires_secure_runtime() or _desktop_strict_mode():
             raise RuntimeError("MongoDB non supporta sessioni transazionali") from None
         return await operation(None)
 
     try:
         with_transaction = getattr(session, "with_transaction", None)
         if with_transaction is None:
-            if _requires_secure_runtime():
+            if _requires_secure_runtime() or _desktop_strict_mode():
                 raise RuntimeError("MongoDB non supporta transazioni multi-documento")
             return await operation(None)
 
@@ -702,7 +728,7 @@ async def _run_transactionally(operation):
     except OperationFailure as exc:
         message = str(exc).lower()
         if exc.code in {20, 303} or "transaction numbers are only allowed" in message:
-            if _requires_secure_runtime():
+            if _requires_secure_runtime() or _desktop_strict_mode():
                 raise RuntimeError(
                     "MongoDB ha rifiutato una transazione multi-documento fuori dall'ambiente locale"
                 ) from exc
@@ -1282,6 +1308,7 @@ sales = create_sales_router(
     request_operator=_request_operator,
     cash_movement_model=MovimentoCassa,
     create_backup_snapshot=lambda *args, **kwargs: create_backup_snapshot(*args, **kwargs),
+    desktop_device_id=os.environ.get("GESTIONALE_DESKTOP_DEVICE_ID") if _desktop_strict_mode() else None,
 )
 sales_router = sales["router"]
 list_vendite = sales["list_vendite"]
