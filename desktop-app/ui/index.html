@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gestionale Tabacchi — Desktop Preview</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="frame">
+    <header class="top"><div class="glyph" aria-hidden="true">GT</div><div><p class="eyebrow">GESTIONALE TABACCHI</p><h1>Desktop Preview</h1></div><span class="pill">LABORATORIO</span></header>
+    <div class="notice" role="note"><strong>Anteprima non operativa.</strong> Questo programma non comprende FastAPI, MongoDB, il motore degli ordini o la sincronizzazione cloud. Non utilizzarlo con vendite, giacenze o dati reali.</div>
+    <section class="panel">
+      <p class="kicker">Diagnostica locale</p>
+      <h2>Collegamento al gestionale</h2>
+      <p>Riconosce esclusivamente il servizio FastAPI già avviato sul tuo computer, all'indirizzo <code>127.0.0.1:18085</code>. Non contatta Render né MongoDB Atlas.</p>
+      <div class="status" id="status" role="status" aria-live="polite"><span class="dot" id="dot"></span><span id="message">Premi «Verifica servizio» per iniziare.</span></div>
+      <div class="controls">
+        <button type="button" id="check">Verifica servizio</button>
+        <button type="button" class="secondary" id="open" disabled>Apri il gestionale locale</button>
+      </div>
+      <p class="footnote">L'apertura usa una seconda finestra nativa, senza concedere comandi privilegiati alla pagina web.</p>
+    </section>
+    <section class="info">
+      <h2>Perché non si avvia automaticamente?</h2>
+      <p>Il runtime Python/MongoDB richiede ancora verifiche di sicurezza, backup e installazione nativa su Windows e macOS. Questo installer certifica soltanto il contenitore grafico Tauri.</p>
+      <p>Per un test con dati sintetici, consulta <code>docs/DESKTOP_GATE5_PREVIEW.md</code> nel repository GitHub e avvia separatamente il runtime locale sperimentale.</p>
+    </section>
+    <footer>Versione 0.1.0-preview.1 · Nessuna sincronizzazione attiva · Nessuna modifica ai dati</footer>
+  </main>
+</body>
+</html>
