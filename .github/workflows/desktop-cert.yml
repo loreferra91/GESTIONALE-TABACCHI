@@ -55,7 +55,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements-prod.txt
-          python -m pip install pytest==9.1.1 pytest-asyncio==1.2.0 mongomock-motor==0.0.36 httpx==0.28.1
+          python -m pip install pytest==9.1.1 mongomock-motor==0.0.36 httpx==0.28.1
       - name: Real offline sale transaction and unit tests
         env:
           CERT_DESKTOP_ALLOW_TEST: '1'

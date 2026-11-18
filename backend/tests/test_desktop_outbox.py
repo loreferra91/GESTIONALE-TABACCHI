@@ -13,6 +13,11 @@ from backend.desktop_sync.local_outbox import (
 )
 
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 def test_stable_sale_digest_and_cents():
     a = sale_payload(data="2026-11-18", codice="001", quantita=2,
                      importo=Decimal("12.30"), canale="NEGOZIO",
@@ -33,7 +38,7 @@ def test_operation_id_deterministic_and_scoped():
     assert operation_id(d1, "same-key") != operation_id(d2, "same-key")
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_atomic_insert_requires_session():
     db = MagicMock()
     db.desktop_outbox.insert_one = AsyncMock()
@@ -43,7 +48,7 @@ async def test_atomic_insert_requires_session():
     db.desktop_outbox.insert_one.assert_not_awaited()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_record_payload_and_session():
     db = MagicMock()
     db.desktop_outbox.insert_one = AsyncMock()
@@ -56,7 +61,7 @@ async def test_record_payload_and_session():
     assert db.desktop_outbox.insert_one.await_args.kwargs["session"] is session
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_replay_different_payload_fails():
     db = MagicMock()
     db.desktop_outbox.find_one = AsyncMock(return_value={"payload_hash": "one", "entity_id": "sale"})
@@ -65,7 +70,7 @@ async def test_replay_different_payload_fails():
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_replay_same_payload_returns_existing_sale():
     db = MagicMock()
     db.desktop_outbox.find_one = AsyncMock(return_value={"payload_hash": "same", "entity_id": "s"})
@@ -73,7 +78,7 @@ async def test_replay_same_payload_returns_existing_sale():
     assert (await check_sale_replay(db, op_id="op", digest="same", session=object()))["id"] == "s"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_replay_orphan_receipt_conflict():
     db = MagicMock()
     db.desktop_outbox.find_one = AsyncMock(return_value={"payload_hash": "same", "entity_id": "s"})
@@ -83,7 +88,7 @@ async def test_replay_orphan_receipt_conflict():
     assert exc.value.status_code == 409
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_unique_outbox_index():
     db = MagicMock()
     db.desktop_outbox.create_index = AsyncMock()
