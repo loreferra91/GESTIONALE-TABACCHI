@@ -1,0 +1,2 @@
+-r ../backend/requirements-prod.txt
+keyring>=25.6.0,<27.0.0

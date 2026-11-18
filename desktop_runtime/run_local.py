@@ -90,7 +90,12 @@ def main() -> int:
     mongo_proc = None
     api_proc = None
     try:
-        mongo_proc, uri = start_owned_mongo(mongod, mongo_port, root)
+        if os.environ.get("GESTIONALE_DESKTOP_SECURE_PREVIEW") == "1":
+            from .secure_runtime import start_secure_owned_mongo
+            mongo_proc, uri = start_secure_owned_mongo(
+                mongod, mongo_port, root, device_id)
+        else:
+            mongo_proc, uri = start_owned_mongo(mongod, mongo_port, root)
         env = os.environ.copy()
         env.update({
             "MONGO_URL": uri,
