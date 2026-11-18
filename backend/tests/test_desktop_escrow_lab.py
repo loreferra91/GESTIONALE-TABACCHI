@@ -71,6 +71,50 @@ async def _scenario(url):
                           "business_applied": False}
         assert await db.lab_sales.count_documents({}) == 2
         assert await db.sync_receipts.count_documents({"status": "STAGED"}) == 3
+
+        # A simulated failure AFTER escrow decrement must abort the WHOLE
+        # transaction: neither grant consumption nor lab sale can survive.
+        fault_sale = sample_event(device1)
+        fault_sale["event_payload"]["quantita"] = 1
+        core = {k: v for k, v in fault_sale["event_payload"].items()
+                if k not in {"sale_id", "created_at"}}
+        fault_sale["payload_hash"] = payload_hash(core)
+        await receiver1.stage(fault_sale)
+        original_hook = lab._before_lab_sale_insert
+
+        async def crash_after_decrement():
+            raise RuntimeError("simulated crash after grant decrement")
+
+        lab._before_lab_sale_insert = crash_after_decrement
+        try:
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                await lab.apply_staged(fault_sale["operation_id"])
+        finally:
+            lab._before_lab_sale_insert = original_hook
+        assert await db.lab_sales.count_documents({}) == 2
+        assert (await lab.stock_report("TEST001"))["reserved"] == 1
+
+        # Concurrent claims on the same final unit: exactly one winner.
+        competing_sale = sample_event(device1)
+        competing_sale["event_payload"]["quantita"] = 1
+        competing_core = {k: v for k, v in competing_sale["event_payload"].items()
+                          if k not in {"sale_id", "created_at"}}
+        competing_sale["payload_hash"] = payload_hash(competing_core)
+        await receiver1.stage(competing_sale)
+        outcomes = await asyncio.gather(
+            lab.apply_staged(fault_sale["operation_id"]),
+            lab.apply_staged(competing_sale["operation_id"]),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(x, dict) and x.get("lab_applied") for x in outcomes) == 1, outcomes
+        assert sum(isinstance(x, LaboratoryConflict) for x in outcomes) == 1, outcomes
+        assert (await lab.stock_report("TEST001")) == {
+            "codice": "TEST001", "initial": 5, "unallocated": 0,
+            "reserved": 0, "consumed": 5, "balanced": True,
+            "business_applied": False,
+        }
+        assert await db.lab_sales.count_documents({}) == 3
+        assert await db.lab_conflicts.count_documents({"status": "OPEN"}) == 2
         assert await db.vendite.count_documents({}) == 0
         assert await db.prodotti.count_documents({}) == 0
         assert await db.cassa.count_documents({}) == 0

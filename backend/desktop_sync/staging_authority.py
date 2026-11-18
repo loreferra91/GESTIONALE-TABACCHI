@@ -129,6 +129,10 @@ class EscrowLaboratory:
             }}, upsert=True,
         )
 
+    async def _before_lab_sale_insert(self) -> None:
+        """Fault-injection seam for verifying transaction rollback in certification tests."""
+        return None
+
     async def apply_staged(self, operation_id: str) -> dict:
         """Manual lab-only projection; never changes real stock/cash/sales.
 
@@ -163,6 +167,7 @@ class EscrowLaboratory:
             )
             if grant.modified_count != 1:
                 raise LaboratoryConflict("LAB_DEVICE_ESCROW_EXHAUSTED")
+            await self._before_lab_sale_insert()
             await self.db.lab_sales.insert_one({
                 **key, "device_id": device, "sale_id": row["sale_id"],
                 "record_digest": row["record_digest"], "codice": code,
