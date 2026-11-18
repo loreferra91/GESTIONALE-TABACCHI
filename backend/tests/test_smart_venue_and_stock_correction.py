@@ -73,6 +73,77 @@ def test_bulk_text_parser_groups_multiple_barcodes_by_adm_code():
     }]
 
 
+@pytest.mark.parametrize("separator", ["\t", "  ", "\n"])
+def test_bulk_text_parser_accepts_browser_table_and_legacy_copies(separator):
+    records = [
+        ["40235029 - DIANA ROSSA KS*AST20 (nuove) (Conf. astuccio da 20 pezzi) - 223 - Sigarette", "5.50", "78", "429.00"],
+        ["4033100045844 - BENSON & HEDGES BLUE (Conf. astuccio da 20 pezzi) - 02982 - Sigarette", "5.30", "0", "0.00"],
+        ["80919599 - BENSON & HEDGES BLUE (Conf. astuccio in colorazione blu da 20 pezzi) - 2982 - Sigarette", "5.30", "25", "132.50"],
+        ["42302292 - GOLDEN BLEND S VIRGINIA*40GR (Conf. da 40 gr) - 1538 - Tabacco da fiuto o da mastico", "10,70", "9", "96,30"],
+        ["87248258 - MARLBORO GOLD 100S (Conf. astuccio da 20 pezzi) - 00651 - Sigarette", "0.00", "40", "0.00"],
+    ]
+    text = "\r\n".join(separator.join(record) for record in records)
+
+    parsed = server._parse_smart_venue_bulk_text(text)
+
+    assert parsed["errori"] == []
+    assert parsed["record"] == 5
+    by_code = {row["codice"]: row for row in parsed["righe"]}
+    assert {code: row["smart_venue"] for code, row in by_code.items()} == {
+        "AMMS223": 78, "AMMS2982": 25, "AMMS1538": 9, "AMMS651": 40,
+    }
+    assert by_code["AMMS2982"]["barcodes"] == ["4033100045844", "80919599"]
+    assert by_code["AMMS2982"]["righe_sorgente"] == [2, 3]
+    assert by_code["AMMS1538"]["categoria"] == "Tabacco da fiuto o da mastico"
+    assert all(not row["avvisi"] for row in parsed["righe"])
+
+
+def test_bulk_text_parser_accepts_mixed_formats_and_preserves_value_warnings():
+    parsed = server._parse_smart_venue_bulk_text(
+        "111 - PRODOTTO - CON TRATTINO - 02982 - Sigarette\t5.30\t2\t10.60\n\n"
+        "222 - PRODOTTO - 2982 - Sigarette\n5.30\n3\n15.90\n"
+        "333 - PRODOTTO - 2982 - Sigarette  5,30  1  6,00\n"
+    )
+
+    assert parsed["errori"] == []
+    assert parsed["record"] == 3
+    row, = parsed["righe"]
+    assert row["smart_venue"] == 6
+    assert row["descrizione"] == "PRODOTTO - CON TRATTINO"
+    assert row["righe_sorgente"] == [1, 2, 3]
+    assert len(row["avvisi"]) == 1
+
+
+@pytest.mark.parametrize("invalid", [
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\t2",
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\t2\t",
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\t\t10.60",
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\t2\t10.60\textra",
+    "111 - PRODOTTO - 2982 - Sigarette\tERRATO\t2\t10.60",
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\t-1\t0.00",
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\t1.5\t7.95",
+    "111 - PRODOTTO - 2982 - Sigarette\t5.30\tNaN\t0.00",
+    "111 - PRODOTTO - 2982 - Sigarette\n5.30\n2",
+])
+def test_bulk_text_parser_keeps_errors_local_and_rejects_partial_save(monkeypatch, invalid):
+    isolated_db(monkeypatch)
+    text = "\n" + invalid + "\n222 - ALTRO - 223 - Sigarette\t5.50\t78\t429.00"
+    parsed = server._parse_smart_venue_bulk_text(text)
+
+    assert len(parsed["errori"]) == 1
+    assert parsed["errori"][0]["riga"] == 2
+    assert [(row["codice"], row["smart_venue"]) for row in parsed["righe"]] == [("AMMS223", 78)]
+
+    async def unexpected_write(*_args, **_kwargs):
+        pytest.fail("Invalid bulk must be rejected before backup or write")
+
+    monkeypatch.setattr(server, "create_backup_snapshot", unexpected_write)
+    monkeypatch.setattr(server, "_bulk_upsert", unexpected_write)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(server.import_smart_venue_bulk(server.SmartVenueBulkIn(testo=text)))
+    assert exc.value.status_code == 422
+
+
 def test_smart_venue_resolves_old_codes_and_collapses_duplicate_snapshots(monkeypatch):
     database = isolated_db(monkeypatch)
 
@@ -151,7 +222,8 @@ def test_smart_venue_save_uses_one_bulk_write(monkeypatch):
     assert bulk_sizes == [(1, 1000)]
 
 
-def test_smart_venue_control_save_preserves_manually_managed_barcodes(monkeypatch):
+@pytest.mark.parametrize("separator", ["\n", "\t", "  "])
+def test_smart_venue_control_save_preserves_manually_managed_barcodes(monkeypatch, separator):
     database = AsyncMongoMockClient()["smart_venue_barcode_preservation_test"]
     monkeypatch.setattr(server, "db", database)
 
@@ -186,10 +258,10 @@ def test_smart_venue_control_save_preserves_manually_managed_barcodes(monkeypatc
             "barcodes": ["MANUALE-PRINCIPALE", "MANUALE-SECONDARIO"],
             "origine": "MANUALE",
         })
-        await server.import_smart_venue_bulk(server.SmartVenueBulkIn(testo=(
-            "BARCODE-DAL-CONTROLLO - BENSON BLUE - 02982 - Sigarette\n"
-            "5.30\n5\n26.50\n"
-        )))
+        await server.import_smart_venue_bulk(server.SmartVenueBulkIn(testo=separator.join([
+            "BARCODE-DAL-CONTROLLO - BENSON BLUE - 02982 - Sigarette",
+            "5.30", "5", "26.50",
+        ])))
         return await database.smart_venue.find_one(
             {"codice": "AMMS2982"}, {"_id": 0}
         )

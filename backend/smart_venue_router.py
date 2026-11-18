@@ -5,6 +5,7 @@ database and import services at runtime.
 """
 import asyncio
 import io
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -234,15 +235,40 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                 "righe_elaborate": len(processed_codes), "errori": errors}
 
     def parse_bulk_text(text: str) -> Dict[str, Any]:
-        lines = [line.strip() for line in str(text or "").replace("\r", "").split("\n") if line.strip()]
+        lines = [(number, line.strip(" ")) for number, line in enumerate(str(text or "").splitlines(), 1) if line.strip()]
         errors, grouped = [], {}
         if not lines:
             return {"righe": [], "errori": [{"riga": 1, "errore": "Nessun dato incollato"}], "record": 0}
-        if len(lines) % 4:
-            errors.append({"riga": len(lines) - len(lines) % 4 + 1, "errore": "Il testo deve contenere blocchi completi di 4 righe"})
-        for start in range(0, len(lines) - len(lines) % 4, 4):
-            header, price_raw, quantity_raw, value_raw = lines[start:start + 4]
+        # Browser table copies use tabs; older copies put each cell on its own
+        # line. Also accept spaces between the three trailing numeric columns.
+        number = r"[+-]?\d+(?:[.,]\d+)?"
+        inline_row = re.compile(rf"^(.*?)\s+({number})\s+({number})\s+({number})$")
+        records = []
+        index = 0
+        while index < len(lines):
+            line_number, line = lines[index]
+            index += 1
+            inline = inline_row.fullmatch(line) if "\t" not in line else None
+            if "\t" in line:
+                fields = [cell.strip() for cell in line.split("\t")]
+            elif inline:
+                fields = list(inline.groups())
+            else:
+                fields = [line.strip()]
+                while index < len(lines) and len(fields) < 4:
+                    following = lines[index][1]
+                    # An incomplete record must not consume the next product.
+                    if " - " in following or "\t" in following:
+                        break
+                    fields.append(following.strip())
+                    index += 1
+            records.append((line_number, fields))
+
+        for record_number, (line_number, fields) in enumerate(records, 1):
             try:
+                if len(fields) != 4 or any(not field for field in fields):
+                    raise ValueError("Record incompleto: servono prodotto, prezzo, quantità e totale (su una riga o su 4 righe)")
+                header, price_raw, quantity_raw, value_raw = fields
                 left, adm_code, category = header.rsplit(" - ", 2)
                 barcode, description = left.split(" - ", 1)
                 numeric_code = adm_numeric_code(adm_code)
@@ -260,12 +286,12 @@ def create_smart_venue_router(*, get_database, read_capped, create_backup_snapsh
                 current["smart_venue"] += quantity
                 if barcode.strip() and barcode.strip() not in current["barcodes"]:
                     current["barcodes"].append(barcode.strip())
-                current["righe_sorgente"].append(start // 4 + 1)
+                current["righe_sorgente"].append(record_number)
                 if abs(expected_value - total_value) > 0.02:
                     current["avvisi"].append(f"valore {total_value:.2f} diverso da prezzo × quantità {expected_value:.2f}")
             except (ValueError, TypeError) as exc:
-                errors.append({"riga": start + 1, "errore": str(exc)})
-        return {"righe": sorted(grouped.values(), key=lambda row: row["codice"]), "errori": errors, "record": len(lines) // 4}
+                errors.append({"riga": line_number, "errore": str(exc)})
+        return {"righe": sorted(grouped.values(), key=lambda row: row["codice"]), "errori": errors, "record": len(records)}
 
     def resolve_rows(rows, products):
         by_code = {str(p.get("codice") or ""): p for p in products}
