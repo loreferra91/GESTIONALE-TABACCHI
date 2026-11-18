@@ -236,6 +236,16 @@ def create_sales_router(
                         db, session=session, op_id=desktop_id,
                         device_id=desktop_device_id, digest=desktop_hash,
                         sale_id=sale_doc["id"],
+                        event_payload={
+                            **sale_payload(
+                                data=sale_doc["data"], codice=codice,
+                                quantita=vendita.quantita,
+                                importo=sale_doc["importo"], canale=channel,
+                                pagamento=payload["pagamento"], colonna=column_code,
+                            ),
+                            "sale_id": sale_doc["id"],
+                            "created_at": sale_doc["created_at"],
+                        },
                     )
                 return sale_doc
             except Exception:

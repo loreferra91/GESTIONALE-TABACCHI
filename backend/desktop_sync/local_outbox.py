@@ -64,7 +64,8 @@ async def check_sale_replay(db: Any, *, op_id: str, digest: str,
 
 
 async def record_sale_outbox(db: Any, *, session: Any, op_id: str,
-                             device_id: str, digest: str, sale_id: str) -> None:
+                             device_id: str, digest: str, sale_id: str,
+                             event_payload: Mapping[str, Any]) -> None:
     if session is None:
         raise RuntimeError("A real MongoDB transaction is mandatory for offline sale")
     await db.desktop_outbox.insert_one({
@@ -74,6 +75,7 @@ async def record_sale_outbox(db: Any, *, session: Any, op_id: str,
         "entity_id": sale_id,
         "kind": "sale.create",
         "payload_hash": digest,
+        "event_payload": dict(event_payload),
         "schema_version": 1,
         "status": "PENDING",
         "attempts": 0,

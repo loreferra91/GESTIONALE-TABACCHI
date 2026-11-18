@@ -278,12 +278,13 @@ async def lifespan(_app: FastAPI):
     _validate_runtime_security()
     transaction_capability = await _verify_transaction_capability()
     logging.info("MongoDB transaction capability: %s", transaction_capability)
-    await on_start()
     if _desktop_strict_mode():
         if not transaction_capability["transactions"]:
             raise RuntimeError("Desktop offline richiede un replica set transazionale")
         if not os.environ.get("GESTIONALE_DESKTOP_DEVICE_ID"):
             raise RuntimeError("Identità desktop assente")
+    await on_start()
+    if _desktop_strict_mode():
         await create_desktop_outbox_indexes(db)
     try:
         yield
@@ -497,6 +498,10 @@ LOTTO_PARAM_BY_CATEGORY = {
 
 
 async def seed_if_empty():
+    if _desktop_strict_mode():
+        # Never silently initialize physical stock from the repository demo fixture.
+        logging.info("Desktop strict: skipping demo stock, sales and vending seed")
+        return
     seed_path = ROOT_DIR / "seed" / "seed_data.json"
     if not seed_path.exists():
         logging.warning(

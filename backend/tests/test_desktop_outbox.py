@@ -39,7 +39,7 @@ async def test_atomic_insert_requires_session():
     db.desktop_outbox.insert_one = AsyncMock()
     with pytest.raises(RuntimeError, match="transaction"):
         await record_sale_outbox(db, session=None, op_id="x", device_id="y",
-                                 digest="z", sale_id="s")
+                                 digest="z", sale_id="s", event_payload={"sale_id": "s"})
     db.desktop_outbox.insert_one.assert_not_awaited()
 
 
@@ -49,9 +49,10 @@ async def test_record_payload_and_session():
     db.desktop_outbox.insert_one = AsyncMock()
     session = object()
     await record_sale_outbox(db, session=session, op_id="op", device_id="device",
-                             digest="hash", sale_id="sale")
+                             digest="hash", sale_id="sale", event_payload={"sale_id": "sale"})
     doc = db.desktop_outbox.insert_one.await_args.args[0]
     assert doc["status"] == "PENDING"
+    assert doc["event_payload"]["sale_id"] == "sale"
     assert db.desktop_outbox.insert_one.await_args.kwargs["session"] is session
 
 
