@@ -21,3 +21,18 @@ The `--self-test` path validates packaged assets only: no MongoDB, no network an
 - Basic Auth credential enrollment/provisioning UI is not implemented. There is no read-only shadow mode for complete domain operations. Real shop data remain forbidden.
 - PyInstaller native builds must be validated on each target. PyInstaller binaries cannot simply be cross-compiled from Intel to ARM via the Rust target triple.
 - No installer or code signing claim until GitHub Actions uploads a verified artifact. Do not merge or deploy to Render.
+
+## Tauri interface integration
+
+The Tauri Rust layer contains three **fixed** commands on the local main
+window: `start_experimental_runtime`, `stop_experimental_runtime`, and
+`open_owned_local_backend`. It invokes only a packaged `gestionale-runtime`
+sidecar with the fixed `--serve` argument. No arbitrary process path, URL
+or injected environment arguments are accepted. If the diagnostic-only build
+contains no sidecar, the start command returns a safe error. The Rust plugin
+manages the child process and kills only that child when the main window
+closes; it never starts or kills MongoDB.
+
+The optional Tauri config `src-tauri/tauri.sidecar.conf.json` adds
+`bundle.externalBin = ["binaries/gestionale-runtime"]`. Standard diagnostic
+builds still use the original config and do not bundle Python.
