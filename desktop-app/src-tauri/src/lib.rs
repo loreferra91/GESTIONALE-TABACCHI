@@ -76,7 +76,11 @@ fn probe_local_backend() -> ProbeResult {
 }
 
 #[tauri::command]
-pub(crate) fn open_local_backend(app: tauri::AppHandle) -> Result<(), String> {
+fn open_local_backend(app: tauri::AppHandle) -> Result<(), String> {
+    open_local_backend_inner(app)
+}
+
+pub(crate) fn open_local_backend_inner(app: tauri::AppHandle) -> Result<(), String> {
     // Repeat immediately before opening. Does not prevent a local port-swap
     // race: do not use this preview on a shared/untrusted OS account.
     check_loopback_service()?;

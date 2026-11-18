@@ -79,7 +79,7 @@ pub fn open_owned_local_backend(
     if !owned_running(&state)? {
         return Err("Avvia prima un sidecar locale gestito da questa applicazione.".into());
     }
-    crate::open_local_backend(app)
+    crate::open_local_backend_inner(app)
 }
 
 pub fn stop_on_main_close(window: &Window, event: &tauri::WindowEvent) {
