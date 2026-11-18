@@ -33,7 +33,7 @@ def initialize():
         authenticated = bootstrap_first_users(
             client, replica_set=REP, database=DB,
             admin_password=ADMIN_SECRET, app_password=APP_SECRET,
-            member_host="127.0.0.1:27020")
+            member_host="localhost:27020")
     finally:
         client.close()
     auth = MongoClient(authenticated, serverSelectionTimeoutMS=3000)

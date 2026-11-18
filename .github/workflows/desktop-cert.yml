@@ -87,11 +87,12 @@ jobs:
           docker volume create desktop-cert-auth-key
           docker run --rm -v desktop-cert-auth-key:/secure mongo:7 bash -c \
             'umask 077; head -c 384 /dev/urandom | base64 > /secure/keyfile; chmod 400 /secure/keyfile; chown mongodb:mongodb /secure/keyfile'
-          docker run -d --name desktop-cert-auth \
-            -p 127.0.0.1:27020:27017 -v desktop-cert-auth-key:/secure:ro mongo:7 \
-            --replSet rsDesktopAuthCert --keyFile /secure/keyfile --auth --bind_ip_all
+          docker run -d --name desktop-cert-auth --network host \
+            -v desktop-cert-auth-key:/secure:ro mongo:7 \
+            --port 27020 --replSet rsDesktopAuthCert \
+            --keyFile /secure/keyfile --auth --bind_ip 127.0.0.1
           for i in $(seq 1 80); do
-            if docker exec desktop-cert-auth mongosh --quiet --eval \
+            if docker exec desktop-cert-auth mongosh --port 27020 --quiet --eval \
               'db.adminCommand({ping:1}).ok' >/dev/null 2>&1; then
               break
             fi
@@ -109,7 +110,7 @@ jobs:
           docker kill --signal=KILL desktop-cert-auth
           docker start desktop-cert-auth
           for i in $(seq 1 80); do
-            if docker exec desktop-cert-auth mongosh --quiet --eval \
+            if docker exec desktop-cert-auth mongosh --port 27020 --quiet --eval \
               'db.adminCommand({ping:1}).ok' >/dev/null 2>&1; then
               break
             fi

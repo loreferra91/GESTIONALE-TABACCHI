@@ -38,7 +38,7 @@ def test_rejects_symlink_and_insecure_keyfile(tmp_path):
 def test_invalid_auth_target_fails_closed():
     with pytest.raises(MongoSecurityError, match="Invalid"):
         authenticated_uri(27020, "production", "a"*40, "rsDesktopAuthCert")
-    with pytest.raises(MongoSecurityError, match="short"):
+    with pytest.raises(MongoSecurityError, match="at least 32"):
         authenticated_uri(27020, "desktop_auth_cert_test", "short", "rsDesktopAuthCert")
     result = authenticated_uri(27020, "desktop_auth_cert_test",
                                "special!pass:word/aaaaaaaaaaaaaaaaaaaaa", "rsDesktopAuthCert")
