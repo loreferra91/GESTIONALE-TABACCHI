@@ -26,3 +26,7 @@ python -m backend.desktop_sync.staging_sender --send
 The sender leaves the local outbox in `STAGED`, a reversible receipt-state update, not definitive authoritative acceptance. In a future production sync protocol, `STAGED` must not be interpreted as cloud-side booking.
 
 Unit tests: `python -m pytest backend/tests/test_desktop_staging_sender.py -q`.
+
+## Verified in isolated replica CI
+
+The real MongoDB replica-set certification now includes one end-to-end test connecting `stage_pending` to the existing staging FastAPI app through a local ASGI transport. The source outbox remains intact, the local receipt changes only `PENDING → STAGED`, and the staging collections for sales, stock and cash remain empty. This demonstrates the **receipt-only** path in a lab, not network delivery or authoritative cloud posting.

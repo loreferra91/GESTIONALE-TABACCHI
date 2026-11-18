@@ -12,6 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from backend.desktop_sync.local_outbox import payload_hash
 from backend.desktop_sync.staging_receiver import StagingReceiver, StagingConflict
 from backend.desktop_sync.staging_service import build_app
+from backend.desktop_sync.staging_sender import stage_pending
 
 
 def _safe_target() -> str:
@@ -45,7 +46,9 @@ def sample_event(device):
 async def scenario(url):
     client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=4000)
     db_name = "desktop_sync_staging_cert_" + uuid4().hex
+    sender_db_name = "desktop_sender_cert_" + uuid4().hex
     db = client[db_name]
+    sender_db = client[sender_db_name]
     try:
         hello = await client.admin.command("hello")
         if hello.get("setName") != "rsDesktopCert" or not hello.get("isWritablePrimary"):
@@ -108,8 +111,26 @@ async def scenario(url):
                 assert await db.vendite.count_documents({}) == 0
                 stored = await db.sync_receipts.find_one({})
                 assert stored["event_payload"]["importo_cents"] == 1200
+
+                # End-to-end on the isolated replica set: local PENDING -> signed
+                # receipt-only receiver -> local STAGED. Never ACKNOWLEDGED.
+                sender_event = sample_event(device)
+                await sender_db.desktop_outbox.insert_one({**sender_event, "status": "PENDING"})
+                result = await stage_pending(sender_db, api, device=device, token=secret, dry_run=False)
+                assert result["staged"] == 1, result
+                assert not result["failures"]
+                local_receipt = await sender_db.desktop_outbox.find_one({
+                    "operation_id": sender_event["operation_id"],
+                })
+                assert local_receipt["status"] == "STAGED"
+                assert local_receipt["event_payload"] == sender_event["event_payload"]
+                assert await db.sync_receipts.count_documents({}) == 2
+                assert await db.prodotti.count_documents({}) == 0
+                assert await db.vendite.count_documents({}) == 0
+                assert await db.cassa.count_documents({}) == 0
     finally:
         await client.drop_database(db_name)
+        await client.drop_database(sender_db_name)
         client.close()
 
 
