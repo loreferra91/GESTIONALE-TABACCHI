@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from bson import BSON
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
 from openpyxl import Workbook
@@ -534,7 +535,13 @@ def test_cash_deletion_compensates_when_audit_insert_fails(database, monkeypatch
         })
         async def reject_audit(*args, **kwargs):
             raise RuntimeError("synthetic-audit-error")
-        monkeypatch.setattr(database.audit_events, "insert_one", reject_audit)
+        audit_collection = database.audit_events
+        monkeypatch.setattr(audit_collection, "insert_one", reject_audit)
+        # The mock dynamically creates collection proxies. Keep the patched
+        # instance stable through the application's late-bound DB accessor.
+        monkeypatch.setattr(server, "db", SimpleNamespace(
+            cassa=database.cassa, audit_events=audit_collection,
+        ))
         with pytest.raises(RuntimeError, match="synthetic-audit-error"):
             await server.del_cassa("movement-to-keep")
         assert await database.cassa.count_documents({"id": "movement-to-keep"}) == 1
