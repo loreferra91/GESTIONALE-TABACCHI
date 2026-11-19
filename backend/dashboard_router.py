@@ -380,11 +380,10 @@ def create_dashboard_router(
     ) -> float:
         db = get_database()
         cutoff = parse_sale_date(latest_imported_sale)
-        documents = await db.vendite.find(
-            {}, {"_id": 0, "data": 1, "created_at": 1, "canale": 1, "pagamento": 1, "importo": 1}
-        ).to_list(None)
         total = Decimal(0)
-        for document in documents:
+        async for document in db.vendite.find(
+            {}, {"_id": 0, "data": 1, "created_at": 1, "canale": 1, "pagamento": 1, "importo": 1}
+        ):
             channel = str(document.get("canale") or "NEGOZIO").strip().upper()
             if channel == "VENDING" or not is_cash_payment(document.get("pagamento")):
                 continue
@@ -453,9 +452,8 @@ def create_dashboard_router(
 
     async def dashboard_sales_trend(days: int = 30) -> Dict[str, Any]:
         db = get_database()
-        app_sales = await db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}).to_list(None)
         totals_by_date: Dict[Any, Decimal] = {}
-        for sale in app_sales:
+        async for sale in db.vendite.find({}, {"_id": 0, "data": 1, "importo": 1}):
             parsed_day = parse_sale_date(sale.get("data"))
             if parsed_day is None:
                 continue
@@ -504,24 +502,57 @@ def create_dashboard_router(
             raise HTTPException(422, "Il periodo deve essere di 7, 30 o 365 giorni")
 
         db = get_database()
-        app_sales = await db.vendite.find(
-            {},
-            {
-                "_id": 0,
-                "data": 1,
-                "codice": 1,
-                "descrizione": 1,
-                "quantita": 1,
-                "importo": 1,
-                "canale": 1,
-                "pagamento": 1,
-                "created_at": 1,
-            },
-        ).to_list(None)
-        parsed_sales = []
-        for sale in app_sales:
+        # A first streaming pass finds the latest VALID sale date, preserving
+        # legacy date formats and ignoring invalid amounts/quantities.
+        end_date = None
+        async for sale in db.vendite.find(
+            {}, {"_id": 0, "data": 1, "importo": 1, "quantita": 1},
+        ):
             parsed_day = parse_sale_date(sale.get("data"))
             if parsed_day is None:
+                continue
+            try:
+                decimal_money(sale.get("importo") or 0)
+                int(sale.get("quantita") or 0)
+            except (TypeError, ValueError):
+                continue
+            if end_date is None or parsed_day > end_date:
+                end_date = parsed_day
+
+        if end_date is None:
+            return {
+                "giorni": days,
+                "data_da": None,
+                "data_a": None,
+                "totale": 0,
+                "totale_precedente": 0,
+                "variazione_pct": None,
+                "pezzi": 0,
+                "media_giornaliera": 0,
+                "giorni_con_vendite": 0,
+                "serie": [],
+                "canali": [],
+                "pagamenti": [],
+                "prodotti": [],
+            }
+
+        start_date = end_date - timedelta(days=days - 1)
+        previous_start = start_date - timedelta(days=days)
+        previous_end = start_date - timedelta(days=1)
+
+        # Only materialize the two periods required for the report, rather
+        # than the entire database. No historical Excel rows are included.
+        parsed_sales = []
+        async for sale in db.vendite.find(
+            {},
+            {
+                "_id": 0, "data": 1, "codice": 1, "descrizione": 1,
+                "quantita": 1, "importo": 1, "canale": 1, "pagamento": 1,
+                "created_at": 1,
+            },
+        ):
+            parsed_day = parse_sale_date(sale.get("data"))
+            if parsed_day is None or not previous_start <= parsed_day <= end_date:
                 continue
             try:
                 amount = decimal_money(sale.get("importo") or 0)
@@ -543,27 +574,6 @@ def create_dashboard_router(
                 "fonte": "VENDITE",
             })
 
-        if not parsed_sales:
-            return {
-                "giorni": days,
-                "data_da": None,
-                "data_a": None,
-                "totale": 0,
-                "totale_precedente": 0,
-                "variazione_pct": None,
-                "pezzi": 0,
-                "media_giornaliera": 0,
-                "giorni_con_vendite": 0,
-                "serie": [],
-                "canali": [],
-                "pagamenti": [],
-                "prodotti": [],
-            }
-
-        end_date = max(sale["data"] for sale in parsed_sales)
-        start_date = end_date - timedelta(days=days - 1)
-        previous_start = start_date - timedelta(days=days)
-        previous_end = start_date - timedelta(days=1)
         current_sales = [sale for sale in parsed_sales if start_date <= sale["data"] <= end_date]
         previous_sales = [
             sale for sale in parsed_sales if previous_start <= sale["data"] <= previous_end
