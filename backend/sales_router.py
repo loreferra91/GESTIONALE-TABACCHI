@@ -733,23 +733,34 @@ def create_sales_router(
         )
 
     @router.post("/vendite/bulk/{batch_id}/annulla")
-    async def annulla_bulk_vendite(batch_id: str):
+    async def annulla_bulk_vendite(batch_id: str, request: Request = None):
         db = get_database()
-        claim = await db.vendite_bulk_imports.update_one(
-            {"id": batch_id, "status": "active"},
-            {"$set": {"status": "annulling"}},
-        )
-        if claim.modified_count != 1:
-            raise HTTPException(404, "Caricamento non trovato o già annullato")
 
         async def operation(session):
             kwargs = session_kwargs(session)
-            sales = await db.vendite.find(
-                {"batch_id": batch_id, "sorgente": "BULK"}, {"_id": 0}, **kwargs
-            ).to_list(None)
+            # Claim inside the transaction: a crash cannot strand the batch in
+            # "annulling" while leaving its sales and stock unchanged.
+            claimed = await db.vendite_bulk_imports.find_one_and_update(
+                {"id": batch_id, "status": "active"},
+                {"$set": {"status": "annulling"}},
+                return_document=True,
+                **kwargs,
+            )
+            if not claimed:
+                raise HTTPException(404, "Caricamento non trovato o già annullato")
+
             completed = []
             current_stock_change = None
+            audit_ids = []
             try:
+                sales = await db.vendite.find(
+                    {"batch_id": batch_id, "sorgente": "BULK"}, {"_id": 0}, **kwargs
+                ).to_list(None)
+                expected = claimed.get("inseriti")
+                if expected is not None and len(sales) != int(expected):
+                    raise RuntimeError(
+                        f"Batch incoerente: trovate {len(sales)} vendite, attese {expected}"
+                    )
                 for sale in sales:
                     field = (
                         "giacenza_vending"
@@ -762,23 +773,48 @@ def create_sales_router(
                         else "venduti_negozio"
                     )
                     quantity = int(sale.get("quantita") or 0)
+                    if quantity <= 0:
+                        raise RuntimeError("Quantità storica non valida: annullamento bloccato")
                     stock_update = await db.prodotti.update_one(
-                        {"codice": sale.get("codice")},
+                        {
+                            "codice": sale.get("codice"),
+                            vend_field: {"$gte": quantity},
+                        },
                         {"$inc": {field: quantity, vend_field: -quantity}},
                         **kwargs,
                     )
                     if stock_update.modified_count != 1:
-                        raise RuntimeError(f"Prodotto non trovato: {sale.get('codice')}")
+                        raise RuntimeError(
+                            f"Prodotto o contatore venduti incoerente: {sale.get('codice')}"
+                        )
                     current_stock_change = (sale, field, vend_field, quantity)
+                    event_id = str(uuid.uuid4())
+                    await db.audit_events.insert_one(
+                        {
+                            "id": event_id,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "azione": "annulla-vendita-bulk",
+                            "entita": "vendite",
+                            "entita_id": str(sale.get("id")),
+                            "operatore": request_operator(request),
+                            "prima": sale,
+                            "dopo": None,
+                            "idempotency_key": claimed.get("idempotency_key"),
+                            "batch_id": batch_id,
+                        },
+                        **kwargs,
+                    )
+                    audit_ids.append(event_id)
                     deletion = await db.vendite.delete_one(
-                        {"id": sale.get("id"), "batch_id": batch_id}, **kwargs
+                        {"id": sale.get("id"), "batch_id": batch_id, "sorgente": "BULK"},
+                        **kwargs,
                     )
                     if deletion.deleted_count != 1:
                         raise RuntimeError("Una vendita del caricamento non è stata eliminata")
                     completed.append(current_stock_change)
                     current_stock_change = None
 
-                await db.vendite_bulk_imports.update_one(
+                final = await db.vendite_bulk_imports.update_one(
                     {"id": batch_id, "status": "annulling"},
                     {
                         "$set": {
@@ -789,8 +825,12 @@ def create_sales_router(
                     },
                     **kwargs,
                 )
+                if final.modified_count != 1:
+                    raise RuntimeError("Lo stato del batch è cambiato durante l'annullamento")
                 return len(completed)
             except Exception:
+                # Production uses MongoDB transactions. Local/mock databases
+                # have best-effort compensation for their non-transactional path.
                 if session is None:
                     if current_stock_change:
                         sale, field, vend_field, quantity = current_stock_change
@@ -804,15 +844,19 @@ def create_sales_router(
                             {"codice": sale.get("codice")},
                             {"$inc": {field: -quantity, vend_field: quantity}},
                         )
+                    if audit_ids:
+                        await db.audit_events.delete_many({"id": {"$in": audit_ids}})
+                    await db.vendite_bulk_imports.update_one(
+                        {"id": batch_id, "status": "annulling"},
+                        {"$set": {"status": "active"}},
+                    )
                 raise
 
         try:
             removed = await run_transactionally(operation)
+        except HTTPException:
+            raise
         except Exception as exc:
-            await db.vendite_bulk_imports.update_one(
-                {"id": batch_id, "status": "annulling"},
-                {"$set": {"status": "active"}},
-            )
             raise HTTPException(500, f"Impossibile annullare il caricamento: {exc}") from exc
         return {"ok": True, "batch_id": batch_id, "rimossi": removed}
 
