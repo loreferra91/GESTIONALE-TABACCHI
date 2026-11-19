@@ -263,7 +263,7 @@ export default function Vendite() {
     const projected = available == null ? null : available - requested;
     const validQuantity = Number.isSafeInteger(r.quantita) && r.quantita > 0 &&
       Number.isSafeInteger(requested);
-    const validDate = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(r.data || "")) &&
+    const validDate = /^\d{4}-\d{2}-\d{2}$/.test(String(r.data || "")) &&
       !Number.isNaN(Date.parse(r.data)) &&
       new Date(`${r.data}T12:00:00Z`).toISOString().slice(0, 10) === r.data;
     const stato = !code ? "vuoto"
