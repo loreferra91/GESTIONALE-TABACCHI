@@ -79,6 +79,7 @@ if __package__:
     from .inventory_analytics_router import create_inventory_analytics_router
     from .index_migrations import migrate_unique_business_indexes
     from .staging_readonly_startup import verify_readonly_staging_startup
+    from .staging_scoped_mongo import choose_staging_connection, verify_scoped_staging_connection
     from .money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
     from .orders_router import (
@@ -171,6 +172,7 @@ else:
     from inventory_analytics_router import create_inventory_analytics_router
     from index_migrations import migrate_unique_business_indexes
     from staging_readonly_startup import verify_readonly_staging_startup
+    from staging_scoped_mongo import choose_staging_connection, verify_scoped_staging_connection
     from money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
     from orders_router import (
@@ -204,7 +206,12 @@ else:
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
+mongo_url, staging_mongo_role_mode = choose_staging_connection(
+    os.environ.get("ENVIRONMENT"),
+    os.environ.get("STAGING_MONGO_ROLE_MODE", "legacy"),
+    os.environ["MONGO_URL"],
+    os.environ.get("STAGING_SCOPED_MONGO_URL"),
+)
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
@@ -302,6 +309,23 @@ async def lifespan(_app: FastAPI):
     # on_start è risolto quando il lifespan viene eseguito, dopo il caricamento
     # completo del modulo.
     _validate_runtime_security()
+    if _environment() == "staging" and staging_mongo_role_mode in {"probe", "active"}:
+        try:
+            candidate = os.environ.get("STAGING_SCOPED_MONGO_URL")
+            role_result = await verify_scoped_staging_connection(
+                candidate, client=client if staging_mongo_role_mode == "active" else None,
+            )
+            logging.info("Scoped staging credential check passed: %s", role_result)
+        except Exception as exc:
+            # Probe must never take down the existing working staging service.
+            # Active mode must fail closed; the legacy URI remains stored in
+            # Render for a reversible mode toggle with no secret retrieval.
+            logging.error(
+                "Scoped staging credential verification failed (%s)",
+                type(exc).__name__,
+            )
+            if staging_mongo_role_mode == "active":
+                raise RuntimeError("Staging scoped Atlas credential validation failed") from None
     transaction_capability = await _verify_transaction_capability()
     logging.info("MongoDB transaction capability: %s", transaction_capability)
     should_initialize = True
