@@ -4,8 +4,12 @@ This module deliberately has no write path. Legacy data corrections, seeding
 and index creation must be performed via a separate, explicitly approved
 maintenance procedure, never hidden inside a routine read-only startup.
 """
-from .migration_preflight import inspect_startup_migrations
-from .index_migrations import MIGRATION_ID
+if __package__:
+    from .migration_preflight import inspect_startup_migrations
+    from .index_migrations import MIGRATION_ID
+else:
+    from migration_preflight import inspect_startup_migrations
+    from index_migrations import MIGRATION_ID
 
 
 # Critical exactly-once operations rely on these unique business keys.
