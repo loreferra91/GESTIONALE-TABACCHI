@@ -360,9 +360,10 @@ def test_manual_undo_preserves_original_sale_in_audit(monkeypatch):
             "codice": "P1", "descrizione": "Prodotto",
             "giacenza_negozio": 10, "venduti_negozio": 0,
         })
-        sale = await server.add_vendita(server.VenditaIn(
+        body = server.VenditaIn(
             data="2026-11-19", codice="P1", quantita=3, importo=15,
-        ))
+        )
+        sale = await server.add_vendita(body, "cert-manual-undo-key-001")
         request = SimpleNamespace(state=SimpleNamespace(authenticated_user="cert-operator"))
         result = await server.annulla_vendita_manuale(sale["id"], request)
         assert result["rimossi"] == 1
@@ -376,7 +377,10 @@ def test_manual_undo_preserves_original_sale_in_audit(monkeypatch):
         assert audit["operatore"] == "cert-operator"
         assert audit["prima"]["id"] == sale["id"]
         assert audit["prima"]["quantita"] == 3
-        assert audit["idempotency_key"] is None
+        assert audit["idempotency_key"] == "cert-manual-undo-key-001"
+        with pytest.raises(HTTPException) as replay_error:
+            await server.add_vendita(body, "cert-manual-undo-key-001")
+        assert replay_error.value.status_code == 409
         with pytest.raises(HTTPException) as error:
             await server.annulla_vendita_manuale(sale["id"])
         assert error.value.status_code == 404
