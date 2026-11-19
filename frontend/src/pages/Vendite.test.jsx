@@ -47,7 +47,7 @@ test('mostra il conteggio completo indipendente dalla lista', () => {
 });
 
 test('blocks the whole bulk request when duplicate product rows exceed shop stock', async () => {
-  await paste('P1\\tProdotto\\t3\\t15\\nP1\\tProdotto\\t3\\t15');
+  await paste('P1\tProdotto\t3\t15\nP1\tProdotto\t3\t15');
   expect(container.querySelector('[data-testid="bulk-row-0-projected"]').textContent).toContain('-1');
   expect(container.querySelector('[data-testid="bulk-row-1-projected"]').textContent).toContain('-1');
   await act(async () => container.querySelector('[data-testid="bulk-submit"]').click());
