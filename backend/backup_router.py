@@ -15,6 +15,11 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pymongo.errors import DuplicateKeyError
 
+try:
+    from .staging_restore import apply_staging_restore, recover_staging_restore, restore_status
+except ImportError:  # FastAPI can also run server.py as a top-level module.
+    from staging_restore import apply_staging_restore, recover_staging_restore, restore_status
+
 
 BACKUP_COLLECTIONS = [
     "prodotti", "listino_adm", "vending", "storico_ordini", "parametri",
@@ -51,6 +56,7 @@ EXCEL_IMPORT_BACKUP_COLLECTIONS = [
 
 def create_backup_router(
     *, get_database, session_kwargs, run_transactionally, read_capped,
+    staging_mode=False,
 ):
     router = APIRouter()
     daily_backup_tasks: Dict[str, asyncio.Task] = {}
@@ -609,11 +615,44 @@ def create_backup_router(
             )
             return {"ok": True, "restored": snapshot_id, "pre_restore_backup": pre_restore["id"]}
 
+    async def _load_verified_staging_checkpoint(snapshot_id):
+        meta = await get_database().backup_snapshots.find_one(
+            {"id": snapshot_id, "status": {"$ne": "PRUNED"}}, {"_id": 0}
+        )
+        if not meta:
+            raise RuntimeError("Pre-restore checkpoint missing or pruned")
+        return await load_restore_snapshot(meta)
+
+    @router.get("/backup/restore-file/status")
+    async def backup_restore_file_status():
+        if not staging_mode:
+            raise HTTPException(404, "Diagnostica disponibile solo su staging")
+        return await restore_status(get_database())
+
+    @router.post("/backup/restore-file/recover")
+    async def backup_restore_file_recover(body: Optional[Dict[str, Any]] = None):
+        if not staging_mode:
+            raise HTTPException(404, "Recupero disponibile solo su staging")
+        if (body or {}).get("confirm") != "RECOVER_STAGING_CHECKPOINT":
+            raise HTTPException(422, "Conferma esplicita richiesta per recupero staging")
+        async with restore_lock():
+            return await recover_staging_restore(
+                database=get_database(),
+                load_checkpoint=_load_verified_staging_checkpoint,
+            )
+
     @router.post("/backup/restore-file/preview")
     async def backup_restore_file_preview(file: UploadFile = File(...)):
         """Validate external JSON and target compatibility without any writes."""
         payload, collections = await parse_restore_file(file)
-        return await inspect_restore_target(payload, collections)
+        result = await inspect_restore_target(payload, collections)
+        if staging_mode:
+            state = await restore_status(get_database())
+            result["restore_state"] = state["phase"]
+            if state["phase"] != "READY":
+                result["can_restore"] = False
+                result["warnings"].append("Staging in manutenzione: ripristino precedente incompleto")
+        return result
 
     @router.post("/backup/restore-file")
     async def backup_restore_file(file: UploadFile = File(...)):
@@ -627,6 +666,18 @@ def create_backup_router(
                     "già popolate nella destinazione: "
                     + ", ".join(assessment["nonempty_missing_collections"])
                 )
+            if staging_mode:
+                outcome = await apply_staging_restore(
+                    database=database,
+                    collections=collections,
+                    make_checkpoint=lambda: create_backup_snapshot(
+                        f"Prima del ripristino file {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
+                        "pre-restore-file",
+                    ),
+                    load_checkpoint=_load_verified_staging_checkpoint,
+                    vending_created_at=payload.get("created_at"),
+                )
+                return {**outcome, "file": file.filename}
             pre_restore = await create_backup_snapshot(
                 f"Prima del ripristino file {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
                 "pre-restore-file",
@@ -662,4 +713,6 @@ def create_backup_router(
         "backup_restore": backup_restore,
         "backup_restore_file": backup_restore_file,
         "backup_restore_file_preview": backup_restore_file_preview,
+        "backup_restore_file_status": backup_restore_file_status,
+        "backup_restore_file_recover": backup_restore_file_recover,
     }
