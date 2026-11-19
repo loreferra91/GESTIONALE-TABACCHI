@@ -107,3 +107,62 @@ file seguire `docs/ENCRYPTED_BACKUP_RUNBOOK.md` su un cluster isolato.
    into staging after preserving an independent backup.
 7. Record observed documents/stock/vending/audit checks and only then
    propose promoting the tested *individual changes* into production.
+
+## Ripristino voluminoso su Atlas Free — modalità staging
+
+### Incidente riprodotto dai log (19 novembre 2026)
+
+- `POST /api/backup/restore-file/preview`: HTTP 200.
+- `POST /api/backup/restore-file`: HTTP 503, con log
+  `MongoDB transaction outcome unresolved after driver retries (code=251, commit_unknown=False)`.
+- Il backup preventivo `pre-restore-file` contiene 25.560 documenti;
+  il controllo successivo di vendite, prodotti, vending, audit, ordini,
+  import bulk e altri registri ha confermato che i rispettivi conteggi
+  erano rimasti invariati. Questa verifica dei conteggi non equivale a
+  una certificazione dell'intero contenuto.
+- L'operazione originale coinvolgeva tutte le collezioni in un'unica
+  transazione su Atlas Free; MongoDB impone limiti di durata alle
+  transazioni. La causa transazionale del 503 è confermata, mentre il
+  limite specifico raggiunto non è stato misurato direttamente.
+
+### Nuova modalità esclusiva staging
+
+- Sostituisce i documenti in batch di massimo 500, senza una transazione
+  multi-collezione che può scadere.
+- Prima di ogni scrittura salva un checkpoint completo e verificabile.
+- Durante tutta l'operazione mantiene una fase persistente
+  `PREPARING` / `RESTORING` / `ROLLING_BACK`. Le API operative
+  restituiranno 503 in manutenzione; la root health resta disponibile.
+- Dopo la sostituzione ricontrolla tutti i conteggi e il contenuto di
+  ciascuna collezione, ignorando soltanto l'ordine dei documenti.
+- Se fallisce, tenta un rollback integrale dal checkpoint e ne
+  verifica il risultato. Se il rollback non può essere confermato,
+  la fase è `FAILED` e **staging resta bloccato**.
+- Se Render termina il processo durante l'import, la fase rimane
+  persistente e al prossimo avvio le migrazioni startup vengono
+  intenzionalmente saltate fino al recupero.
+
+**Nota importante:** non è atomicità MongoDB cross-collection. Questa
+modalità è consentita solo su staging; la via transazionale di
+produzione rimane invariata. Non avviare vendite, import o altre
+operazioni concorrenti durante un ripristino.
+
+### Diagnosi e recovery
+
+- `GET /api/backup/restore-file/status` restituisce la fase e
+  l'identificativo del checkpoint, con autenticazione applicativa.
+- In caso di `FAILED` o `RESTORING` bloccato dopo un riavvio:
+  verificare il checkpoint e le anomalie nei log; **non ritentare
+  l'upload**.
+- Solo dopo aver verificato che la connessione punti al database
+  `gestionale_staging` e al cluster dedicato, un operatore autorizzato
+  può usare `POST /api/backup/restore-file/recover` con
+  JSON `{"confirm":"RECOVER_STAGING_CHECKPOINT"}`. L'endpoint
+  ripristina il checkpoint di sicurezza e riabilita staging solo se
+  il contenuto viene ricontrollato con successo.
+- La recovery sovrascrive lo stato parziale con quello precedente al
+  tentativo: conservare sempre un backup esterno indipendente.
+- Il limite di upload JSON rimane 20 MiB: i file che lo superano
+  richiedono un trasporto diverso, non l'innalzamento arbitrario
+  del limite su un'istanza Render Free.
+
