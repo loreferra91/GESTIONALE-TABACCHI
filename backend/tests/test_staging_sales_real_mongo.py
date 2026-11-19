@@ -147,8 +147,11 @@ def test_mid_batch_duplicate_key_aborts_every_inventory_write(monkeypatch):
                 {"data": "2026-11-19", "codice": "CERT-P1", "quantita": 1, "importo": 5},
             ],
         )
-        with pytest.raises(DuplicateKeyError):
+        with pytest.raises((DuplicateKeyError, HTTPException)) as error:
             await server.bulk_vendite(body)
+        # The public router may translate duplicate-key errors into HTTP 409.
+        if isinstance(error.value, HTTPException):
+            assert error.value.status_code == 409
         product = await db.prodotti.find_one({"codice": "CERT-P1"})
         assert product["giacenza_negozio"] == 12
         assert product["venduti_negozio"] == 0
