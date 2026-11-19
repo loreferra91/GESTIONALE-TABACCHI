@@ -94,6 +94,7 @@ def test_cash_count_retry_is_idempotent_and_mismatched_payload_is_blocked():
     {"observed_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()},
     {"observed_at": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()},
     {"idempotency_key": "insecure key?"},
+    {"source_reference": "       "},
 ])
 def test_invalid_or_unverified_cash_evidence_is_rejected(change):
     request = {**_body(), **change}
