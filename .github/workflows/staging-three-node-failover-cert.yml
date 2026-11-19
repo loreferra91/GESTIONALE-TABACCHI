@@ -1,0 +1,94 @@
+name: Staging certification - three-node MongoDB primary failover
+
+on:
+  push:
+    branches:
+      - 'feature/staging-three-node-failover-cert-*'
+      - openclaw/render-staging-deploy
+    paths:
+      - .github/workflows/staging-three-node-failover-cert.yml
+      - backend/tests/test_replica_failover_certification.py
+  pull_request:
+    branches:
+      - openclaw/render-staging-deploy
+    paths:
+      - .github/workflows/staging-three-node-failover-cert.yml
+      - backend/tests/test_replica_failover_certification.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replica-failover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-prod.txt
+      - name: Install only isolated test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-prod.txt
+          python -m pip install pytest==9.1.1 pytest-xdist==3.8.0
+
+      - name: Start disposable three-node replica set on loopback only
+        shell: bash
+        run: |
+          set -euo pipefail
+          for port in 27021 27022 27023; do
+            docker run -d --name "cert-mongo-${port}" --network host \
+              mongo:7 --replSet rs0 --bind_ip 127.0.0.1 --port "$port"
+          done
+          for port in 27021 27022 27023; do
+            ready=0
+            for attempt in $(seq 1 40); do
+              if docker exec "cert-mongo-${port}" mongosh --quiet \
+                --host 127.0.0.1 --port "$port" \
+                --eval 'db.adminCommand({ping: 1}).ok' | grep -qx '1'; then
+                ready=1
+                break
+              fi
+              sleep 1
+            done
+            test "$ready" = "1"
+          done
+          docker exec cert-mongo-27021 mongosh --quiet \
+            --host 127.0.0.1 --port 27021 \
+            --eval 'rs.initiate({_id:"rs0",members:[
+              {_id:0,host:"127.0.0.1:27021"},
+              {_id:1,host:"127.0.0.1:27022"},
+              {_id:2,host:"127.0.0.1:27023"}
+            ]})'
+          elected=0
+          for attempt in $(seq 1 45); do
+            for port in 27021 27022 27023; do
+              if docker exec "cert-mongo-${port}" mongosh --quiet \
+                --host 127.0.0.1 --port "$port" \
+                --eval 'db.hello().isWritablePrimary' | grep -qx 'true'; then
+                elected=1
+                break
+              fi
+            done
+            if [ "$elected" = "1" ]; then break; fi
+            sleep 1
+          done
+          test "$elected" = "1"
+      - name: Prove majority acknowledged inventory writes survive a forced primary stepdown
+        env:
+          CERT_REQUIRE_THREE_NODE: '1'
+          CERT_MONGO_URL: mongodb://127.0.0.1:27021/?directConnection=true
+          CERT_DB_NAME: gestionale_cert_failover_ci
+          CERT_MONGO_NODES: mongodb://127.0.0.1:27021,mongodb://127.0.0.1:27022,mongodb://127.0.0.1:27023
+        run: python -m pytest backend/tests/test_replica_failover_certification.py -q -n 0 --tb=short -rs
+      - name: Stop isolated replica nodes
+        if: always()
+        shell: bash
+        run: |
+          for port in 27021 27022 27023; do
+            docker rm -f "cert-mongo-${port}" || true
+          done
