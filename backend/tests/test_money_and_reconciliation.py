@@ -337,3 +337,40 @@ def test_accounting_writes_are_idempotent(database):
     audit = asyncio.run(database.audit_events.find({}, {"_id": 0}).to_list(None))
     assert {row["entita"] for row in audit} == {"VERSAMENTO", "SCONTRINO_VENDING", "MOVIMENTO_CASSA"}
     assert len(audit) == 3
+
+
+def test_reconciliation_detects_bulk_ledger_gaps_read_only(database):
+    async def scenario():
+        await database.vendite_bulk_imports.insert_many([
+            {"id": "B1", "status": "active", "inseriti": 2},
+            {"id": "B3", "status": "annulled", "inseriti": 2, "undo_audit_version": 1},
+        ])
+        await database.vendite.insert_many([
+            {"id": "S1", "sorgente": "BULK", "batch_id": "B1",
+             "data": "2026-11-19", "quantita": 1, "importo": 5},
+            {"id": "S2", "sorgente": "BULK", "batch_id": "B2",
+             "data": "2026-11-19", "quantita": 1, "importo": 5},
+        ])
+        await database.audit_events.insert_one({
+            "id": "A1", "azione": "annulla-vendita-bulk", "batch_id": "B3",
+        })
+        before = {
+            name: await database[name].find({}).to_list(None)
+            for name in await database.list_collection_names()
+        }
+        result = await server.accounting_reconciliation()
+        after = {
+            name: await database[name].find({}).to_list(None)
+            for name in await database.list_collection_names()
+        }
+        assert before == after
+        assert result["conteggi"] == {
+            "BULK_BATCH_INCOERENTE": 1,
+            "BULK_BATCH_ORFANO": 1,
+            "BULK_STORNO_AUDIT_INCOMPLETO": 1,
+        }
+        filtered = await server.accounting_reconciliation(
+            date_from="2026-11-19", date_to="2026-11-19",
+        )
+        assert not any(key.startswith("BULK_") for key in filtered["conteggi"])
+    asyncio.run(scenario())
