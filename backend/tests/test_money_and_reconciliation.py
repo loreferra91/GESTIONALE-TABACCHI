@@ -465,3 +465,78 @@ def test_reconciliation_identifies_orphaned_pos_sales_without_guessing_cash(data
         assert await database.cassa.count_documents({}) == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "collection,creator,model,remover,audit_entity",
+    [
+        ("cassa", "add_cassa", "MovimentoIn", "del_cassa", "MOVIMENTO_CASSA"),
+        ("versamenti", "add_versamento", "VersamentoIn", "del_versamento", "VERSAMENTO"),
+        ("scontrini_vending", "add_scontrino_vending", "ScontrinoVendingIn",
+         "del_scontrino_vending", "SCONTRINO_VENDING"),
+    ],
+)
+def test_cash_deletions_keep_exactly_one_audit_snapshot(
+    database, collection, creator, model, remover, audit_entity,
+):
+    async def scenario():
+        body = getattr(server, model)(**{
+            "data": "2026-11-19", "importo": "12.30",
+            "idempotency_key": f"cert-delete-{collection}-001",
+            **({"tipo": "ENTRATA"} if collection == "cassa" else {}),
+        })
+        saved = await getattr(server, creator)(body)
+        request = SimpleNamespace(
+            state=SimpleNamespace(authenticated_user="test-operator")
+        )
+        assert (await getattr(server, remover)(saved["id"], request))["ok"] is True
+        assert (await getattr(server, remover)(saved["id"], request))["ok"] is True
+        assert await database[collection].count_documents({}) == 0
+        events = await database.audit_events.find({
+            "entita": audit_entity, "azione": "ELIMINATO"
+        }, {"_id": 0}).to_list(None)
+        assert len(events) == 1
+        assert events[0]["operatore"] == "test-operator"
+        assert events[0]["prima"]["id"] == saved["id"]
+        assert events[0]["prima"]["importo"] == 12.3
+        assert events[0]["dopo"] is None
+
+    asyncio.run(scenario())
+
+
+def test_pos_cash_cannot_be_deleted_without_cancelling_sale_batch(database):
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "prezzo": 5, "giacenza_negozio": 9,
+            "venduti_negozio": 0,
+        })
+        batch = await server.vendita_cassa_rapida(server.CassaRapidaIn(
+            data="2026-11-19T10:00:00Z", pagamento="CONTANTI",
+            idempotency_key="cert-protected-pos-cash-001",
+            righe=[{"codice": "P1", "quantita": 2, "prezzo": 5}],
+        ))
+        with pytest.raises(HTTPException) as error:
+            await server.del_cassa(batch["movimento_cassa_id"])
+        assert error.value.status_code == 409
+        assert await database.cassa.count_documents({}) == 1
+        assert await database.vendite.count_documents({}) == 1
+        assert (await database.prodotti.find_one({"codice": "P1"}))["giacenza_negozio"] == 7
+        assert (await server.annulla_vendita_cassa_rapida(batch["id"]))["ok"] is True
+
+    asyncio.run(scenario())
+
+
+def test_cash_deletion_compensates_when_audit_insert_fails(database, monkeypatch):
+    async def scenario():
+        await database.cassa.insert_one({
+            "id": "movement-to-keep", "tipo": "ENTRATA", "importo": 12.3,
+            "pagamento": "CONTANTI", "data": "2026-11-19",
+        })
+        async def reject_audit(*args, **kwargs):
+            raise RuntimeError("synthetic-audit-error")
+        monkeypatch.setattr(database.audit_events, "insert_one", reject_audit)
+        with pytest.raises(RuntimeError, match="synthetic-audit-error"):
+            await server.del_cassa("movement-to-keep")
+        assert await database.cassa.count_documents({"id": "movement-to-keep"}) == 1
+
+    asyncio.run(scenario())
