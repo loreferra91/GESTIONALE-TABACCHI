@@ -35,6 +35,16 @@ UNVERSIONED_STARTUP_WRITES = (
     "reconcile_adm_product_aliases",
     "restore_canonical_product_snapshots",
     "reconcile_all_vending_stock",
+    "reconcile_vending_cash_state",
+    "repair_smart_venue_auto_order_2026_10_12",
+)
+
+# These have migration markers or index definitions; never confuse them
+# with a proven safe-to-auto-run migration on an arbitrary backup.
+VERSIONED_STARTUP_OPERATIONS = (
+    "migrate_unique_business_indexes",
+    "migrate_auto_order_2_schema",
+    "migrate_vending_column_zero_padding",
 )
 
 
@@ -112,6 +122,7 @@ async def inspect_startup_migrations(database) -> dict:
         },
         "migration_records": migration_status,
         "unversioned_startup_writes_require_review": list(UNVERSIONED_STARTUP_WRITES),
+        "versioned_startup_operations_require_review": list(VERSIONED_STARTUP_OPERATIONS),
         "limitations": [
             "No values, counts, stocks or indexes are modified by this scan.",
             "An index may become invalid between this scan and a later migration.",
