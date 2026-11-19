@@ -595,3 +595,56 @@ def test_reconciliation_missing_stock_is_unknown_not_zero(database):
         assert not any(row["tipo"] == "GIACENZA_VENDING" for row in result["dettagli"])
 
     asyncio.run(scenario())
+
+
+def test_bulk_missing_batch_is_distinguished_from_unmatched_batch_and_keeps_case_state(database):
+    """Old no-batch sales are not silently reparented, deleted or hidden."""
+    from backend.reconciliation import _finding_fingerprint
+
+    async def scenario():
+        await database.vendite.insert_many([
+            {"id": "legacy-01", "sorgente": "BULK", "data": "2026-10-04",
+             "codice": "P1", "quantita": 1, "importo": 5},
+            {"id": "legacy-02", "sorgente": "BULK", "data": "2026-10-06",
+             "codice": "P2", "quantita": 1, "importo": 6},
+            {"id": "orphan-01", "sorgente": "BULK", "batch_id": "UNKNOWN",
+             "data": "2026-11-19", "codice": "P3", "quantita": 1, "importo": 7},
+            {"id": "tracked-01", "sorgente": "BULK", "batch_id": "KNOWN",
+             "data": "2026-11-19", "codice": "P4", "quantita": 1, "importo": 8},
+        ])
+        await database.vendite_bulk_imports.insert_one({
+            "id": "KNOWN", "sorgente": "BULK", "status": "active", "inseriti": 1,
+        })
+        old_fingerprint = _finding_fingerprint(
+            "BULK_BATCH_ORFANO", "vendite", {"id": ""}, {"registrato": 2},
+        )
+        await database.reconciliation_cases.insert_one({
+            "fingerprint": old_fingerprint,
+            "stato": "in_verifica", "nota": "Legacy review pending",
+        })
+        before_sales = await database.vendite.find({}).to_list(None)
+        report = await server.accounting_reconciliation()
+        after_sales = await database.vendite.find({}).to_list(None)
+        assert after_sales == before_sales
+        assert report["conteggi"] == {"BULK_BATCH_ORFANO": 2}
+        legacy = next(item for item in report["dettagli"]
+                      if item.get("collegamento") == "batch_id_assente")
+        orphan = next(item for item in report["dettagli"]
+                      if item.get("collegamento") == "batch_non_trovato")
+        assert legacy["registrato"] == 2
+        assert legacy["prima_data"] == "2026-10-04"
+        assert legacy["ultima_data"] == "2026-10-06"
+        assert legacy["fingerprint"] == old_fingerprint
+        assert legacy["stato"] == "in_verifica"
+        assert legacy["nota"] == "Legacy review pending"
+        assert orphan["registrato"] == 1
+        assert orphan["riferimento"] == "UNKNOWN"
+        assert orphan["stato"] == "aperta"
+        assert await database.vendite.count_documents({}) == 4
+        assert await database.vendite_bulk_imports.count_documents({}) == 1
+        filtered = await server.accounting_reconciliation(
+            date_from="2026-10-04", date_to="2026-10-06"
+        )
+        assert not any(key.startswith("BULK_") for key in filtered["conteggi"])
+
+    asyncio.run(scenario())
