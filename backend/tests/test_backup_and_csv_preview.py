@@ -505,7 +505,7 @@ def test_vending_column_normalization_preserves_internal_codes():
 def test_backup_includes_operational_idempotency_ledgers():
     from backend.backup_router import BACKUP_COLLECTIONS, OPTIONAL_BACKUP_COLLECTIONS
 
-    for collection in ("vendite_bulk_imports", "cassa_rapida_batches", "vending_operations"):
+    for collection in ("vendite_bulk_imports", "cassa_rapida_batches", "vending_operations", "accounting_baselines"):
         assert collection in BACKUP_COLLECTIONS
         # Backups created before these collections existed remain restorable.
         assert collection in OPTIONAL_BACKUP_COLLECTIONS
