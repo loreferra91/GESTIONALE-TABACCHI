@@ -300,3 +300,50 @@ def test_csv_accounting_failure_compensates_stock_sales_and_cash(monkeypatch):
     assert column["giacenza"] == 5
     assert sales == 0
     assert cash == 0
+
+
+def test_manual_sale_rejects_key_reuse_with_different_payload(monkeypatch):
+    database = AsyncMongoMockClient()["manual_sale_fingerprint_guard"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto",
+            "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        body = server.VenditaIn(data="2026-11-19", codice="P1", quantita=2, importo=10)
+        first = await server.add_vendita(body, "same-manual-req-001")
+        assert (await server.add_vendita(body, "same-manual-req-001"))["id"] == first["id"]
+        changed = server.VenditaIn(data="2026-11-19", codice="P1", quantita=3, importo=15)
+        with pytest.raises(HTTPException) as error:
+            await server.add_vendita(changed, "same-manual-req-001")
+        assert error.value.status_code == 409
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 8
+        assert product["venduti_negozio"] == 2
+        assert await database.vendite.count_documents({}) == 1
+
+    asyncio.run(scenario())
+
+
+def test_manual_legacy_key_replay_checks_original_business_fields(monkeypatch):
+    database = AsyncMongoMockClient()["manual_legacy_key_guard"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.vendite.insert_one({
+            "id": "existing-sale", "sorgente": "MANUALE", "idempotency_key": "legacy-manual-req",
+            "data": "2026-11-19", "codice": "P1", "quantita": 2,
+            "importo": 10, "canale": "NEGOZIO", "pagamento": "CONTANTI",
+        })
+        body = server.VenditaIn(data="2026-11-19", codice="P1", quantita=2, importo=10)
+        assert (await server.add_vendita(body, "legacy-manual-req"))["id"] == "existing-sale"
+        with pytest.raises(HTTPException) as error:
+            await server.add_vendita(
+                server.VenditaIn(data="2026-11-19", codice="P1", quantita=3, importo=15),
+                "legacy-manual-req",
+            )
+        assert error.value.status_code == 409
+        assert await database.vendite.count_documents({}) == 1
+
+    asyncio.run(scenario())
