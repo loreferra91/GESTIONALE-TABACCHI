@@ -386,3 +386,82 @@ def test_reconciliation_rejects_impossible_iso_calendar_dates(database):
                 await server.accounting_reconciliation(**{field: value})
             assert getattr(exc.value, "status_code", None) == 422
     asyncio.run(scenario())
+
+
+def test_reconciliation_matches_native_pos_sales_and_cash_without_writing(database):
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "prezzo": 5,
+            "giacenza_negozio": 10, "giacenza_vending": 0, "venduti_negozio": 0,
+        })
+        batch = await server.vendita_cassa_rapida(server.CassaRapidaIn(
+            data="2026-11-19T10:00:00Z", pagamento="POS",
+            idempotency_key="cert-recon-pos-key-001",
+            righe=[{"codice": "P1", "quantita": 2, "prezzo": 5}],
+        ))
+        before = {
+            name: await database[name].find({}).to_list(None)
+            for name in await database.list_collection_names()
+        }
+        report = await server.accounting_reconciliation()
+        after = {
+            name: await database[name].find({}).to_list(None)
+            for name in await database.list_collection_names()
+        }
+        assert report["conteggi"] == {}
+        assert before == after
+        undone = await server.annulla_vendita_cassa_rapida(batch["id"])
+        assert undone["righe_annullate"] == 1
+        after_undo = await server.accounting_reconciliation()
+        assert after_undo["conteggi"] == {}
+        filtered = await server.accounting_reconciliation(
+            date_from="2026-11-19", date_to="2026-11-19"
+        )
+        assert not any(key.startswith("POS_") for key in filtered["conteggi"])
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_detects_native_pos_cash_gap_and_storno_audit_gap(database):
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "prezzo": 5,
+            "giacenza_negozio": 10, "giacenza_vending": 0, "venduti_negozio": 0,
+        })
+        batch = await server.vendita_cassa_rapida(server.CassaRapidaIn(
+            data="2026-11-19T10:00:00Z", pagamento="CONTANTI",
+            idempotency_key="cert-recon-pos-key-002",
+            righe=[{"codice": "P1", "quantita": 1, "prezzo": 5}],
+        ))
+        await database.cassa.delete_one({"batch_id": batch["id"]})
+        broken_cash = await server.accounting_reconciliation()
+        assert broken_cash["conteggi"]["POS_CASSA_INCOERENTE"] == 1
+        await database.cassa.insert_one({
+            "id": batch["movimento_cassa_id"], "batch_id": batch["id"],
+            "tipo": "ENTRATA", "importo": 5, "pagamento": "CONTANTI",
+            "data": "2026-11-19",
+        })
+        await server.annulla_vendita_cassa_rapida(batch["id"])
+        await database.audit_events.delete_one({
+            "azione": "annulla-vendita-cassa-rapida", "batch_id": batch["id"],
+        })
+        broken_audit = await server.accounting_reconciliation()
+        assert broken_audit["conteggi"] == {"POS_AUDIT_STORNO_INCOERENTE": 1}
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_identifies_orphaned_pos_sales_without_guessing_cash(database):
+    async def scenario():
+        await database.vendite.insert_one({
+            "id": "cert-orphan-pos-sale", "sorgente": "POS",
+            "batch_id": "MISSING", "data": "2026-11-19",
+            "codice": "P", "quantita": 2, "importo": 10,
+            "pagamento": "CONTANTI",
+        })
+        report = await server.accounting_reconciliation()
+        assert report["conteggi"] == {"POS_VENDITE_ORFANE": 1}
+        assert await database.vendite.count_documents({}) == 1
+        assert await database.cassa.count_documents({}) == 0
+
+    asyncio.run(scenario())
