@@ -284,3 +284,33 @@ def test_real_mongo_cash_deletions_are_audited_once_and_pos_cash_is_locked(monke
         assert await db.vendite.count_documents({"batch_id": batch["id"]}) == 1
 
     asyncio.run(_with_db(monkeypatch, scenario))
+
+
+def test_vending_withdrawal_cash_and_audit_commit_atomically(monkeypatch):
+    async def scenario(db):
+        await db.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 100.00,
+        })
+        body = server.PrelievoVendingIn(
+            data="2026-11-19", importo="35.45",
+            idempotency_key="cert-real-vending-withdrawal-001",
+        )
+        first = await server.add_prelievo_vending(body)
+        replay = await server.add_prelievo_vending(body)
+        assert replay["id"] == first["id"]
+        assert await db.prelievi_vending.count_documents({}) == 1
+        assert await server._vending_cash_balance() == 64.55
+        assert await db.audit_events.count_documents({
+            "azione": "CREATO", "entita": "PRELIEVO_VENDING",
+            "entita_id": first["id"],
+        }) == 1
+        assert (await server.del_prelievo_vending(first["id"]))["ok"]
+        assert (await server.del_prelievo_vending(first["id"]))["ok"]
+        assert await db.prelievi_vending.count_documents({}) == 0
+        assert await server._vending_cash_balance() == 100.00
+        assert await db.audit_events.count_documents({
+            "azione": "ELIMINATO", "entita": "PRELIEVO_VENDING",
+            "entita_id": first["id"],
+        }) == 1
+
+    asyncio.run(_with_db(monkeypatch, scenario))
