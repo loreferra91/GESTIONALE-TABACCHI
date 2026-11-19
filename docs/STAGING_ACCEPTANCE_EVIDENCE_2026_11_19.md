@@ -49,6 +49,18 @@ updates, deletes, restores, migrations or index creation.
 | Canonical H01/H02/H03 columns | 3 |
 | Known migration records found | 3 / 3 |
 
+### Staging Atlas query plans (read-only `explain(executionStats)`)
+
+- An indexed sale-by-date query for 2026-11-19 with covered projection
+  examined **37 index keys, zero full documents**, and reported
+  **2 ms** within this single Atlas execution.
+- An idempotency-key lookup against `vendite_bulk_imports`
+  used the unique sparse `idempotency_key_1` index and reported
+  **1 ms** for a synthetic absent key.
+
+These are individual query executions on the small staging dataset,
+**not** p95 latency, production throughput, or a 100k-row DB benchmark.
+
 ### Historical BULK records requiring review
 
 There are **148 records with `sorgente: "BULK"` and absent `batch_id`**
