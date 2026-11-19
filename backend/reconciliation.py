@@ -190,7 +190,15 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
     # than reporting false mismatches for partial batches.
     if not date_from and not date_to:
         audited_undos = {}
-        async for batch in database.vendite_bulk_imports.find({}):
+        # vendite_bulk_imports is shared with CSV vending imports.
+        # Only BULK shop batches and legacy rows without a source belong
+        # to this inventory check; CSV_VENDING follows a separate ledger.
+        async for batch in database.vendite_bulk_imports.find({
+            "$or": [
+                {"sorgente": "BULK"},
+                {"sorgente": {"$exists": False}},
+            ],
+        }):
             scanned["vendite_bulk_imports"] += 1
             batch_id = str(batch.get("id") or "")
             actual = bulk_sales_by_batch.pop(batch_id, 0)
