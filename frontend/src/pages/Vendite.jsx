@@ -5,7 +5,7 @@ import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
 import { parseBulkQuantity, parseBulkSales } from "../lib/bulkSales";
-import { clearPendingBulkRequest, getOrCreateBulkRequest } from "../lib/bulkIdempotency";
+import { clearPendingBulkRequest, getOrCreateBulkRequest, hasPendingBulkRequest } from "../lib/bulkIdempotency";
 
 function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
   return (
@@ -289,6 +289,11 @@ export default function Vendite() {
     setBulkRows(rs => rs.filter((_, idx) => idx !== i));
   };
   const clearBulk = () => {
+    if (bulkRequest.current || hasPendingBulkRequest()) {
+      if (!window.confirm("Esiste un caricamento BULK con esito incerto. Prima di abbandonarlo verifica l'ultimo batch: un nuovo invio potrebbe scaricare nuovamente i pezzi. Confermi di creare una nuova operazione?")) return;
+      bulkRequest.current = null;
+      clearPendingBulkRequest();
+    }
     setBulkRows([]);
     setBulkExcludedRows([]);
     setBulkText("");
