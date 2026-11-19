@@ -305,14 +305,14 @@ def create_sales_router(
         return result
 
     @router.delete("/vendite/{v_id}")
-    async def del_vendita(v_id: str):
+    async def del_vendita(v_id: str, request: Request = None):
         db = get_database()
         vendita = await db.vendite.find_one({"id": v_id})
         if not vendita:
             raise HTTPException(404, "Vendita non trovata")
         if vendita.get("sorgente", "MANUALE") != "MANUALE":
             raise HTTPException(409, "Questa vendita va annullata dal relativo caricamento")
-        return await annulla_vendita_manuale(v_id)
+        return await annulla_vendita_manuale(v_id, request)
 
     @router.get("/vendite/manuale/ultima")
     async def ultima_vendita_manuale():
