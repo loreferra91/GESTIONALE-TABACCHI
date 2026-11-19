@@ -858,3 +858,65 @@ def test_receipts_reduce_net_withdrawal_and_combined_balance():
     assert result["giacenzaVendingContanti"] == 237.55
     assert result["scontriniVending"] == 100
     assert result["saldoCassaNegozioEVending"] == 2443.03
+
+
+def test_vending_withdrawal_creation_and_reversal_audited_once(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 100.00,
+        })
+        body = server.PrelievoVendingIn(
+            data="2026-11-19", importo="35.45", descrizione="Certified withdrawal",
+            idempotency_key="cert-withdrawal-audit-001",
+        )
+        first = await server.add_prelievo_vending(body)
+        second = await server.add_prelievo_vending(body)
+        assert first["id"] == second["id"]
+        assert await server._vending_cash_balance() == 64.55
+        assert await database.prelievi_vending.count_documents({}) == 1
+        assert (await server.del_prelievo_vending(first["id"]))["ok"] is True
+        assert (await server.del_prelievo_vending(first["id"]))["ok"] is True
+        assert await server._vending_cash_balance() == 100.00
+        assert await database.prelievi_vending.count_documents({}) == 0
+        events = await database.audit_events.find({
+            "entita": "PRELIEVO_VENDING",
+        }, {"_id": 0}).to_list(None)
+        assert len(events) == 2
+        actions = {event["azione"]: event for event in events}
+        assert set(actions) == {"CREATO", "ELIMINATO"}
+        assert actions["CREATO"]["dopo"]["id"] == first["id"]
+        assert actions["ELIMINATO"]["prima"]["id"] == first["id"]
+        assert actions["ELIMINATO"]["prima"]["importo"] == 35.45
+
+    asyncio.run(scenario())
+
+
+def test_vending_withdrawal_audit_failure_compensates_balance(monkeypatch):
+    database = fresh_db(monkeypatch)
+
+    async def scenario():
+        await database.cassa_vending_stato.insert_one({
+            "id": server.VENDING_CASH_STATE_ID, "giacenza": 100.00,
+        })
+        audit_collection = database.audit_events
+        async def fail_audit(*args, **kwargs):
+            raise RuntimeError("synthetic-withdrawal-audit-failure")
+        monkeypatch.setattr(audit_collection, "insert_one", fail_audit)
+        # The mock constructs collection objects dynamically. Keep the
+        # patched audit collection stable for the router callback.
+        monkeypatch.setattr(server, "db", SimpleNamespace(
+            cassa_vending_stato=database.cassa_vending_stato,
+            prelievi_vending=database.prelievi_vending,
+            audit_events=audit_collection,
+        ))
+        with pytest.raises(RuntimeError, match="synthetic-withdrawal-audit-failure"):
+            await server.add_prelievo_vending(server.PrelievoVendingIn(
+                data="2026-11-19", importo="15.25",
+                idempotency_key="cert-withdrawal-fail-001",
+            ))
+        assert await database.prelievi_vending.count_documents({}) == 0
+        assert (await database.cassa_vending_stato.find_one({"id": "saldo"}))["giacenza"] == 100
+
+    asyncio.run(scenario())
