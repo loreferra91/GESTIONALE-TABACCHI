@@ -2,6 +2,7 @@ import {
   BULK_PENDING_STORAGE_KEY,
   bulkPayloadFingerprint,
   clearPendingBulkRequest,
+  hasPendingBulkRequest,
   getOrCreateBulkRequest,
 } from "./bulkIdempotency";
 
@@ -57,4 +58,13 @@ test("clears pending key only after acknowledged success", () => {
 test("fingerprint is stable and does not persist full sale payload", () => {
   expect(bulkPayloadFingerprint(base)).toBe(bulkPayloadFingerprint(base));
   expect(bulkPayloadFingerprint(base)).not.toContain("P1");
+});
+
+test("shows an uncertain operation until it is explicitly cleared", () => {
+  const storage = fakeStorage();
+  expect(hasPendingBulkRequest(storage)).toBe(false);
+  getOrCreateBulkRequest(base, null, storage, 1000, () => "uncertain-key-12345");
+  expect(hasPendingBulkRequest(storage)).toBe(true);
+  clearPendingBulkRequest(storage);
+  expect(hasPendingBulkRequest(storage)).toBe(false);
 });
