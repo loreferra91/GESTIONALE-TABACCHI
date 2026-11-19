@@ -49,6 +49,14 @@ class CashCountEvidenceIn(BaseModel):
             raise ValueError("Counts must be bounded nonnegative integers")
         return value
 
+    @field_validator("source_reference")
+    @classmethod
+    def valid_reference(cls, value):
+        normalized = value.strip()
+        if len(normalized) < 4:
+            raise ValueError("Signed cash count reference is required")
+        return normalized
+
     @field_validator("observed_at")
     @classmethod
     def valid_observation_time(cls, value):
