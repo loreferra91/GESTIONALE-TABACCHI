@@ -374,3 +374,15 @@ def test_reconciliation_detects_bulk_ledger_gaps_read_only(database):
         )
         assert not any(key.startswith("BULK_") for key in filtered["conteggi"])
     asyncio.run(scenario())
+
+
+def test_reconciliation_rejects_impossible_iso_calendar_dates(database):
+    async def scenario():
+        for field, value in (
+            ("date_from", "2026-02-30"),
+            ("date_to", "2026-13-01"),
+        ):
+            with pytest.raises(Exception) as exc:
+                await server.accounting_reconciliation(**{field: value})
+            assert getattr(exc.value, "status_code", None) == 422
+    asyncio.run(scenario())
