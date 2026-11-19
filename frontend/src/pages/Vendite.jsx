@@ -5,6 +5,7 @@ import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
 import { parseBulkQuantity, parseBulkSales } from "../lib/bulkSales";
+import { clearPendingBulkRequest, getOrCreateBulkRequest } from "../lib/bulkIdempotency";
 
 function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
   return (
@@ -192,12 +193,10 @@ export default function Vendite() {
     setBulkImporting(true);
     try {
       const payload = { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) };
-      const fingerprint = JSON.stringify(payload);
-      if (bulkRequest.current?.fingerprint !== fingerprint) {
-        bulkRequest.current = { fingerprint, key: crypto.randomUUID() };
-      }
+      bulkRequest.current = getOrCreateBulkRequest(payload, bulkRequest.current);
       const r = await api.post("/vendite/bulk", { ...payload, idempotency_key: bulkRequest.current.key });
       bulkRequest.current = null;
+      clearPendingBulkRequest();
       setBulkResult(r.data);
       if (r.data.batch_id) setLastBulkImport({ id: r.data.batch_id, ...r.data, status: "active" });
       setBulkText("");
