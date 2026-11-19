@@ -14,9 +14,10 @@
 | Exact Render live revision + DB health + backup authentication | Actions 44544081028 | passed on exact `f49cc097` |
 | Encrypted MongoDB archive + separate restore | Actions 44540915317 | success, 7 synthetic MongoDB documents restored |
 | BULK/undo transactional certification | staging sales CI from PR #18/#19 | passing, disposable MongoDB |
+| Auto-Order streaming synthetic benchmark | Actions 44544081390 | 5k: 0.147s / 2.74 MiB; 50k: 1.407s / 17.98 MiB; 100k: 2.77s / 35.07 MiB peak |
 | External staging backup restore drill | Actions 44528554272 | passed, disposable database |
 
-**Limits:** The encrypted restore verified a small synthetic dataset, not a
+**Limits:** Benchmarks are synthetic CI measurements, not Render/Atlas p95 production latency. The encrypted restore verified a small synthetic dataset, not a
 production-sized operational recovery. The failover test proves majority
 acknowledged writes survive a primary stepdown; it is not proof of all
 application retries during multi-node network partitions.
