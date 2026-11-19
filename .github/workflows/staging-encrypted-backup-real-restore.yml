@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'feature/staging-encrypted-backup-restore-cert-*'
+      - 'feature/staging-25k-encrypted-recovery-drill-*'
       - openclaw/render-staging-deploy
     paths:
       - scripts/encrypted_backup.py
