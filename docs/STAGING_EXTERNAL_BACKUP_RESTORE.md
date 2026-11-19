@@ -72,3 +72,38 @@ transazionale sufficiente o completamento del restore. Il backup
 pre-ripristino interno a MongoDB non sostituisce una copia esterna.
 Non utilizzare il ripristino web per `.archive.gz.gpg`: per questi
 file seguire `docs/ENCRYPTED_BACKUP_RUNBOOK.md` su un cluster isolato.
+
+## Render staging service discovered (19 November 2026)
+
+- Service ID: `srv-dbh081k9v7es73bh2i0g`, URL:
+  `https://gestionale-tabacchi-staging.onrender.com`
+- Production branch is `main`; staging branch is `openclaw/render-staging-deploy`.
+- Before release staging ran `03ad52b`, 41 commits behind the then-current
+  production commit `2062610`.
+- Environment screenshot confirms `DB_NAME=gestionale_staging`,
+  `ENVIRONMENT=staging`, and explicit staging CORS origin.
+- Staging's connection uses a dedicated `gestionale-staging.*.mongodb.net`
+  hostname. The runtime now also refuses staging startup if the
+  database name or cluster hostname differs. **This guard does not
+  establish Atlas database-user privileges**. Verify Atlas permissions
+  independently and restrict the service user to its staging database.
+- The staging Render service has Auto-Deploy enabled for its selected
+  branch: merging PR #15 into that branch triggers a deployment.
+- A screenshot exposed application and Atlas credentials. Rotate both
+  secrets in their respective providers, then update the Render staging
+  environment. Do not copy those secrets to GitHub or into an issue.
+
+## Release validation
+
+1. Confirm latest branch CI and disposable MongoDB restore workflow both pass.
+2. Verify `main` SHA is unchanged before merging into **staging only**.
+3. Merge PR #15 into `openclaw/render-staging-deploy`; observe the
+   automatic Render deploy. If startup is refused, inspect the
+   redacted `Staging bloccato` log message and correct configuration,
+   **not** the validation code.
+4. Call `GET /api/` to verify application health and Mongo reachability.
+5. Sign in with rotated staging-only credentials and open Parametri.
+6. Preview only a sanitized test backup, then manually confirm a restore
+   into staging after preserving an independent backup.
+7. Record observed documents/stock/vending/audit checks and only then
+   propose promoting the tested *individual changes* into production.
