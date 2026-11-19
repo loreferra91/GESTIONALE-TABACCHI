@@ -2,10 +2,19 @@ import asyncio
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from typing import Any, Callable, Dict, List
 
 from fastapi import APIRouter, HTTPException
+
+
+def rome_business_day(instant: datetime | None = None) -> str:
+    """Commercial day in Italy; timestamps remain UTC in storage."""
+    now = instant or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(ZoneInfo("Europe/Rome")).date().isoformat()
 
 
 def parse_sale_date(value: Any):
@@ -735,7 +744,7 @@ def create_dashboard_router(
             [pivot_result["kpi"].get("valore_venduto") or 0, -(pivot_result["kpi"].get("valore_acquistato") or 0)]
         )
 
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = rome_business_day()
         today_sales = {"tot": Decimal(0), "pezzi": 0}
         async for sale in db.vendite.find(
             {"data": {"$regex": f"^{today}"}}, {"importo": 1, "quantita": 1}
