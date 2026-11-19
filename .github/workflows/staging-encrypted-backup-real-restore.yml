@@ -1,0 +1,155 @@
+name: Staging encrypted backup - real disposable MongoDB restore
+
+on:
+  push:
+    branches:
+      - 'feature/staging-encrypted-backup-restore-cert-*'
+      - openclaw/render-staging-deploy
+    paths:
+      - scripts/encrypted_backup.py
+      - scripts/backup_health.py
+      - .github/workflows/staging-encrypted-backup-real-restore.yml
+  pull_request:
+    branches:
+      - openclaw/render-staging-deploy
+    paths:
+      - scripts/encrypted_backup.py
+      - scripts/backup_health.py
+      - .github/workflows/staging-encrypted-backup-real-restore.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  encrypted-mongo-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start disposable MongoDB (no Atlas credentials)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name encrypted-backup-cert-mongo \
+            -v "$RUNNER_TEMP:$RUNNER_TEMP:ro" \
+            mongo:7 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec encrypted-backup-cert-mongo mongosh --quiet \
+              --eval 'db.adminCommand({ping:1}).ok' | grep -qx '1'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec encrypted-backup-cert-mongo mongosh --quiet \
+            --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+          for attempt in $(seq 1 30); do
+            if docker exec encrypted-backup-cert-mongo mongosh --quiet \
+              --eval 'db.hello().isWritablePrimary' | grep -qx 'true'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec encrypted-backup-cert-mongo mongosh --quiet \
+            --eval 'if (!db.hello().isWritablePrimary) quit(2)'
+          docker exec encrypted-backup-cert-mongo mongodump --version
+          docker exec encrypted-backup-cert-mongo mongorestore --version
+
+      - name: Seed business-integrity fixture and indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec encrypted-backup-cert-mongo mongosh --quiet --eval '
+            const dbs = db.getSiblingDB("gestionale_cert_backup_source");
+            dbs.prodotti.insertMany([
+              {id:"P1",codice:"CERT-P1",giacenza_negozio:7,venduti_negozio:3},
+              {id:"P2",codice:"CERT-P2",giacenza_negozio:11,venduti_negozio:0}
+            ]);
+            dbs.prodotti.createIndex({codice:1},{unique:true});
+            dbs.vendite.insertMany([
+              {id:"S1",batch_id:"B1",codice:"CERT-P1",quantita:2,importo:10},
+              {id:"S2",batch_id:"B1",codice:"CERT-P1",quantita:1,importo:5}
+            ]);
+            dbs.vendite.createIndex({batch_id:1});
+            dbs.cassa.insertOne({id:"C1",batch_id:"B1",tipo:"ENTRATA",importo:15});
+            dbs.cassa_rapida_batches.insertOne({
+              id:"B1",status:"active",pezzi:3,totale:15,movimento_cassa_id:"C1"
+            });
+            dbs.audit_events.insertOne({id:"A1",entita:"CERT",azione:"TEST"});
+          '
+
+      - name: Generate disposable GPG key, encrypted archive and health proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export GNUPGHOME="$RUNNER_TEMP/cert-gpg"
+          mkdir -p "$GNUPGHOME" "$RUNNER_TEMP/independent-backups"
+          chmod 700 "$GNUPGHOME" "$RUNNER_TEMP/independent-backups"
+          gpg --batch --pinentry-mode loopback --passphrase '' \
+            --quick-generate-key 'Disposable Restore Test <restore@example.invalid>' default default never
+          fingerprint=$(gpg --batch --with-colons --list-keys | awk -F: '$1=="fpr" {print $10; exit}')
+          test -n "$fingerprint"
+          cat > "$RUNNER_TEMP/mongodump.yaml" <<'EOF'
+          uri: mongodb://127.0.0.1:27017/?directConnection=true
+          EOF
+          chmod 600 "$RUNNER_TEMP/mongodump.yaml"
+          cat > "$RUNNER_TEMP/mongodump" <<'EOF'
+          #!/usr/bin/env bash
+          exec docker exec encrypted-backup-cert-mongo mongodump "$@"
+          EOF
+          chmod 700 "$RUNNER_TEMP/mongodump"
+          export PATH="$RUNNER_TEMP:$PATH"
+          python3 scripts/encrypted_backup.py \
+            --db-name gestionale_cert_backup_source \
+            --mongodump-config "$RUNNER_TEMP/mongodump.yaml" \
+            --output-dir "$RUNNER_TEMP/independent-backups" \
+            --recipient "$fingerprint" \
+            --gpg-home "$GNUPGHOME"
+          python3 scripts/backup_health.py \
+            --directory "$RUNNER_TEMP/independent-backups" \
+            --max-age-hours 1 --verify-hash
+
+      - name: Decrypt in streaming and restore into a DIFFERENT disposable database
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/cert-gpg"
+          archive=$(find "$RUNNER_TEMP/independent-backups" -maxdepth 1 \
+            -name '*.archive.gz.gpg' -type f -print -quit)
+          test -n "$archive"
+          gpg --batch --decrypt "$archive" | docker exec -i encrypted-backup-cert-mongo \
+            mongorestore --archive --gzip \
+              --nsFrom='gestionale_cert_backup_source.*' \
+              --nsTo='gestionale_cert_backup_restored.*'
+
+      - name: Verify exact business data and restored unique indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec encrypted-backup-cert-mongo mongosh --quiet --eval '
+            const src = db.getSiblingDB("gestionale_cert_backup_source");
+            const dst = db.getSiblingDB("gestionale_cert_backup_restored");
+            for (const name of ["prodotti","vendite","cassa","cassa_rapida_batches","audit_events"]) {
+              const a = src[name].find({}, {_id:0}).sort({id:1}).toArray();
+              const b = dst[name].find({}, {_id:0}).sort({id:1}).toArray();
+              if (JSON.stringify(a) !== JSON.stringify(b)) throw Error("Restore mismatch: "+name);
+            }
+            const index = dst.prodotti.getIndexes().find(x=>x.name==="codice_1");
+            if (!index || !index.unique) throw Error("Missing unique product-code index");
+            const salesIndex = dst.vendite.getIndexes().find(x=>x.name==="batch_id_1");
+            if (!salesIndex) throw Error("Missing batch index");
+            print("PASS: real encrypted MongoDB restore, 5 collections, indexes and business data");
+          '
+
+      - name: Remove disposable database container and temporary keys
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f encrypted-backup-cert-mongo || true
+          rm -rf "$RUNNER_TEMP/cert-gpg" "$RUNNER_TEMP/independent-backups" \
+                 "$RUNNER_TEMP/mongodump" "$RUNNER_TEMP/mongodump.yaml"
