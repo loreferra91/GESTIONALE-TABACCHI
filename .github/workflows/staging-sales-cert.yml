@@ -69,6 +69,8 @@ jobs:
         env:
           CERT_MONGO_URL: mongodb://127.0.0.1:27019/?directConnection=true
           CERT_DB_NAME: gestionale_cert_sales_ci
+          MONGO_URL: mongodb://127.0.0.1:27019/?directConnection=true
+          DB_NAME: gestionale_cert_sales_ci
           ENVIRONMENT: test
         run: python -m pytest backend/tests/test_staging_sales_real_mongo.py -q --tb=short -rs
 
