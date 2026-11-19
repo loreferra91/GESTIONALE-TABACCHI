@@ -3,7 +3,8 @@ import unicodedata
 import uuid
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
@@ -46,6 +47,7 @@ class VenditaIn(BaseModel):
 
 
 class BulkVenditaIn(BaseModel):
+    idempotency_key: Optional[str] = Field(default=None, min_length=10, max_length=160)
     canale: str = "NEGOZIO"
     pagamento: str = "CONTANTI"
     righe: List[Dict[str, Any]]
@@ -112,6 +114,19 @@ def create_sales_router(
             .limit(capped_limit)
             .to_list(capped_limit)
         )
+
+    @router.get("/vendite/totali")
+    async def totali_vendite(giorno: Optional[str] = None):
+        query = {}
+        if giorno:
+            safe = re.sub(r"[^0-9\-T:.]", "", giorno)[:32]
+            query["data"] = {"$regex": f"^{re.escape(safe)}"}
+        result = await get_database().vendite.aggregate([
+            {"$match": query},
+            {"$group": {"_id": None, "importo": {"$sum": "$importo"},
+                        "pezzi": {"$sum": "$quantita"}, "righe": {"$sum": 1}}},
+        ]).to_list(1)
+        return {k: result[0][k] for k in ("importo", "pezzi", "righe")} if result else {"importo": 0, "pezzi": 0, "righe": 0}
 
     @router.post("/vendite")
     async def add_vendita(
@@ -333,6 +348,21 @@ def create_sales_router(
                 422,
                 "Per le vendite Vending usa il CSV distributore, che identifica la colonna reale",
             )
+        fingerprint = _request_fingerprint(body.model_dump(exclude={"idempotency_key"}))
+        # Legacy clients without a key are deduplicated by exact payload.
+        key = body.idempotency_key or f"legacy:{fingerprint}"
+        reservation_id = f"bulk:{key}"
+
+        def replay(existing):
+            if existing.get("request_fingerprint") != fingerprint:
+                raise HTTPException(409, "Chiave già usata con dati diversi")
+            if existing.get("status") != "active" or not existing.get("response"):
+                raise HTTPException(409, "Caricamento in corso o già annullato")
+            return existing["response"]
+
+        existing = await db.vendite_bulk_imports.find_one({"idempotency_key": key})
+        if existing:
+            return replay(existing)
         batch_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         skipped = 0
@@ -343,18 +373,25 @@ def create_sales_router(
             try:
                 codice = product_code_text(row.get("codice"))
                 if not codice:
-                    skipped += 1
-                    continue
+                    raise ValueError("codice obbligatorio")
                 if is_bulk_category_summary(codice, row.get("descrizione")):
                     skipped += 1
                     continue
-                quantity = int(float(row.get("quantita") or 0))
+                raw_quantity = str(row.get("quantita", "")).strip()
+                if not re.fullmatch(r"[0-9]+(?:[.,]0+)?", raw_quantity):
+                    raise ValueError("quantità intera positiva richiesta")
+                quantity = int(Decimal(raw_quantity.replace(",", ".")))
+                if quantity > 9007199254740991:
+                    raise ValueError("quantità troppo grande")
                 amount = normalize_nonnegative_money(row.get("importo", 0))
                 if quantity <= 0:
                     raise ValueError("quantità non valida")
                 if amount < 0:
                     raise ValueError("importo non valido")
-                sale_date = str(row.get("data") or datetime.now(timezone.utc).isoformat())
+                sale_date = str(row.get("data") or datetime.now(ZoneInfo("Europe/Rome")).date().isoformat())
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", sale_date):
+                    raise ValueError("data richiesta nel formato YYYY-MM-DD")
+                date.fromisoformat(sale_date)
                 description = str(row.get("descrizione") or "")
                 product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
                 if not product:
@@ -393,6 +430,8 @@ def create_sales_router(
                 },
             )
 
+        if not prepared:
+            raise HTTPException(422, "Nessuna vendita valida")
         backup = await create_backup_snapshot(
             "Prima del caricamento vendite negozio",
             "pre-import-vendite-negozio",
@@ -403,7 +442,15 @@ def create_sales_router(
             kwargs = session_kwargs(session)
             changed: List[Dict[str, Any]] = []
             inserted_ids: List[str] = []
+            claimed = False
             try:
+                await db.vendite_bulk_imports.insert_one({
+                    "_id": reservation_id, "id": batch_id, "idempotency_key": key,
+                    "request_fingerprint": fingerprint, "created_at": created_at,
+                    "sorgente": "BULK", "canale": "NEGOZIO", "pagamento": body.pagamento,
+                    "inseriti": len(prepared), "saltati": skipped, "status": "processing",
+                }, **kwargs)
+                claimed = True
                 for sale in prepared:
                     quantity = int(sale["quantita"])
                     update = await db.prodotti.update_one(
@@ -416,22 +463,12 @@ def create_sales_router(
                     changed.append(sale)
                     await db.vendite.insert_one(sale.copy(), **kwargs)
                     inserted_ids.append(sale["id"])
-                if prepared:
-                    await db.vendite_bulk_imports.insert_one(
-                        {
-                            "id": batch_id,
-                            "created_at": created_at,
-                            "sorgente": "BULK",
-                            "canale": "NEGOZIO",
-                            "pagamento": str(body.pagamento or "CONTANTI").strip().upper(),
-                            "inseriti": len(prepared),
-                            "saltati": skipped,
-                            "status": "active",
-                        },
-                        **kwargs,
-                    )
+                await db.vendite_bulk_imports.update_one(
+                    {"_id": reservation_id}, {"$set": {"status": "active", "response": response}}, **kwargs
+                )
+                return response
             except Exception:
-                if session is None:
+                if session is None and claimed:
                     if inserted_ids:
                         await db.vendite.delete_many(
                             {"id": {"$in": inserted_ids}, "batch_id": batch_id}
@@ -450,9 +487,8 @@ def create_sales_router(
                     await db.vendite_bulk_imports.delete_one({"id": batch_id})
                 raise
 
-        await run_transactionally(operation)
         inserted = len(prepared)
-        return {
+        response = {
             "inseriti": inserted,
             "saltati": skipped,
             "errori": errors,
@@ -462,6 +498,14 @@ def create_sales_router(
             "pagamento": body.pagamento,
             "backup_id": backup["id"],
         }
+
+        try:
+            return await run_transactionally(operation)
+        except DuplicateKeyError:
+            existing = await db.vendite_bulk_imports.find_one({"idempotency_key": key})
+            if existing:
+                return replay(existing)
+            raise HTTPException(409, "Caricamento concorrente: riprovare con la stessa chiave")
 
     @router.post("/vendite/cassa-rapida")
     async def vendita_cassa_rapida(body: CassaRapidaIn, request: Request = None):
@@ -775,6 +819,7 @@ def create_sales_router(
     return {
         "router": router,
         "list_vendite": list_vendite,
+        "totali_vendite": totali_vendite,
         "add_vendita": add_vendita,
         "del_vendita": del_vendita,
         "ultima_vendita_manuale": ultima_vendita_manuale,

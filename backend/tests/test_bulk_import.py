@@ -230,3 +230,113 @@ def test_manual_sale_can_be_undone_and_stock_is_restored(monkeypatch):
     assert product_after_undo["giacenza_negozio"] == 10
     assert product_after_undo["venduti_negozio"] == 0
     assert remaining is None
+
+@pytest.mark.parametrize('quantity', ['1.5', '1,5', -1, 0, True, 'NaN', '2x', '9007199254740992'])
+def test_bulk_rejects_invalid_quantities(monkeypatch, quantity):
+    database = AsyncMongoMockClient()['bulk_quantity_test']
+    monkeypatch.setattr(server, 'db', database)
+    async def scenario():
+        await database.prodotti.insert_one({'codice': 'P1', 'giacenza_negozio': 10, 'venduti_negozio': 0})
+        with pytest.raises(HTTPException) as exc:
+            await server.bulk_vendite(server.BulkVenditaIn(righe=[{'codice': 'P1', 'quantita': quantity, 'importo': 5}]))
+        assert exc.value.status_code == 422
+        assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 10
+        assert await database.vendite.count_documents({}) == 0
+    asyncio.run(scenario())
+
+
+def test_bulk_replay_conflict_and_undo(monkeypatch):
+    database = AsyncMongoMockClient()['bulk_replay_test']
+    monkeypatch.setattr(server, 'db', database)
+    async def scenario():
+        await database.prodotti.insert_one({'codice': 'P1', 'giacenza_negozio': 5, 'venduti_negozio': 0})
+        body = server.BulkVenditaIn(idempotency_key='test-bulk-key', righe=[
+            {'codice': 'P1', 'quantita': '2.0', 'importo': 10},
+            {'codice': 'P1', 'quantita': 3, 'importo': 15},
+        ])
+        first = await server.bulk_vendite(body)
+        assert await server.bulk_vendite(body) == first
+        assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 0
+        assert await database.vendite.count_documents({}) == 2
+        changed = body.model_copy(deep=True)
+        changed.righe[0]['quantita'] = 1
+        with pytest.raises(HTTPException) as exc:
+            await server.bulk_vendite(changed)
+        assert exc.value.status_code == 409
+        await server.annulla_bulk_vendite(first['batch_id'])
+        with pytest.raises(HTTPException) as exc:
+            await server.bulk_vendite(body)
+        assert exc.value.status_code == 409
+        assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 5
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('sale_date', ['2026-02-30', '19/11/2026', 'garbage'])
+def test_bulk_rejects_invalid_dates(monkeypatch, sale_date):
+    database = AsyncMongoMockClient()['bulk_dates_test']
+    monkeypatch.setattr(server, 'db', database)
+    async def scenario():
+        await database.prodotti.insert_one({'codice': 'P1', 'giacenza_negozio': 10})
+        with pytest.raises(HTTPException) as exc:
+            await server.bulk_vendite(server.BulkVenditaIn(righe=[{'codice': 'P1', 'quantita': 1, 'data': sale_date}]))
+        assert exc.value.status_code == 422
+        assert await database.vendite.count_documents({}) == 0
+    asyncio.run(scenario())
+
+
+def test_sales_totals_exceed_page_limit(monkeypatch):
+    database = AsyncMongoMockClient()['sales_totals_test']
+    monkeypatch.setattr(server, 'db', database)
+    async def scenario():
+        await database.vendite.insert_many([{'data': '2026-11-19', 'quantita': 2, 'importo': 3} for _ in range(501)])
+        await database.vendite.insert_one({'data': '2026-11-18', 'quantita': 99, 'importo': 99})
+        assert len(await server.list_vendite(giorno='2026-11-19')) == 500
+        assert await server.totali_vendite(giorno='2026-11-19') == {'importo': 1503, 'pezzi': 1002, 'righe': 501}
+    asyncio.run(scenario())
+
+
+def test_bulk_concurrent_claim_applies_once(monkeypatch):
+    database = AsyncMongoMockClient()['bulk_concurrent_test']
+    monkeypatch.setattr(server, 'db', database)
+    async def scenario():
+        await database.prodotti.insert_one({'codice': 'P1', 'giacenza_negozio': 10, 'venduti_negozio': 0})
+        # Both requests pass validation before either claims the batch.
+        ready = asyncio.Event()
+        arrivals = 0
+        async def backup(*args, **kwargs):
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2:
+                ready.set()
+            await ready.wait()
+            return {'id': 'isolated-backup'}
+        monkeypatch.setattr(server, 'create_backup_snapshot', backup)
+        body = server.BulkVenditaIn(idempotency_key='concurrent-key', righe=[{'codice': 'P1', 'quantita': 2}])
+        results = await asyncio.gather(server.bulk_vendite(body), server.bulk_vendite(body))
+        assert results[0] == results[1]
+        assert await database.vendite.count_documents({}) == 1
+        assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 8
+    asyncio.run(scenario())
+
+
+def test_bulk_failed_write_releases_claim_and_restores_stock(monkeypatch):
+    database = AsyncMongoMockClient()['bulk_rollback_test']
+    monkeypatch.setattr(server, 'db', database)
+    async def scenario():
+        await database.prodotti.insert_one({'codice': 'P1', 'giacenza_negozio': 10, 'venduti_negozio': 0})
+        body = server.BulkVenditaIn(idempotency_key='rollback-key', righe=[{'codice': 'P1', 'quantita': 2}])
+        collection_type = type(database.vendite)
+        original = collection_type.insert_one
+        async def fail(collection, *args, **kwargs):
+            if collection.name == 'vendite':
+                raise RuntimeError('simulated write failure')
+            return await original(collection, *args, **kwargs)
+        monkeypatch.setattr(collection_type, 'insert_one', fail)
+        with pytest.raises(RuntimeError, match='simulated'):
+            await server.bulk_vendite(body)
+        assert await database.vendite_bulk_imports.count_documents({}) == 0
+        assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 10
+        monkeypatch.setattr(collection_type, 'insert_one', original)
+        await server.bulk_vendite(body)
+        assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 8
+    asyncio.run(scenario())

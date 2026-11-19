@@ -4,7 +4,7 @@ import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
-import { parseBulkSales } from "../lib/bulkSales";
+import { parseBulkQuantity, parseBulkSales } from "../lib/bulkSales";
 
 function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
   return (
@@ -32,8 +32,11 @@ function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, bus
 
 export default function Vendite() {
   const [rows, setRows] = useState([]);
-  const [giorno, setGiorno] = useState(new Date().toISOString().slice(0, 10));
-  const today = new Date().toISOString().slice(0, 10);
+  const [totals, setTotals] = useState({ importo: 0, pezzi: 0, righe: 0 });
+  const bulkRequest = useRef(null);
+  const bulkBusy = useRef(false);
+  const [giorno, setGiorno] = useState(new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Rome" }));
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Rome" });
   const [form, setForm] = useState({ data: today, codice: "", descrizione: "", quantita: 1, importo: 0, canale: "NEGOZIO", pagamento: "CONTANTI", colonna: "" });
   const [vendingColumns, setVendingColumns] = useState([]);
   const [tab, setTab] = useState("manuale"); // manuale | bulk | csv
@@ -72,8 +75,12 @@ export default function Vendite() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = useCallback(async () => {
-    const r = await api.get("/vendite", { params: { giorno } });
+    const [r, t] = await Promise.all([
+      api.get("/vendite", { params: { giorno } }),
+      api.get("/vendite/totali", { params: { giorno } }),
+    ]);
     setRows(r.data);
+    setTotals(t.data);
   }, [giorno]);
   useEffect(() => { load(); }, [load]);
 
@@ -165,12 +172,15 @@ export default function Vendite() {
     }
   };
 
-  const tot = rows.reduce((s, r) => s + (r.importo || 0), 0);
-  const pezzi = rows.reduce((s, r) => s + (r.quantita || 0), 0);
+  const tot = totals.importo;
+  const pezzi = totals.pezzi;
 
   const submitBulk = async () => {
-    if (bulkImporting || bulkUndoing) return;
-    const righe = bulkRows.filter(r => r.codice && r.quantita > 0);
+    if (bulkBusy.current || bulkImporting || bulkUndoing) return;
+    if (bulkRows.some(r => !r.codice.trim() || !Number.isSafeInteger(r.quantita) || r.quantita <= 0)) {
+      return toast.error("Correggi le righe incomplete o le quantità: sono ammessi solo interi positivi");
+    }
+    const righe = bulkRows;
     if (!righe.length) {
       if (bulkExcludedRows.length) {
         return toast.info(`Nessuna vendita da aggiornare: ${bulkExcludedRows.length} riepiloghi di categoria esclusi`);
@@ -178,9 +188,16 @@ export default function Vendite() {
       return toast.error("Nessuna riga valida");
     }
     const excludedCount = bulkExcludedRows.length;
+    bulkBusy.current = true;
     setBulkImporting(true);
     try {
-      const r = await api.post("/vendite/bulk", { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) });
+      const payload = { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) };
+      const fingerprint = JSON.stringify(payload);
+      if (bulkRequest.current?.fingerprint !== fingerprint) {
+        bulkRequest.current = { fingerprint, key: crypto.randomUUID() };
+      }
+      const r = await api.post("/vendite/bulk", { ...payload, idempotency_key: bulkRequest.current.key });
+      bulkRequest.current = null;
       setBulkResult(r.data);
       if (r.data.batch_id) setLastBulkImport({ id: r.data.batch_id, ...r.data, status: "active" });
       setBulkText("");
@@ -192,6 +209,7 @@ export default function Vendite() {
     } catch (e) {
       toast.error(apiErrorMessage(e, "Errore bulk"));
     } finally {
+      bulkBusy.current = false;
       setBulkImporting(false);
     }
   };
@@ -514,7 +532,7 @@ export default function Vendite() {
                           <input value={r.descrizione} onChange={e => updateBulkRow(i, "descrizione", e.target.value)} className="border border-slate-200 rounded-md px-2 py-1 text-sm w-full bg-white" />
                         </td>
                         <td className="text-right">
-                          <input data-testid={`bulk-row-${i}-quantita`} type="number" min={0} value={r.quantita} onChange={e => updateBulkRow(i, "quantita", parseInt(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-16 text-right bg-white" />
+                          <input data-testid={`bulk-row-${i}-quantita`} type="number" min={0} value={r.quantita} onChange={e => updateBulkRow(i, "quantita", parseBulkQuantity(e.target.value))} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-16 text-right bg-white" />
                         </td>
                         <td className="text-right">
                           <input data-testid={`bulk-row-${i}-importo`} type="number" step="0.01" min={0} value={r.importo} onChange={e => updateBulkRow(i, "importo", parseFloat(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-20 text-right bg-white" />
@@ -735,6 +753,7 @@ export default function Vendite() {
                   <td className="text-right">{(r.sorgente || "MANUALE") === "MANUALE" && <button onClick={() => del(r.id)} className="text-red-600 hover:text-red-800 text-xs" aria-label={`Elimina vendita ${r.codice}`}>✕</button>}</td>
                 </tr>
               ))}
+              {totals.righe > rows.length && <tr><td colSpan={8} className="text-center py-3 text-slate-500">Mostrate {rows.length} di {totals.righe} vendite. I totali includono tutte le vendite del giorno.</td></tr>}
               {rows.length === 0 && <tr><td colSpan={8} className="text-center py-8 text-slate-400">Nessuna vendita per {giorno}</td></tr>}
             </tbody>
           </table>

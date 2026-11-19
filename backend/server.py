@@ -564,6 +564,9 @@ async def on_start():
             db.listino_adm.create_index("codice"),
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
+            db.vendite.create_index("batch_id"),
+            db.vendite_bulk_imports.create_index("id", unique=True, sparse=True),
+            db.vendite_bulk_imports.create_index("idempotency_key", unique=True, sparse=True),
             db.vendite.create_index([("data", 1), ("codice", 1)]),
             db.vendite.create_index("csv_event_key", unique=True, sparse=True),
             db.vendite.create_index("idempotency_key", unique=True, sparse=True),
@@ -1285,6 +1288,7 @@ sales = create_sales_router(
 )
 sales_router = sales["router"]
 list_vendite = sales["list_vendite"]
+totali_vendite = sales["totali_vendite"]
 add_vendita = sales["add_vendita"]
 del_vendita = sales["del_vendita"]
 ultima_vendita_manuale = sales["ultima_vendita_manuale"]

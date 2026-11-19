@@ -34,3 +34,11 @@ test("non esclude un prodotto reale che condivide il codice 10008", () => {
   expect(parsed.excludedRows).toHaveLength(0);
   expect(parsed.rows).toHaveLength(1);
 });
+
+test.each([['2.0', 2], ['2,0', 2], ['1.5', ''], ['1,5', ''], ['-1', ''], ['2x', ''], ['0', '']])('quantità %s diventa %s senza alterare le cifre', (input, expected) => {
+  expect(parseBulkSales(`P1\tProdotto\t${input}\t6,40`, '2026-11-19').rows[0].quantita).toBe(expected);
+});
+
+test('conserva le righe incomplete per bloccare import parziali', () => {
+  expect(parseBulkSales('P1;Prodotto', '2026-11-19').rows[0].quantita).toBe('');
+});
