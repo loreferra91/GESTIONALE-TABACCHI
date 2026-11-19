@@ -9,6 +9,7 @@ import os
 from urllib.parse import urlsplit
 
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import PyMongoError
 
 
 STAGING_DATABASE = "gestionale_staging"
@@ -78,7 +79,7 @@ def main() -> None:
         outcome = asyncio.run(audit_runtime())
         print(json.dumps(outcome, ensure_ascii=False, sort_keys=True))
         raise SystemExit(0 if outcome["least_privilege"] else 2)
-    except (ValueError, OSError, RuntimeError):
+    except (ValueError, OSError, RuntimeError, PyMongoError):
         # Never print a possibly credential-bearing MongoDB URI or traceback.
         print(json.dumps({"mode": "read_only", "least_privilege": False,
                           "error": "Staging Atlas connection or configuration not verified"}))
