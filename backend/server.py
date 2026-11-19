@@ -242,6 +242,26 @@ def _validate_runtime_security() -> None:
     }
     if agent_enabled and len(os.environ.get("AGENT_INTEGRATION_TOKEN") or "") < 32:
         raise RuntimeError("AGENT_INTEGRATION_TOKEN deve contenere almeno 32 caratteri")
+    if _environment() == "staging":
+        # Fail closed if this Render service accidentally targets a different
+        # database or cluster. This is a configuration guard, not a substitute
+        # for Atlas database-user least-privilege verification.
+        if os.environ.get("DB_NAME") != "gestionale_staging":
+            raise RuntimeError("Staging bloccato: DB_NAME diverso dal database isolato")
+        try:
+            parsed_mongo = urlsplit(os.environ.get("MONGO_URL") or "")
+            host = (parsed_mongo.hostname or "").lower()
+        except ValueError as exc:
+            raise RuntimeError("Staging bloccato: MONGO_URL non valido") from exc
+        if not (
+            parsed_mongo.scheme == "mongodb+srv"
+            and host.startswith("gestionale-staging.")
+            and host.endswith(".mongodb.net")
+            and parsed_mongo.username
+            and parsed_mongo.password
+        ):
+            raise RuntimeError("Staging bloccato: cluster MongoDB non riconosciuto")
+
 
 
 async def _verify_transaction_capability() -> Dict[str, Any]:
