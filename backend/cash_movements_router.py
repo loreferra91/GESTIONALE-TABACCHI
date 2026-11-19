@@ -320,7 +320,7 @@ def create_cash_movements_router(
         return await prelievi_vending_summary(limit)
 
     @router.post("/prelievi-vending")
-    async def add_prelievo_vending(movement: PrelievoVendingIn):
+    async def add_prelievo_vending(movement: PrelievoVendingIn, request: Request = None):
         if movement.importo <= 0:
             raise HTTPException(422, "L'importo del prelievo deve essere positivo")
         database = get_database()
@@ -329,14 +329,21 @@ def create_cash_movements_router(
             raise HTTPException(422, "idempotency_key non valido")
         fingerprint = movement_fingerprint(movement)
         document = PrelievoVending(**{
-            key_: value for key_, value in movement.model_dump().items()
-            if key_ != "idempotency_key"
+            field: value for field, value in movement.model_dump().items()
+            if field != "idempotency_key"
         }).model_dump()
         if key:
             document["idempotency_key"] = key
             document["request_fingerprint"] = fingerprint
         response = dict(document)
+        operator = str(getattr(getattr(request, "state", None),
+                               "authenticated_user", "operatore-locale")
+                       or "operatore-locale")
+        audit_id = str(uuid.uuid4())
+        # Legacy balance initialization remains outside the transaction,
+        # but the new withdrawal and its audit commit atomically.
         await vending_cash_balance()
+
         async def operation(session):
             kwargs = session_kwargs(session)
             if key:
@@ -346,29 +353,49 @@ def create_cash_movements_router(
                 if existing:
                     return replay(existing, fingerprint)
             await vending_cash_balance(session)
+            inserted = False
+            balance_changed = False
             try:
-                await database.prelievi_vending.insert_one(document, **kwargs)
-            except DuplicateKeyError as exc:
-                raise _VendingIdempotencyCollision from exc
-            try:
+                try:
+                    await database.prelievi_vending.insert_one(document.copy(), **kwargs)
+                except DuplicateKeyError as exc:
+                    raise _VendingIdempotencyCollision from exc
+                inserted = True
                 await adjust_vending_cash_balance(
-                    -movement.importo,
+                    -money_decimal(movement.importo),
                     session=session,
                     require_nonnegative=True,
                 )
+                balance_changed = True
+                await database.audit_events.insert_one({
+                    "id": audit_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "azione": "CREATO",
+                    "entita": "PRELIEVO_VENDING",
+                    "entita_id": document["id"],
+                    "operatore": operator,
+                    "prima": None,
+                    "dopo": dict(response),
+                    "idempotency_key": key,
+                    "batch_id": None,
+                }, **kwargs)
+                return response
             except Exception:
                 if session is None:
-                    try:
-                        await database.prelievi_vending.delete_one({"id": document["id"]})
-                    except Exception:
-                        logger.exception(
-                            "Standalone rollback failed after vending withdrawal insert adjustment error"
+                    # Best-effort local/mock compensation. MongoDB staging
+                    # and production must use transactional sessions.
+                    if balance_changed:
+                        await adjust_vending_cash_balance(
+                            money_decimal(movement.importo)
+                        )
+                    if inserted:
+                        await database.prelievi_vending.delete_one(
+                            {"id": document["id"]}
                         )
                 raise
-            return response
 
         try:
-            result = await run_transactionally(operation)
+            return await run_transactionally(operation)
         except _VendingIdempotencyCollision:
             existing = await database.prelievi_vending.find_one(
                 {"idempotency_key": key}, {"_id": 0}
@@ -376,43 +403,59 @@ def create_cash_movements_router(
             if existing:
                 return replay(existing, fingerprint)
             raise HTTPException(409, "Prelievo già registrato")
-        if result != response:
-            return result
-        await record_audit_event(
-            "CREATO", "PRELIEVO_VENDING", document["id"],
-            dopo=response, idempotency_key=key,
-        )
-        return response
 
     @router.delete("/prelievi-vending/{m_id}")
-    async def del_prelievo_vending(m_id: str):
+    async def del_prelievo_vending(m_id: str, request: Request = None):
         database = get_database()
         await vending_cash_balance()
+        operator = str(getattr(getattr(request, "state", None),
+                               "authenticated_user", "operatore-locale")
+                       or "operatore-locale")
+        audit_id = str(uuid.uuid4())
+
         async def operation(session):
             kwargs = session_kwargs(session)
             await vending_cash_balance(session)
-            existing = await database.prelievi_vending.find_one({"id": m_id}, {"_id": 0}, **kwargs)
-            await database.prelievi_vending.delete_one({"id": m_id}, **kwargs)
-            if existing:
-                try:
-                    await adjust_vending_cash_balance(float(existing.get("importo") or 0), session=session)
-                except Exception:
-                    if session is None:
-                        try:
-                            await database.prelievi_vending.insert_one(existing)
-                        except Exception:
-                            logger.exception(
-                                "Standalone rollback failed after vending withdrawal delete adjustment error"
-                            )
-                    raise
-            return existing
-
-        existing = await run_transactionally(operation)
-        if existing:
-            await record_audit_event(
-                "ELIMINATO", "PRELIEVO_VENDING", m_id, prima=existing
+            existing = await database.prelievi_vending.find_one(
+                {"id": m_id}, {"_id": 0}, **kwargs
             )
-        return {"ok": True}
+            if not existing:
+                return {"ok": True}
+            amount = money_decimal(existing.get("importo"), nonnegative=True)
+            if amount <= 0:
+                raise HTTPException(409, "Prelievo con importo storico incoerente")
+            deleted = await database.prelievi_vending.delete_one(
+                {"id": m_id}, **kwargs
+            )
+            if deleted.deleted_count != 1:
+                raise HTTPException(409, "Prelievo modificato durante l'annullamento")
+            balance_changed = False
+            try:
+                await adjust_vending_cash_balance(amount, session=session)
+                balance_changed = True
+                await database.audit_events.insert_one({
+                    "id": audit_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "azione": "ELIMINATO",
+                    "entita": "PRELIEVO_VENDING",
+                    "entita_id": m_id,
+                    "operatore": operator,
+                    "prima": dict(existing),
+                    "dopo": None,
+                    "idempotency_key": existing.get("idempotency_key"),
+                    "batch_id": None,
+                }, **kwargs)
+            except Exception:
+                if session is None:
+                    if balance_changed:
+                        await adjust_vending_cash_balance(
+                            -amount, require_nonnegative=True
+                        )
+                    await database.prelievi_vending.insert_one(dict(existing))
+                raise
+            return {"ok": True}
+
+        return await run_transactionally(operation)
 
     async def scontrini_vending_summary(limit: int = 500):
         return await movement_summary(get_database().scontrini_vending, limit)
