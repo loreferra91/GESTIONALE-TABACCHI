@@ -134,7 +134,7 @@ def create_cash_movements_router(
         must be cancelled through the linked sale batch to protect inventory.
         """
         database = get_database()
-        collection = database[collection_name]
+        collection = getattr(database, collection_name)
         event_id = str(uuid.uuid4())
         operator = str(getattr(getattr(request, "state", None),
                                "authenticated_user", "operatore-locale")
