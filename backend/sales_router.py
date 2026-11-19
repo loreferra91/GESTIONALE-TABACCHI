@@ -189,6 +189,11 @@ def create_sales_router(
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
                 return replay(existing)
+            if await db.audit_events.find_one({
+                "azione": "annulla-vendita-manuale",
+                "idempotency_key": key,
+            }, {"_id": 0, "id": 1}):
+                raise HTTPException(409, "Vendita già annullata: riutilizzo della chiave vietato")
 
         product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
         if not product:
@@ -223,6 +228,11 @@ def create_sales_router(
                 )
                 if existing:
                     return replay(existing)
+                if await db.audit_events.find_one({
+                    "azione": "annulla-vendita-manuale",
+                    "idempotency_key": key,
+                }, {"_id": 0, "id": 1}, **kwargs):
+                    raise HTTPException(409, "Vendita già annullata: riutilizzo della chiave vietato")
 
             column_changed = False
             product_changed = False
