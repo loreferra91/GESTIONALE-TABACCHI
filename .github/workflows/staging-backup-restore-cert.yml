@@ -5,6 +5,9 @@ on:
     branches: ["feature/**", "openclaw/render-staging-deploy"]
     paths:
       - backend/backup_router.py
+      - backend/staging_restore.py
+      - backend/tests/test_staging_restore.py
+      - backend/tests/test_staging_restore_real_mongo.py
       - backend/tests/test_external_backup_real_mongo.py
       - .github/workflows/staging-backup-restore-cert.yml
   workflow_dispatch:
@@ -59,7 +62,7 @@ jobs:
         env:
           CERT_MONGO_URL: mongodb://127.0.0.1:27018/?directConnection=true
           CERT_DB_NAME: gestionale_cert_external_restore_ci
-        run: python -m pytest backend/tests/test_external_backup_real_mongo.py -q -n 0 --tb=short
+        run: python -m pytest backend/tests/test_external_backup_real_mongo.py backend/tests/test_staging_restore_real_mongo.py -q -n 0 --tb=short
 
       - name: Remove isolated MongoDB
         if: always()

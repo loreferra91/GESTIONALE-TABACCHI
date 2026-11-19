@@ -292,7 +292,16 @@ async def lifespan(_app: FastAPI):
     _validate_runtime_security()
     transaction_capability = await _verify_transaction_capability()
     logging.info("MongoDB transaction capability: %s", transaction_capability)
-    await on_start()
+    should_initialize = True
+    if _environment() == "staging":
+        control = await db.backup_restore_control.find_one(
+            {"_id": "external-file-restore"}, {"phase": 1}
+        )
+        if control and control.get("phase") in {"PREPARING", "RESTORING", "ROLLING_BACK", "FAILED"}:
+            should_initialize = False
+            logging.error("Staging restore requires recovery: startup migrations intentionally skipped")
+    if should_initialize:
+        await on_start()
     try:
         yield
     finally:
@@ -310,6 +319,31 @@ AGENT_SERVICE_PATHS = frozenset({
 audit_router, _record_audit_event, list_audit_events = create_audit_router(
     get_database=lambda: db,
 )
+
+
+@app.middleware("http")
+async def staging_restore_maintenance_guard(request: Request, call_next):
+    """Fail closed across requests while a staging restore or recovery is unfinished."""
+    path = request.scope["path"]
+    allowed = {
+        "/api/",
+        "/api/backup/restore-file/status",
+        "/api/backup/restore-file/recover",
+    }
+    if _environment() == "staging" and path.startswith("/api/") and path not in allowed:
+        control = await db.backup_restore_control.find_one(
+            {"_id": "external-file-restore"}, {"phase": 1}
+        )
+        if control and control.get("phase") in {
+            "PREPARING", "RESTORING", "ROLLING_BACK", "FAILED"
+        }:
+            return JSONResponse(
+                {"detail": "Staging in manutenzione per ripristino backup: "
+                           "consultare /api/backup/restore-file/status"},
+                status_code=503,
+                headers={"Cache-Control": "no-store", "Retry-After": "10"},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1351,6 +1385,7 @@ backup = create_backup_router(
     session_kwargs=_session_kwargs,
     run_transactionally=_run_transactionally,
     read_capped=_read_capped,
+    staging_mode=_environment() == "staging",
 )
 backup_router = backup["router"]
 create_backup_snapshot = backup["create_backup_snapshot"]
