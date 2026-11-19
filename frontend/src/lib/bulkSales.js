@@ -31,7 +31,7 @@ export function parseBulkSales(text, defaultData, uidFactory = (idx) => `bulk-${
 
   // Excel può incollare una cella per riga: in quel caso ricostruiamo
   // blocchi da 4 (senza data) o 5 campi (con data).
-  const singleField = raw.every(l => !/\t|;|,/.test(l));
+  const singleField = raw.every(l => !/[\t;]/.test(l) && (!l.includes(",") || /^[0-9]+,[0-9]+$/.test(l)));
   const groups = [];
   if (singleField && (raw.length % 4 === 0 || raw.length % 5 === 0)) {
     const firstFieldLooksLikeDate = /^\d{4}-\d{1,2}-\d{1,2}(?:[T\s].*)?$/.test(raw[0]) ||
