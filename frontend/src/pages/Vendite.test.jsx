@@ -11,7 +11,7 @@ beforeEach(async () => {
   Object.defineProperty(global, 'crypto', { configurable: true, value: { randomUUID: jest.fn(() => 'test-key-123456789') } });
   api.get.mockImplementation(path => Promise.resolve({ data:
     path === '/vendite/totali' ? { importo: 1503, pezzi: 1002, righe: 501 } :
-    path === '/prodotti' ? [{ codice: 'P1', prezzo: 5 }] :
+    path === '/prodotti' ? [{ codice: 'P1', prezzo: 5, giacenza_negozio: 5 }] :
     path.endsWith('/ultimo') || path.endsWith('/ultima') ? null : []
   }));
   container = document.createElement('div'); document.body.appendChild(container);
@@ -44,4 +44,12 @@ test('riutilizza la chiave dopo timeout e converte 2.0 in 2', async () => {
 });
 test('mostra il conteggio completo indipendente dalla lista', () => {
   expect(container.textContent).toContain('Mostrate 0 di 501 vendite');
+});
+
+test('blocks the whole bulk request when duplicate product rows exceed shop stock', async () => {
+  await paste('P1\\tProdotto\\t3\\t15\\nP1\\tProdotto\\t3\\t15');
+  expect(container.querySelector('[data-testid="bulk-row-0-projected"]').textContent).toContain('-1');
+  expect(container.querySelector('[data-testid="bulk-row-1-projected"]').textContent).toContain('-1');
+  await act(async () => container.querySelector('[data-testid="bulk-submit"]').click());
+  expect(api.post).not.toHaveBeenCalled();
 });
