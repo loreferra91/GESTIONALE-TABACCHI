@@ -92,7 +92,7 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                 raise ValueError()
             return int(value)
         except (ValueError, ArithmeticError):
-            issue("GIACENZA_INVALIDA", collection, doc, f"{field}: la giacenza deve essere intera e non negativa.", campo=field)
+            issue("GIACENZA_INVALIDA", collection, doc, f"{field}: la giacenza deve essere intera e non negativa.")
             return None
 
     products = defaultdict(list)
