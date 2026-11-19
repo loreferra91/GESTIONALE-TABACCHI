@@ -12,7 +12,7 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
 from pymongo.errors import DuplicateKeyError
 
 EURO_CENT_DENOMINATIONS = {
@@ -27,7 +27,7 @@ class CashCountEvidenceIn(BaseModel):
     idempotency_key: str = Field(min_length=12, max_length=100)
     observed_at: datetime
     kind: Literal["opening", "closing", "spot"]
-    denominations: dict[str, int]
+    denominations: dict[str, StrictInt]
     source_reference: str = Field(min_length=4, max_length=120)
     note: str = Field(default="", max_length=500)
 
