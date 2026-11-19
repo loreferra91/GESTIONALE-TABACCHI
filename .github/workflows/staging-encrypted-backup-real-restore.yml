@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'feature/staging-encrypted-backup-restore-cert-*'
+      - 'feature/staging-25k-encrypted-recovery-drill-*'
       - openclaw/render-staging-deploy
     paths:
       - scripts/encrypted_backup.py
@@ -59,7 +60,7 @@ jobs:
           docker exec encrypted-backup-cert-mongo mongodump --version
           docker exec encrypted-backup-cert-mongo mongorestore --version
 
-      - name: Seed business-integrity fixture and indexes
+      - name: Seed 25k synthetic sales, stock-consistent products and unique indexes
         shell: bash
         run: |
           set -euo pipefail
@@ -80,6 +81,40 @@ jobs:
               id:"B1",status:"active",pezzi:3,totale:15,movimento_cassa_id:"C1"
             });
             dbs.audit_events.insertOne({id:"A1",entita:"CERT",azione:"TEST"});
+            // 25,000 synthetic native BULK sales, with consistent per-product
+            // counters. This fixture contains no business or customer data.
+            const fixtureProducts = [];
+            for (let n = 0; n < 100; n++) {
+              const code = "CERT-SCALE-P" + String(n).padStart(3, "0");
+              fixtureProducts.push({
+                id: code, codice: code,
+                giacenza_negozio: 750, venduti_negozio: 250,
+                giacenza_vending: 0, venduti_vending: 0
+              });
+            }
+            dbs.prodotti.insertMany(fixtureProducts);
+            dbs.prodotti.createIndex({id:1}, {unique:true});
+            dbs.vendite.createIndex({id:1}, {unique:true});
+            for (let start = 0; start < 25000; start += 500) {
+              const sales = [];
+              for (let n = start; n < start + 500; n++) {
+                sales.push({
+                  id: "CERT-SCALE-S" + String(n).padStart(6, "0"),
+                  batch_id: "CERT-SCALE-BATCH", sorgente: "BULK",
+                  data: "2026-11-19",
+                  codice: "CERT-SCALE-P" + String(n % 100).padStart(3, "0"),
+                  quantita: 1, importo: 5, pagamento: "CONTANTI"
+                });
+              }
+              dbs.vendite.insertMany(sales);
+            }
+            dbs.vendite_bulk_imports.insertOne({
+              id:"CERT-SCALE-BATCH",sorgente:"BULK",
+              inseriti:25000,status:"active"
+            });
+            if (dbs.vendite.countDocuments({}) !== 25002) {
+              throw Error("Large fixture failed to seed exactly 25,002 sales");
+            }
           '
 
       - name: Generate disposable GPG key, encrypted archive and health proof
@@ -134,16 +169,42 @@ jobs:
           docker exec encrypted-backup-cert-mongo mongosh --quiet --eval '
             const src = db.getSiblingDB("gestionale_cert_backup_source");
             const dst = db.getSiblingDB("gestionale_cert_backup_restored");
-            for (const name of ["prodotti","vendite","cassa","cassa_rapida_batches","audit_events"]) {
-              const a = src[name].find({}, {_id:0}).sort({id:1}).toArray();
-              const b = dst[name].find({}, {_id:0}).sort({id:1}).toArray();
-              if (JSON.stringify(a) !== JSON.stringify(b)) throw Error("Restore mismatch: "+name);
+            // Compare document-by-document: do not materialize 25k+ records
+            // into a single JavaScript array, even during certification.
+            const expectedCounts = {
+              prodotti:102, vendite:25002, cassa:1,
+              cassa_rapida_batches:1, audit_events:1,
+              vendite_bulk_imports:1
+            };
+            for (const [name, expected] of Object.entries(expectedCounts)) {
+              const a = src[name].find({}, {_id:0}).sort({id:1});
+              const b = dst[name].find({}, {_id:0}).sort({id:1});
+              let compared = 0;
+              while (a.hasNext()) {
+                if (!b.hasNext()) throw Error("Missing restored row: "+name);
+                if (JSON.stringify(a.next()) !== JSON.stringify(b.next())) {
+                  throw Error("Restore document mismatch: "+name);
+                }
+                compared++;
+              }
+              if (b.hasNext()) throw Error("Extra restored rows: "+name);
+              if (compared !== expected) throw Error("Unexpected source count: "+name+" "+compared);
+            }
+            const scaleSales = dst.vendite.countDocuments({
+              batch_id:"CERT-SCALE-BATCH",sorgente:"BULK"
+            });
+            if (scaleSales !== 25000) throw Error("BULK history incomplete");
+            const p = dst.prodotti.findOne({codice:"CERT-SCALE-P000"});
+            if (!p || p.giacenza_negozio !== 750 || p.venduti_negozio !== 250) {
+              throw Error("Product stock counters changed during recovery");
             }
             const index = dst.prodotti.getIndexes().find(x=>x.name==="codice_1");
             if (!index || !index.unique) throw Error("Missing unique product-code index");
             const salesIndex = dst.vendite.getIndexes().find(x=>x.name==="batch_id_1");
             if (!salesIndex) throw Error("Missing batch index");
-            print("PASS: real encrypted MongoDB restore, 5 collections, indexes and business data");
+            const bulkIndex = dst.vendite.getIndexes().find(x=>x.name==="id_1");
+            if (!bulkIndex || !bulkIndex.unique) throw Error("Missing unique sales ID index");
+            print("PASS: encrypted MongoDB restore, 25,002 sales, 6 collections, stock and indexes");
           '
 
       - name: Remove disposable database container and temporary keys
