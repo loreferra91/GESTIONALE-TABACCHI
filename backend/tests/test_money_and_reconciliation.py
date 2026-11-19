@@ -568,3 +568,30 @@ def test_reconciliation_does_not_treat_csv_vending_batches_as_shop_bulk(database
         assert await database.vendite_bulk_imports.count_documents({}) == 4
 
     asyncio.run(scenario())
+
+
+def test_reconciliation_missing_stock_is_unknown_not_zero(database):
+    async def scenario():
+        await database.prodotti.insert_many([
+            {"id": "missing-shop", "codice": "MISSING-SHOP",
+             "prezzo": 5, "giacenza_vending": 0},
+            {"id": "missing-vending-cache", "codice": "MISSING-CACHE",
+             "prezzo": 5, "giacenza_negozio": 6},
+            {"id": "zero-is-valid", "codice": "ZERO",
+             "prezzo": 5, "giacenza_negozio": 0, "giacenza_vending": 0},
+        ])
+        await database.vending.insert_one({
+            "id": "missing-column-stock", "codice": "MISSING-CACHE",
+        })
+        before = await database.prodotti.find({}).to_list(None)
+        result = await server.accounting_reconciliation()
+        after = await database.prodotti.find({}).to_list(None)
+        assert before == after
+        assert result["conteggi"] == {"GIACENZA_MANCANTE": 3}
+        assert result["prodotti_confrontati"] == 0
+        assert {row["campo"] for row in result["dettagli"]} == {
+            "giacenza_negozio", "giacenza_vending", "giacenza"
+        }
+        assert not any(row["tipo"] == "GIACENZA_VENDING" for row in result["dettagli"])
+
+    asyncio.run(scenario())
