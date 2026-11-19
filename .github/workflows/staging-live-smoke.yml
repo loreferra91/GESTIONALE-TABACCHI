@@ -1,0 +1,61 @@
+name: Staging deployment - live smoke
+
+on:
+  push:
+    branches:
+      - openclaw/render-staging-deploy
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      STAGING_URL: https://gestionale-tabacchi-staging.onrender.com
+      EXPECTED_REVISION: ${{ github.sha }}
+    steps:
+      - name: Await exact staging revision and MongoDB health
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=0
+          for attempt in $(seq 1 32); do
+            if curl --silent --show-error --fail --max-time 40 \
+              "$STAGING_URL/api/" -o /tmp/staging-health.json; then
+              if python3 - <<'PY'
+          import json
+          import os
+          with open("/tmp/staging-health.json", encoding="utf-8") as file:
+              payload = json.load(file)
+          expected = os.environ["EXPECTED_REVISION"]
+          assert payload.get("status") == "ok", "health status is not ok"
+          assert payload.get("database") == "ok", "MongoDB unavailable"
+          assert payload.get("revision") == expected, "old revision still live"
+          PY
+              then
+                ready=1
+                break
+              fi
+            fi
+            echo "Staging revision not ready (attempt $attempt/32)"
+            sleep 15
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::Staging did not serve the exact expected commit with healthy MongoDB"
+            exit 1
+          fi
+          echo "Staging is healthy and running the expected Git commit."
+
+      - name: Ensure backups still require authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 40 "$STAGING_URL/api/backup")
+          test "$code" = "401"
+          code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 40 --request POST "$STAGING_URL/api/backup/restore-file/preview")
+          test "$code" = "401"
