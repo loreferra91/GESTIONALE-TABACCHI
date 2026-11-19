@@ -20,12 +20,14 @@ if __package__:
         inspect_startup_migrations, validate_staging_cli_target,
         UNVERSIONED_STARTUP_WRITES,
     )
+    from .staging_scoped_mongo import verify_scoped_staging_connection
 else:
     from auto_order_migrations import AUTO_ORDER_2_SCHEMA_ID, migrate_auto_order_2_schema
     from migration_preflight import (
         inspect_startup_migrations, validate_staging_cli_target,
         UNVERSIONED_STARTUP_WRITES,
     )
+    from staging_scoped_mongo import verify_scoped_staging_connection
 
 
 SCHEMA_MIGRATIONS = {AUTO_ORDER_2_SCHEMA_ID}
@@ -110,10 +112,10 @@ async def _main():
     args = parser.parse_args()
     if args.plan == bool(args.apply):
         parser.error("Choose exactly one of --plan or --apply")
-    url = os.environ.get("MONGO_URL") or ""
+    # The historical broad-privilege MONGO_URL is NEVER used by this runner.
+    url = os.environ.get("STAGING_SCOPED_MONGO_URL") or ""
     db_name = os.environ.get("DB_NAME") or ""
-    # Scoped staging URI, when active, must be checked by its separate
-    # credential-role preflight. Never use or print the production URI.
+    # Require staging-scoped credentials independently of the webapp mode.
     validate_staging_cli_target(
         str(os.environ.get("ENVIRONMENT") or "").strip().lower(),
         db_name, url,
@@ -123,6 +125,7 @@ async def _main():
         parser.error("Explicit confirmation and independent restore attestation required")
     client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=6000)
     try:
+        await verify_scoped_staging_connection(url, client=client)
         database = client[db_name]
         if args.plan:
             result = await inspect_migration_run(database)
