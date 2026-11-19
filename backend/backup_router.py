@@ -30,7 +30,7 @@ BACKUP_COLLECTIONS = [
     "ordini_fornitore", "ordini_fornitore_righe", "auto_order_import_state", "import_history", "adm_sync",
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
     "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
-    "rettifiche_venduti", "reconciliation_cases", "audit_events",
+    "rettifiche_venduti", "reconciliation_cases", "audit_events", "cash_count_evidence",
 ]
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
@@ -40,7 +40,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "vending_accounting_events", "accounting_baselines", "anomalie_ignorate", "smart_venue",
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
-    "audit_events", "auto_order_import_state",
+    "audit_events", "auto_order_import_state", "cash_count_evidence",
 }
 BACKUP_RETENTION_LIMIT = 3
 BACKUP_PARTIAL_RETENTION_LIMIT = 6
