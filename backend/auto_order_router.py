@@ -19,11 +19,13 @@ try:
     from .auto_order_3_service import compare_policies
     from .auto_order_3_operational import POLICY_2, POLICY_31, readiness, policy_snapshot, select_operational_rows
     from .forecasting.demand_models import NativeSalesAccumulator
+    from .forecasting.legacy_vending import LegacyVendingReconciler
 except ImportError:  # pragma: no cover
     from auto_order_planning import ROME, commercial_day, is_orderable_product, pending_by_code, projected_shortage, reconcile_sales, rounded_order_quantity
     from auto_order_3_service import compare_policies
     from auto_order_3_operational import POLICY_2, POLICY_31, readiness, policy_snapshot, select_operational_rows
     from forecasting.demand_models import NativeSalesAccumulator
+    from forecasting.legacy_vending import LegacyVendingReconciler
 
 
 class AutoOrderRigaIn(BaseModel):
@@ -124,6 +126,7 @@ def create_auto_order_router(
     record_audit_event: Callable[..., Any],
     create_backup_snapshot: Callable[..., Any],
     session_kwargs: Callable[[Any], Dict[str, Any]],
+    csv_vending_compatibility_key: Callable[[Dict[str, Any]], str],
 ) -> Dict[str, Any]:
     router = APIRouter()
 
@@ -430,6 +433,37 @@ def create_auto_order_router(
             order_rows = await db.ordini_fornitore_righe.find(
                 {"batch_key": {"$in": keys}}, {"_id": 0}
             ).to_list(None) if keys else []
+            # Rebuild received quantities from the real completed loads as well
+            # as from the cached order-line counter. This matters for historical
+            # loads: the load ledger is the source of truth for what physically
+            # arrived, while sales remain the source of truth for what went out.
+            # Use max, not sum, because the line counter is updated by the same
+            # load transaction and summing would double-count it.
+            if keys and hasattr(db, "ricezioni_merce") and hasattr(db, "storico_ordini"):
+                completed_receipts = await db.ricezioni_merce.find(
+                    {"status": "completed", "supplier_order_batch_key": {"$in": keys}},
+                    {"_id": 0, "id": 1, "supplier_order_batch_key": 1},
+                ).to_list(None)
+                receipt_ids = [row.get("id") for row in completed_receipts if row.get("id")]
+                if receipt_ids:
+                    receipt_movements = await db.storico_ordini.find(
+                        {"batch_id": {"$in": receipt_ids}, "annullato": {"$ne": True}},
+                        {"_id": 0, "batch_id": 1, "codice": 1, "quantita": 1},
+                    ).to_list(None)
+                    receipt_to_order = {
+                        row.get("id"): row.get("supplier_order_batch_key")
+                        for row in completed_receipts if row.get("id")
+                    }
+                    loaded = {}
+                    for movement in receipt_movements:
+                        batch_key = receipt_to_order.get(movement.get("batch_id"))
+                        code = str(movement.get("codice") or "")
+                        if not batch_key or not code:
+                            continue
+                        loaded[(batch_key, code)] = loaded.get((batch_key, code), 0) + int(movement.get("quantita") or 0)
+                    for line in order_rows:
+                        key = (line.get("batch_key"), str(line.get("codice") or ""))
+                        line["quantita_ricevuta"] = max(int(line.get("quantita_ricevuta", 0) or 0), loaded.get(key, 0))
             pending = pending_by_code(batch_rows, order_rows, planning_today, planning_days)
             orders_version = hashlib.sha256(json.dumps({
                 "batches": sorted(((row.get("batch_key"), row.get("stato"), row.get("version"), row.get("data_consegna_prevista")) for row in batch_rows), key=lambda item: json.dumps(item, default=str)),
@@ -714,22 +748,37 @@ def create_auto_order_router(
         last = today + timedelta(days=2)
 
         collector = NativeSalesAccumulator(today, 90)
-        cursor = db.vendite.find(
-            {"$or": [
+        date_filter = {"$or": [
                 {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
                 {"data": {"$regex": r"^\d{2}[/\-]\d{2}[/\-]\d{4}"}},
-            ]},
-            {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1,
-             "canale": 1, "sorgente": 1, "csv_event_key": 1},
-        )
+            ]}
+        projection = {"_id": 0, "id": 1, "codice": 1, "data": 1, "quantita": 1,
+                      "canale": 1, "sorgente": 1, "csv_event_key": 1,
+                      "importo": 1, "pagamento": 1, "colonna": 1}
+        legacy_rows = await db.vendite.find(
+            {"$and": [date_filter, {"sorgente": "CSV_VENDING", "csv_event_key": {"$in": [None, ""]}}]},
+            projection,
+        ).to_list(None)
+        reconciler = LegacyVendingReconciler(collector, csv_vending_compatibility_key, legacy_rows)
+        cursor = db.vendite.find(date_filter, projection)
         # Batch the network I/O; keep 90-day totals and explicit event keys,
         # not the full transaction payload, in application memory.
         async for document in cursor:
-            collector.add(document)
+            reconciler.add(document)
 
         columns = await db.vending.find(
-            {}, {"_id": 0, "codice": 1, "capacita_max": 1}
+            {}, {"_id": 0, "codice": 1, "colonna": 1, "capacita_max": 1}
         ).to_list(None)
+        ledger = []
+        if reconciler.legacy:
+            ledger = await db.vending_accounting_events.find(
+                {"data": {"$gte": first.isoformat(), "$lt": last.isoformat()}},
+                {"_id": 0, "data": 1, "importo": 1, "pagamento": 1,
+                 "csv_event_key": 1, "csv_event_compatibility_key": 1,
+                 "csv_accounting_key": 1, "csv_accounting_occurrence": 1,
+                 "rebuilt_from_complete_csv": 1, "file_sha256": 1, "file_name": 1},
+            ).to_list(None)
+        reconciliation = reconciler.finish(ledger, columns)
         capacity_by_code: Dict[str, int] = {}
         incomplete_capacity = set()
         for column in columns:
@@ -759,6 +808,7 @@ def create_auto_order_router(
             "esclusi": [with_capacity(row) for row in ao.get("esclusi", [])],
         }
         result = compare_policies(active, collector)
+        result["legacy_vending_reconciliation"] = reconciliation
         result.update(readiness(ao, result))
         result["policy_snapshot_key"] = policy_snapshot(ao, result)
         return result
@@ -817,7 +867,7 @@ def create_auto_order_router(
             )
         return selected
 
-    def auto_order_rows_from_query(ao: Dict[str, Any], selection: Optional[str]) -> List[Dict[str, Any]]:
+    def auto_order_rows_from_query(ao: Dict[str, Any], selection: Optional[str], comparison=None) -> List[Dict[str, Any]]:
         if not selection:
             return auto_order_selected_rows(ao)
         try:
@@ -825,6 +875,8 @@ def create_auto_order_router(
             requested = [AutoOrderRigaIn.model_validate(item) for item in raw]
         except Exception as exc:
             raise HTTPException(422, "Selezione Auto-Order non valida") from exc
+        if comparison is not None:
+            return select_operational_rows(ao, comparison, requested, multiply_money)
         return auto_order_selected_rows(ao, requested)
 
     @router.post("/auto-order/conferma")
@@ -1051,7 +1103,7 @@ def create_auto_order_router(
         except Exception as exc:
             raise HTTPException(500, "Creazione batch Auto-Order non completata") from exc
 
-    async def export_rows(ao, selezione, snapshot_key, batch_key):
+    async def export_rows(ao, selezione, snapshot_key, batch_key, policy_version=POLICY_2, policy_snapshot_key=None):
         if batch_key:
             db = get_database()
             batch = await db.ordini_fornitore.find_one({"batch_key": batch_key}, {"_id": 0})
@@ -1063,6 +1115,17 @@ def create_auto_order_router(
             return [{**line, "qta_da_ordinare": int(line["quantita"])} for line in lines], batch
         if snapshot_key and snapshot_key != ao.get("snapshot_key"):
             raise HTTPException(409, "Proposta cambiata: ricalcola Auto-Order prima di esportare")
+        if policy_version not in (POLICY_2, POLICY_31):
+            raise HTTPException(422, "Politica Auto-Order non riconosciuta")
+        if policy_version == POLICY_31:
+            if not selezione or not snapshot_key or not policy_snapshot_key:
+                raise HTTPException(422, "Per esportare la bozza 3.1 servono selezione e snapshot aggiornati")
+            comparison = await build_comparison(ao)
+            if not comparison.get("operational_ready"):
+                raise HTTPException(409, "Auto-Order 3.1 non attivabile: " + "; ".join(comparison["operational_blockers"]))
+            if policy_snapshot_key != comparison["policy_snapshot_key"]:
+                raise HTTPException(409, "Previsione 3.1 cambiata. Ricalcola Auto-Order prima di esportare.")
+            return auto_order_rows_from_query(ao, selezione, comparison), None
         return auto_order_rows_from_query(ao, selezione), None
 
     @router.get("/auto-order/pdf")
@@ -1072,6 +1135,8 @@ def create_auto_order_router(
         selezione: Optional[str] = None,
         snapshot_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        policy_version: str = POLICY_2,
+        policy_snapshot_key: Optional[str] = None,
     ):
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -1085,7 +1150,7 @@ def create_auto_order_router(
         categoria_safe = xml_escape(categoria_filtro)
 
         ao = await get_auto_order()
-        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key)
+        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key, policy_version, policy_snapshot_key)
         if categoria_filtro:
             righe = [row for row in righe if row.get("categoria") == categoria_filtro]
         totale = sum_money(row.get("totale", 0) or 0 for row in righe)
@@ -1176,7 +1241,7 @@ def create_auto_order_router(
             )
         )
         story.append(table)
-        footer = Paragraph(
+        footer_text = (
             "Calcolo Auto-Order: domanda ponderata {peso_breve:.0f}% ultimi {breve}gg + "
             "{peso_lungo:.0f}% ultimi {lungo}gg fino al {riferimento}; giacenza negozio = "
             "stock fisico libero gia normalizzato dall'import; ordine sotto {copertura}gg "
@@ -1191,9 +1256,15 @@ def create_auto_order_router(
                 target=int(ao["parametri"].get("GIORNI_COPERTURA_TARGET", 14)),
                 fattore=float(ao.get("fattore_sicurezza", 1.15)),
                 riferimento_ordine=xml_escape((exported_batch or {}).get("batch_key") or "bozza"),
-            ),
-            subtitle_style,
+            )
         )
+        if (exported_batch or {}).get("policy_version", policy_version) == POLICY_31:
+            footer_text = (
+                "Auto-Order 3.1: previsione su storico nativo, scorte reali, consegne e ricariche vending. "
+                "Quantità della selezione esportata. Riferimento: "
+                + xml_escape((exported_batch or {}).get("batch_key") or "bozza non salvata") + "."
+            )
+        footer = Paragraph(footer_text, subtitle_style)
 
         def draw_footer(canvas, current_document):
             footer.wrap(current_document.width, 14 * mm)
@@ -1221,6 +1292,8 @@ def create_auto_order_router(
         selezione: Optional[str] = None,
         snapshot_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        policy_version: str = POLICY_2,
+        policy_snapshot_key: Optional[str] = None,
     ):
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -1230,7 +1303,7 @@ def create_auto_order_router(
         categoria_filtro = (categoria or "").strip()[:120]
 
         ao = await get_auto_order()
-        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key)
+        righe, exported_batch = await export_rows(ao, selezione, snapshot_key, batch_key, policy_version, policy_snapshot_key)
         if categoria_filtro:
             righe = [row for row in righe if row.get("categoria") == categoria_filtro]
         totale = sum_money(row.get("totale", 0) or 0 for row in righe)
@@ -1307,6 +1380,7 @@ def create_auto_order_router(
         metadata.append(["Campo", "Valore"])
         metadata.append(["origine", "AUTO-ORDER"])
         metadata.append(["stato", "CONFERMATO" if exported_batch else "BOZZA"])
+        metadata.append(["policy_version", (exported_batch or {}).get("policy_version", policy_version)])
         metadata.append(["snapshot_key", excel_text((exported_batch or {}).get("snapshot_key") or ao.get("snapshot_key"))])
         metadata.append(["batch_key", excel_text((exported_batch or {}).get("batch_key") or "")])
         metadata.append(["data_generazione_utc", datetime.now(timezone.utc).isoformat()])

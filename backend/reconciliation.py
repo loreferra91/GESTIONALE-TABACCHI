@@ -134,11 +134,14 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                           f"Identità {field} presente in più eventi: confronto ambiguo.")
                 events[key].append((doc, value))
     compared_sales = unmatched_sales = 0
+    bulk_sales_by_batch = Counter()
     async for doc in database.vendite.find({}):
         if not in_date_range(doc):
             continue
         scanned["vendite"] += 1
         value = amount("vendite", doc, "importo")
+        if not date_from and not date_to and doc.get("sorgente") == "BULK":
+            bulk_sales_by_batch[str(doc.get("batch_id") or "")] += 1
         if doc.get("sorgente") != "CSV_VENDING":
             continue
         matches = []
@@ -158,6 +161,59 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                   "La vendita e lo stesso evento contabile hanno importo o pagamento diversi.",
                   registrato=float(value), atteso=float(expected), differenza=float(value - expected),
                   pagamento_vendita=doc.get("pagamento"), pagamento_registro=event.get("pagamento"))
+
+    # Cross-check live BULK rows against batch metadata. These checks require
+    # the complete history; a date-filtered reconciliation skips them rather
+    # than reporting false mismatches for partial batches.
+    if not date_from and not date_to:
+        audited_undos = {}
+        async for batch in database.vendite_bulk_imports.find({}):
+            scanned["vendite_bulk_imports"] += 1
+            batch_id = str(batch.get("id") or "")
+            actual = bulk_sales_by_batch.pop(batch_id, 0)
+            status = str(batch.get("status") or "")
+            try:
+                expected = int(batch["inseriti"])
+                if expected < 0:
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError):
+                issue("BULK_METADATA_INVALIDI", "vendite_bulk_imports", batch,
+                      "Numero di vendite registrate nel batch non valido.")
+                continue
+            if status == "active" and actual != expected:
+                issue("BULK_BATCH_INCOERENTE", "vendite_bulk_imports", batch,
+                      "Il numero delle vendite BULK attive diverge dal batch.",
+                      registrato=actual, atteso=expected, differenza=actual - expected)
+            elif status in {"annulled", "annullata"} and actual != 0:
+                issue("BULK_ANNULLO_INCOMPLETO", "vendite_bulk_imports", batch,
+                      "Un batch annullato contiene ancora vendite attive.",
+                      registrato=actual, atteso=0)
+            elif status not in {"active", "annulled", "annullata", "processing", "annulling"}:
+                issue("BULK_STATO_NON_VALIDO", "vendite_bulk_imports", batch,
+                      "Lo stato del batch BULK non è riconosciuto.",
+                      stato_batch=status)
+            if status in {"annulled", "annullata"} and batch.get("undo_audit_version") == 1:
+                audited_undos[batch_id] = (batch, expected)
+
+        for batch_id, count in bulk_sales_by_batch.items():
+            issue("BULK_BATCH_ORFANO", "vendite", {"id": batch_id},
+                  "Vendite BULK senza un batch valido collegato.",
+                  registrato=count)
+
+        if audited_undos:
+            audit_counts = Counter()
+            async for event in database.audit_events.find({
+                "azione": "annulla-vendita-bulk",
+                "batch_id": {"$in": list(audited_undos)},
+            }):
+                scanned["audit_events_bulk"] += 1
+                audit_counts[str(event.get("batch_id"))] += 1
+            for batch_id, (batch, expected) in audited_undos.items():
+                actual = audit_counts[batch_id]
+                if actual != expected:
+                    issue("BULK_STORNO_AUDIT_INCOMPLETO", "vendite_bulk_imports", batch,
+                          "Mancano documenti di audit per un batch annullato.",
+                          registrato=actual, atteso=expected)
 
     for name, field, signed in (
         ("versamenti", "importo", False), ("prelievi_vending", "importo", False),
@@ -196,11 +252,13 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
             "Importi di prodotti, listino, vendite, ordini storici, movimenti, rettifiche, storico negozio, baseline contabile e fondo iniziale vending.",
             "Giacenze non negative e intere; cache vending confrontata con le colonne associate.",
             "Importo e pagamento delle vendite CSV con un evento contabile univoco.",
+            "Controllo BULK non filtrato: righe attive, batch orfani e audit degli annullamenti nuovi.",
         ],
         "limiti": [
             "Controllo in sola lettura, non certificazione contabile. Ripetere a operazioni ferme: le letture non sono una fotografia transazionale.",
             "Le giacenze si confrontano solo per prodotti univoci con colonne associate; nessuna formula acquistati meno venduti.",
             "Vendite CSV senza un evento univoco non sono errori: possono appartenere alla baseline storica. Eventi senza vendita sono ammessi dall'allineamento solo contabile.",
             "Non si confronta la cassa tecnica legacy con i saldi: baseline e copertura temporale non sono equivalenti. Non è un conteggio fisico del contante.",
+            "Coerenza dei batch BULK verificata soltanto nell'analisi senza filtri data; annullamenti legacy senza versione audit non sono giudicati retroattivamente.",
         ],
     }

@@ -242,6 +242,26 @@ def _validate_runtime_security() -> None:
     }
     if agent_enabled and len(os.environ.get("AGENT_INTEGRATION_TOKEN") or "") < 32:
         raise RuntimeError("AGENT_INTEGRATION_TOKEN deve contenere almeno 32 caratteri")
+    if _environment() == "staging":
+        # Fail closed if this Render service accidentally targets a different
+        # database or cluster. This is a configuration guard, not a substitute
+        # for Atlas database-user least-privilege verification.
+        if os.environ.get("DB_NAME") != "gestionale_staging":
+            raise RuntimeError("Staging bloccato: DB_NAME diverso dal database isolato")
+        try:
+            parsed_mongo = urlsplit(os.environ.get("MONGO_URL") or "")
+            host = (parsed_mongo.hostname or "").lower()
+        except ValueError as exc:
+            raise RuntimeError("Staging bloccato: MONGO_URL non valido") from exc
+        if not (
+            parsed_mongo.scheme == "mongodb+srv"
+            and host.startswith("gestionale-staging.")
+            and host.endswith(".mongodb.net")
+            and parsed_mongo.username
+            and parsed_mongo.password
+        ):
+            raise RuntimeError("Staging bloccato: cluster MongoDB non riconosciuto")
+
 
 
 async def _verify_transaction_capability() -> Dict[str, Any]:
@@ -564,6 +584,9 @@ async def on_start():
             db.listino_adm.create_index("codice"),
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
+            db.vendite.create_index("batch_id"),
+            db.vendite_bulk_imports.create_index("id", unique=True, sparse=True),
+            db.vendite_bulk_imports.create_index("idempotency_key", unique=True, sparse=True),
             db.vendite.create_index([("data", 1), ("codice", 1)]),
             db.vendite.create_index("csv_event_key", unique=True, sparse=True),
             db.vendite.create_index("idempotency_key", unique=True, sparse=True),
@@ -1285,6 +1308,7 @@ sales = create_sales_router(
 )
 sales_router = sales["router"]
 list_vendite = sales["list_vendite"]
+totali_vendite = sales["totali_vendite"]
 add_vendita = sales["add_vendita"]
 del_vendita = sales["del_vendita"]
 ultima_vendita_manuale = sales["ultima_vendita_manuale"]
@@ -1497,6 +1521,7 @@ parameters_router, get_params, list_parametri, update_parametro = create_paramet
     record_audit_event=_record_audit_event,
 )
 auto_order_module = create_auto_order_router(
+    csv_vending_compatibility_key=_csv_vending_compatibility_key,
     get_database=lambda: db,
     get_params=lambda: get_params(),
     param_value=_param,

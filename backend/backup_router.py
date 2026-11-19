@@ -19,9 +19,9 @@ from pymongo.errors import DuplicateKeyError
 BACKUP_COLLECTIONS = [
     "prodotti", "listino_adm", "vending", "storico_ordini", "parametri",
     "db_storico_vend", "db_storico_vending_ext", "vendite",
-    "vendite_bulk_imports", "versamenti", "prelievi_vending",
+    "vendite_bulk_imports", "cassa_rapida_batches", "versamenti", "prelievi_vending",
     "scontrini_vending", "cassa_vending_stato", "vending_accounting_snapshots",
-    "vending_accounting_state", "vending_accounting_events", "cassa",
+    "vending_accounting_state", "vending_accounting_events", "vending_operations", "accounting_baselines", "cassa",
     "ordini_fornitore", "ordini_fornitore_righe", "auto_order_import_state", "import_history", "adm_sync",
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
     "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
@@ -30,9 +30,9 @@ BACKUP_COLLECTIONS = [
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
 OPTIONAL_BACKUP_COLLECTIONS = {
-    "vendite_bulk_imports", "scontrini_vending", "cassa_vending_stato",
+    "vendite_bulk_imports", "cassa_rapida_batches", "vending_operations", "scontrini_vending", "cassa_vending_stato",
     "vending_accounting_snapshots", "vending_accounting_state",
-    "vending_accounting_events", "anomalie_ignorate", "smart_venue",
+    "vending_accounting_events", "accounting_baselines", "anomalie_ignorate", "smart_venue",
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
     "audit_events", "auto_order_import_state",
@@ -371,16 +371,30 @@ def create_backup_router(
             raise HTTPException(422, f"Backup incompleto: mancano {', '.join(missing)}")
         if unknown:
             raise HTTPException(422, f"Backup non valido: collezioni sconosciute {', '.join(unknown)}")
-        declared_counts = payload.get("counts") or {}
-        declared_checksums = payload.get("checksums") or {}
+
+        declared_counts = payload.get("counts")
+        declared_checksums = payload.get("checksums")
+        if declared_counts is None:
+            declared_counts = {}
+        if declared_checksums is None:
+            declared_checksums = {}
+        if not isinstance(declared_counts, dict) or not isinstance(declared_checksums, dict):
+            raise HTTPException(422, "Metadati del backup non validi: counts/checksums")
         for collection_name, documents in collections.items():
             if not isinstance(documents, list):
                 raise HTTPException(422, f"Collezione {collection_name} non valida")
             if any(not isinstance(doc, dict) or "_id" in doc for doc in documents):
                 raise HTTPException(422, f"Documento non valido nella collezione {collection_name}")
-            if collection_name in declared_counts and int(declared_counts[collection_name]) != len(documents):
-                raise HTTPException(422, f"Conteggio non valido per la collezione {collection_name}")
+            if collection_name in declared_counts:
+                count = declared_counts[collection_name]
+                if type(count) is not int or count < 0 or count != len(documents):
+                    raise HTTPException(422, f"Conteggio non valido per la collezione {collection_name}")
             if collection_name in declared_checksums:
+                checksum = declared_checksums[collection_name]
+                if not isinstance(checksum, str) or len(checksum) != 64 or any(
+                    character not in "0123456789abcdefABCDEF" for character in checksum
+                ):
+                    raise HTTPException(422, f"Checksum non valido per la collezione {collection_name}")
                 digest = hashlib.sha256()
                 for document in documents:
                     digest.update(json.dumps(
@@ -388,11 +402,60 @@ def create_backup_router(
                         separators=(",", ":"), default=str,
                     ).encode("utf-8"))
                     digest.update(b"\n")
-                if not secrets.compare_digest(
-                    str(declared_checksums[collection_name]), digest.hexdigest()
-                ):
+                if not secrets.compare_digest(checksum.lower(), digest.hexdigest()):
                     raise HTTPException(422, f"Checksum non valido per la collezione {collection_name}")
         return collections
+
+    async def parse_restore_file(file: UploadFile):
+        raw = await read_capped(file)
+        try:
+            payload = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(422, f"File di backup non leggibile: {exc}") from exc
+        collections = validate_backup_file(payload)
+        return payload, collections
+
+    async def inspect_restore_target(payload, collections):
+        """Read-only compatibility assessment; never mutate operational data."""
+        absent = sorted(set(OPTIONAL_BACKUP_COLLECTIONS) - set(collections))
+        database = get_database()
+        nonempty = []
+        for name in absent:
+            if await database[name].count_documents({}, limit=1):
+                nonempty.append(name)
+
+        checksums = payload.get("checksums") or {}
+        unverified = sorted(set(collections) - set(checksums))
+        warnings = []
+        if absent:
+            warnings.append(
+                "Collezioni opzionali assenti dal file: "
+                + ", ".join(absent)
+                + ". Se vuote nella destinazione, verranno lasciate vuote."
+            )
+        if unverified:
+            warnings.append(
+                "Checksum non disponibili per tutte le collezioni; "
+                "l'integrità di queste non può essere verificata."
+            )
+        if nonempty:
+            warnings.append(
+                "Ripristino bloccato: il file non contiene collezioni già popolate "
+                "nella destinazione (" + ", ".join(nonempty) + ")."
+            )
+        return {
+            "format": BACKUP_FILE_FORMAT,
+            "version": BACKUP_FILE_VERSION,
+            "label": str(payload.get("label") or "")[:180],
+            "created_at": payload.get("created_at"),
+            "counts": {name: len(docs) for name, docs in collections.items()},
+            "total_docs": sum(len(docs) for docs in collections.values()),
+            "missing_optional_collections": absent,
+            "missing_checksum_collections": unverified,
+            "nonempty_missing_collections": nonempty,
+            "can_restore": not nonempty,
+            "warnings": warnings,
+        }
 
     async def restore_collections(collections, session=None):
         """Replace backed-up collections, compensating on standalone Mongo.
@@ -546,16 +609,24 @@ def create_backup_router(
             )
             return {"ok": True, "restored": snapshot_id, "pre_restore_backup": pre_restore["id"]}
 
+    @router.post("/backup/restore-file/preview")
+    async def backup_restore_file_preview(file: UploadFile = File(...)):
+        """Validate external JSON and target compatibility without any writes."""
+        payload, collections = await parse_restore_file(file)
+        return await inspect_restore_target(payload, collections)
+
     @router.post("/backup/restore-file")
     async def backup_restore_file(file: UploadFile = File(...)):
-        raw = await read_capped(file)
-        try:
-            payload = json.loads(raw.decode("utf-8-sig"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPException(422, f"File di backup non leggibile: {exc}")
-        collections = validate_backup_file(payload)
+        payload, collections = await parse_restore_file(file)
         database = get_database()
         async with restore_lock():
+            assessment = await inspect_restore_target(payload, collections)
+            if not assessment["can_restore"]:
+                raise HTTPException(
+                    409, "Ripristino bloccato: il backup non contiene collezioni "
+                    "già popolate nella destinazione: "
+                    + ", ".join(assessment["nonempty_missing_collections"])
+                )
             pre_restore = await create_backup_snapshot(
                 f"Prima del ripristino file {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
                 "pre-restore-file",
@@ -590,4 +661,5 @@ def create_backup_router(
         "backup_download": backup_download,
         "backup_restore": backup_restore,
         "backup_restore_file": backup_restore_file,
+        "backup_restore_file_preview": backup_restore_file_preview,
     }

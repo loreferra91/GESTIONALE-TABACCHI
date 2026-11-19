@@ -1,3 +1,10 @@
+export function parseBulkQuantity(value) {
+  const raw = String(value ?? "").trim();
+  if (!/^[0-9]+(?:[.,]0+)?$/.test(raw)) return "";
+  const quantity = Number(raw.replace(",", "."));
+  return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : "";
+}
+
 const BULK_CATEGORY_SUMMARY_ROWS = new Map([
   ["10209", "ACCESSORITABACCHI"],
   ["10008", "INALAZIONESENZACOMBUSTIONE"],
@@ -24,7 +31,7 @@ export function parseBulkSales(text, defaultData, uidFactory = (idx) => `bulk-${
 
   // Excel può incollare una cella per riga: in quel caso ricostruiamo
   // blocchi da 4 (senza data) o 5 campi (con data).
-  const singleField = raw.every(l => !/\t|;|,/.test(l));
+  const singleField = raw.every(l => !/[\t;]/.test(l) && (!l.includes(",") || /^[0-9]+,[0-9]+$/.test(l)));
   const groups = [];
   if (singleField && (raw.length % 4 === 0 || raw.length % 5 === 0)) {
     const firstFieldLooksLikeDate = /^\d{4}-\d{1,2}-\d{1,2}(?:[T\s].*)?$/.test(raw[0]) ||
@@ -47,13 +54,13 @@ export function parseBulkSales(text, defaultData, uidFactory = (idx) => `bulk-${
     if (parts.length >= 5) [data, codice, descrizione, qta, importo] = parts;
     else if (parts.length === 4) { [codice, descrizione, qta, importo] = parts; data = defaultData; }
     else if (parts.length === 3) { [codice, qta, importo] = parts; descrizione = ""; data = defaultData; }
-    else return null;
+    else return { _uid: uidFactory(idx), data: defaultData, codice: parts[0] || "", descrizione: "Riga incompleta", quantita: "", importo: 0 };
     return {
       _uid: uidFactory(idx),
       data: data || defaultData,
       codice: (codice || "").trim(),
       descrizione: (descrizione || "").trim(),
-      quantita: parseInt(String(qta || "0").replace(/[^\d-]/g, ""), 10) || 0,
+      quantita: parseBulkQuantity(qta),
       importo: parseFloat(String(importo || "0").replace(",", ".").replace(/[^\d.-]/g, "")) || 0,
     };
   }).filter(Boolean);

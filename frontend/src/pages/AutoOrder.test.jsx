@@ -359,6 +359,8 @@ test("3.1 pronto carica la quantita prevista e conferma con snapshot politica", 
     policy_snapshot_key: "auto-order-3-1:test-snapshot",
     native_history_days: 90,
     operational_blockers: [],
+    legacy_vending_reconciliation: { matched_rows: 10, canonical_events: 2, duplicate_copies: 8 },
+    delivery_schedule: { delivery_date: "2026-11-20", cutoff_datetime: "2026-11-18T11:00:00+01:00" },
     summary: { stockout_risk: 0, supplementary_orders: 0, already_on_order: 0,
       vending_refills: 0, pieces_2: 5, pieces_3: 3, insufficient_data: 0,
       known_purchase_cost: 0, missing_purchase_costs: 0 },
@@ -376,8 +378,25 @@ test("3.1 pronto carica la quantita prevista e conferma con snapshot politica", 
   await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
   await act(async () => container.querySelector('[data-testid="ao-use-3-1"]').click());
   expect(container.querySelector('[data-testid="ao-use-3-1"]').getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelector('[data-testid="ao-vending-reconciled"]').textContent).toContain("2 vendite effettive");
+  expect(container.querySelector('[data-testid="ao-vending-reconciled"]').textContent).toContain("8 copie");
+  expect(container.textContent).toContain("La previsione usa il calendario di consegna del venerdì.");
   expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("3");
-  expect(container.querySelector('[data-testid="ao-pdf"]').disabled).toBe(true);
+  const prompt = jest.spyOn(window, "prompt").mockReturnValue("Fornitore test");
+  const open = jest.spyOn(window, "open").mockImplementation(() => null);
+  for (const format of ["pdf", "excel"]) {
+    expect(container.querySelector(`[data-testid="ao-${format}"]`).disabled).toBe(false);
+    await act(async () => container.querySelector(`[data-testid="ao-${format}"]`).click());
+    const url = new URL(open.mock.calls.at(-1)[0], "https://example.test");
+    expect(url.pathname).toBe(`/api/auto-order/${format}`);
+    expect(url.searchParams.get("policy_version")).toBe("AUTO_ORDER_3_1");
+    expect(url.searchParams.get("policy_snapshot_key")).toBe(forecast.policy_snapshot_key);
+    expect(url.searchParams.get("snapshot_key")).toBe("snapshot-1");
+    expect(url.searchParams.has("batch_key")).toBe(false);
+    expect(JSON.parse(url.searchParams.get("selezione"))).toEqual([{ codice: "AUTO1", quantita: 3 }]);
+  }
+  expect(api.post).not.toHaveBeenCalled();
+  api.post.mockResolvedValueOnce({ data: { ordinati: 1, batch_key: "saved-31" } });
   await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
   const submit = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
   await act(async () => submit.click());
@@ -386,6 +405,16 @@ test("3.1 pronto carica la quantita prevista e conferma con snapshot politica", 
     policy_snapshot_key: "auto-order-3-1:test-snapshot",
     righe: [{ codice: "AUTO1", quantita: 3 }],
   }));
+  await act(async () => container.querySelector('[data-testid="ao-pdf"]').click());
+  expect(new URL(open.mock.calls.at(-1)[0], "https://example.test").searchParams.get("batch_key")).toBe("saved-31");
+  await write(container.querySelector('[data-testid="ao-quantity-AUTO1"]'), "2");
+  await act(async () => container.querySelector('[data-testid="ao-excel"]').click());
+  const editedUrl = new URL(open.mock.calls.at(-1)[0], "https://example.test");
+  expect(editedUrl.searchParams.has("batch_key")).toBe(false);
+  expect(JSON.parse(editedUrl.searchParams.get("selezione"))).toEqual([{ codice: "AUTO1", quantita: 2 }]);
+  expect(api.post).toHaveBeenCalledTimes(1);
+  prompt.mockRestore();
+  open.mockRestore();
 });
 
 test("3.1 senza parametri validi resta disabilitato e mantiene fallback 2.0", async () => {

@@ -1,0 +1,66 @@
+name: Staging backup restore - disposable MongoDB
+
+on:
+  push:
+    branches: ["feature/**", "openclaw/render-staging-deploy"]
+    paths:
+      - backend/backup_router.py
+      - backend/tests/test_external_backup_real_mongo.py
+      - .github/workflows/staging-backup-restore-cert.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-mongodb-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-prod.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-prod.txt
+          python -m pip install httpx==0.28.1 pytest==9.1.1 pytest-xdist==3.8.0 mongomock-motor==0.0.36
+
+      - name: Start disposable loopback-only MongoDB replica set
+        run: |
+          docker run -d --name staging-restore-cert-mongo \
+            -p 127.0.0.1:27018:27017 \
+            mongo:7 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec staging-restore-cert-mongo mongosh --quiet \
+              --eval 'db.adminCommand({ping:1}).ok' | grep -qx '1'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec staging-restore-cert-mongo mongosh --quiet \
+            --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+          for attempt in $(seq 1 30); do
+            if docker exec staging-restore-cert-mongo mongosh --quiet \
+              --eval 'db.hello().isWritablePrimary' | grep -qx 'true'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec staging-restore-cert-mongo mongosh --quiet \
+            --eval 'if (!db.hello().isWritablePrimary) { quit(2) }'
+
+      - name: Verify external JSON restore with real MongoDB transactions
+        env:
+          CERT_MONGO_URL: mongodb://127.0.0.1:27018/?directConnection=true
+          CERT_DB_NAME: gestionale_cert_external_restore_ci
+        run: python -m pytest backend/tests/test_external_backup_real_mongo.py -q -n 0 --tb=short
+
+      - name: Remove isolated MongoDB
+        if: always()
+        run: docker rm -f staging-restore-cert-mongo || true

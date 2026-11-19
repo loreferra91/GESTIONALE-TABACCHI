@@ -3,7 +3,8 @@ import unicodedata
 import uuid
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
@@ -46,6 +47,7 @@ class VenditaIn(BaseModel):
 
 
 class BulkVenditaIn(BaseModel):
+    idempotency_key: Optional[str] = Field(default=None, min_length=10, max_length=160)
     canale: str = "NEGOZIO"
     pagamento: str = "CONTANTI"
     righe: List[Dict[str, Any]]
@@ -113,6 +115,19 @@ def create_sales_router(
             .to_list(capped_limit)
         )
 
+    @router.get("/vendite/totali")
+    async def totali_vendite(giorno: Optional[str] = None):
+        query = {}
+        if giorno:
+            safe = re.sub(r"[^0-9\-T:.]", "", giorno)[:32]
+            query["data"] = {"$regex": f"^{re.escape(safe)}"}
+        result = await get_database().vendite.aggregate([
+            {"$match": query},
+            {"$group": {"_id": None, "importo": {"$sum": "$importo"},
+                        "pezzi": {"$sum": "$quantita"}, "righe": {"$sum": 1}}},
+        ]).to_list(1)
+        return {k: result[0][k] for k in ("importo", "pezzi", "righe")} if result else {"importo": 0, "pezzi": 0, "righe": 0}
+
     @router.post("/vendite")
     async def add_vendita(
         vendita: VenditaIn,
@@ -128,10 +143,52 @@ def create_sales_router(
         key = str(idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "X-Idempotency-Key deve contenere da 10 a 160 caratteri")
+        request_fingerprint = _request_fingerprint({
+            "data": vendita.data,
+            "codice": codice,
+            "descrizione": str(vendita.descrizione or ""),
+            "quantita": vendita.quantita,
+            "importo": float(vendita.importo),
+            "canale": channel,
+            "pagamento": str(vendita.pagamento or "CONTANTI").strip().upper(),
+            "colonna": normalize_vending_column(vendita.colonna) if channel == "VENDING" else None,
+        })
+
+        def replay(existing):
+            if existing.get("sorgente") not in (None, "MANUALE"):
+                raise HTTPException(409, "Chiave già associata a un'altra sorgente di vendita")
+            saved_fingerprint = existing.get("request_fingerprint")
+            if saved_fingerprint is not None:
+                if saved_fingerprint != request_fingerprint:
+                    raise HTTPException(409, "Chiave idempotente già usata con dati diversi")
+            else:
+                # Backwards compatibility for sales registered before fingerprints.
+                same_fields = (
+                    str(existing.get("data")) == str(vendita.data)
+                    and product_code_text(existing.get("codice")) == codice
+                    and int(existing.get("quantita") or 0) == vendita.quantita
+                    and Decimal(str(existing.get("importo") or 0)) == Decimal(str(vendita.importo))
+                    and str(existing.get("canale") or "NEGOZIO").strip().upper() == channel
+                    and str(existing.get("pagamento") or "CONTANTI").strip().upper()
+                        == str(vendita.pagamento or "CONTANTI").strip().upper()
+                    and (
+                        normalize_vending_column(existing.get("colonna"))
+                        if channel == "VENDING" else None
+                    ) == (
+                        normalize_vending_column(vendita.colonna)
+                        if channel == "VENDING" else None
+                    )
+                )
+                if not same_fields or (
+                    vendita.descrizione and str(existing.get("descrizione") or "") != vendita.descrizione
+                ):
+                    raise HTTPException(409, "Chiave legacy già usata con dati diversi")
+            return existing
+
         if key:
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
-                return existing
+                return replay(existing)
 
         product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
         if not product:
@@ -156,6 +213,7 @@ def create_sales_router(
         sale_doc = VenditaGiornaliera(**payload).model_dump()
         if key:
             sale_doc["idempotency_key"] = key
+            sale_doc["request_fingerprint"] = request_fingerprint
 
         async def operation(session):
             kwargs = session_kwargs(session)
@@ -164,7 +222,7 @@ def create_sales_router(
                     {"idempotency_key": key}, {"_id": 0}, **kwargs
                 )
                 if existing:
-                    return existing
+                    return replay(existing)
 
             column_changed = False
             product_changed = False
@@ -231,7 +289,7 @@ def create_sales_router(
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if not existing:
                 raise
-            result = existing
+            result = replay(existing)
         if channel == "VENDING":
             await sync_product_vending_stock(codice)
         return result
@@ -333,6 +391,21 @@ def create_sales_router(
                 422,
                 "Per le vendite Vending usa il CSV distributore, che identifica la colonna reale",
             )
+        fingerprint = _request_fingerprint(body.model_dump(exclude={"idempotency_key"}))
+        # Legacy clients without a key are deduplicated by exact payload.
+        key = body.idempotency_key or f"legacy:{fingerprint}"
+        reservation_id = f"bulk:{key}"
+
+        def replay(existing):
+            if existing.get("request_fingerprint") != fingerprint:
+                raise HTTPException(409, "Chiave già usata con dati diversi")
+            if existing.get("status") != "active" or not existing.get("response"):
+                raise HTTPException(409, "Caricamento in corso o già annullato")
+            return existing["response"]
+
+        existing = await db.vendite_bulk_imports.find_one({"idempotency_key": key})
+        if existing:
+            return replay(existing)
         batch_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
         skipped = 0
@@ -343,18 +416,25 @@ def create_sales_router(
             try:
                 codice = product_code_text(row.get("codice"))
                 if not codice:
-                    skipped += 1
-                    continue
+                    raise ValueError("codice obbligatorio")
                 if is_bulk_category_summary(codice, row.get("descrizione")):
                     skipped += 1
                     continue
-                quantity = int(float(row.get("quantita") or 0))
+                raw_quantity = str(row.get("quantita", "")).strip()
+                if not re.fullmatch(r"[0-9]+(?:[.,]0+)?", raw_quantity):
+                    raise ValueError("quantità intera positiva richiesta")
+                quantity = int(Decimal(raw_quantity.replace(",", ".")))
+                if quantity > 9007199254740991:
+                    raise ValueError("quantità troppo grande")
                 amount = normalize_nonnegative_money(row.get("importo", 0))
                 if quantity <= 0:
                     raise ValueError("quantità non valida")
                 if amount < 0:
                     raise ValueError("importo non valido")
-                sale_date = str(row.get("data") or datetime.now(timezone.utc).isoformat())
+                sale_date = str(row.get("data") or datetime.now(ZoneInfo("Europe/Rome")).date().isoformat())
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", sale_date):
+                    raise ValueError("data richiesta nel formato YYYY-MM-DD")
+                date.fromisoformat(sale_date)
                 description = str(row.get("descrizione") or "")
                 product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
                 if not product:
@@ -393,6 +473,8 @@ def create_sales_router(
                 },
             )
 
+        if not prepared:
+            raise HTTPException(422, "Nessuna vendita valida")
         backup = await create_backup_snapshot(
             "Prima del caricamento vendite negozio",
             "pre-import-vendite-negozio",
@@ -403,7 +485,15 @@ def create_sales_router(
             kwargs = session_kwargs(session)
             changed: List[Dict[str, Any]] = []
             inserted_ids: List[str] = []
+            claimed = False
             try:
+                await db.vendite_bulk_imports.insert_one({
+                    "_id": reservation_id, "id": batch_id, "idempotency_key": key,
+                    "request_fingerprint": fingerprint, "created_at": created_at,
+                    "sorgente": "BULK", "canale": "NEGOZIO", "pagamento": body.pagamento,
+                    "inseriti": len(prepared), "saltati": skipped, "status": "processing",
+                }, **kwargs)
+                claimed = True
                 for sale in prepared:
                     quantity = int(sale["quantita"])
                     update = await db.prodotti.update_one(
@@ -416,22 +506,12 @@ def create_sales_router(
                     changed.append(sale)
                     await db.vendite.insert_one(sale.copy(), **kwargs)
                     inserted_ids.append(sale["id"])
-                if prepared:
-                    await db.vendite_bulk_imports.insert_one(
-                        {
-                            "id": batch_id,
-                            "created_at": created_at,
-                            "sorgente": "BULK",
-                            "canale": "NEGOZIO",
-                            "pagamento": str(body.pagamento or "CONTANTI").strip().upper(),
-                            "inseriti": len(prepared),
-                            "saltati": skipped,
-                            "status": "active",
-                        },
-                        **kwargs,
-                    )
+                await db.vendite_bulk_imports.update_one(
+                    {"_id": reservation_id}, {"$set": {"status": "active", "response": response}}, **kwargs
+                )
+                return response
             except Exception:
-                if session is None:
+                if session is None and claimed:
                     if inserted_ids:
                         await db.vendite.delete_many(
                             {"id": {"$in": inserted_ids}, "batch_id": batch_id}
@@ -450,9 +530,8 @@ def create_sales_router(
                     await db.vendite_bulk_imports.delete_one({"id": batch_id})
                 raise
 
-        await run_transactionally(operation)
         inserted = len(prepared)
-        return {
+        response = {
             "inseriti": inserted,
             "saltati": skipped,
             "errori": errors,
@@ -462,6 +541,14 @@ def create_sales_router(
             "pagamento": body.pagamento,
             "backup_id": backup["id"],
         }
+
+        try:
+            return await run_transactionally(operation)
+        except DuplicateKeyError:
+            existing = await db.vendite_bulk_imports.find_one({"idempotency_key": key})
+            if existing:
+                return replay(existing)
+            raise HTTPException(409, "Caricamento concorrente: riprovare con la stessa chiave")
 
     @router.post("/vendite/cassa-rapida")
     async def vendita_cassa_rapida(body: CassaRapidaIn, request: Request = None):
@@ -689,23 +776,34 @@ def create_sales_router(
         )
 
     @router.post("/vendite/bulk/{batch_id}/annulla")
-    async def annulla_bulk_vendite(batch_id: str):
+    async def annulla_bulk_vendite(batch_id: str, request: Request = None):
         db = get_database()
-        claim = await db.vendite_bulk_imports.update_one(
-            {"id": batch_id, "status": "active"},
-            {"$set": {"status": "annulling"}},
-        )
-        if claim.modified_count != 1:
-            raise HTTPException(404, "Caricamento non trovato o già annullato")
 
         async def operation(session):
             kwargs = session_kwargs(session)
-            sales = await db.vendite.find(
-                {"batch_id": batch_id, "sorgente": "BULK"}, {"_id": 0}, **kwargs
-            ).to_list(None)
+            # Claim inside the transaction: a crash cannot strand the batch in
+            # "annulling" while leaving its sales and stock unchanged.
+            claimed = await db.vendite_bulk_imports.find_one_and_update(
+                {"id": batch_id, "status": "active"},
+                {"$set": {"status": "annulling"}},
+                return_document=True,
+                **kwargs,
+            )
+            if not claimed:
+                raise HTTPException(404, "Caricamento non trovato o già annullato")
+
             completed = []
             current_stock_change = None
+            audit_ids = []
             try:
+                sales = await db.vendite.find(
+                    {"batch_id": batch_id, "sorgente": "BULK"}, {"_id": 0}, **kwargs
+                ).to_list(None)
+                expected = claimed.get("inseriti")
+                if expected is not None and len(sales) != int(expected):
+                    raise RuntimeError(
+                        f"Batch incoerente: trovate {len(sales)} vendite, attese {expected}"
+                    )
                 for sale in sales:
                     field = (
                         "giacenza_vending"
@@ -718,35 +816,65 @@ def create_sales_router(
                         else "venduti_negozio"
                     )
                     quantity = int(sale.get("quantita") or 0)
+                    if quantity <= 0:
+                        raise RuntimeError("Quantità storica non valida: annullamento bloccato")
                     stock_update = await db.prodotti.update_one(
-                        {"codice": sale.get("codice")},
+                        {
+                            "codice": sale.get("codice"),
+                            vend_field: {"$gte": quantity},
+                        },
                         {"$inc": {field: quantity, vend_field: -quantity}},
                         **kwargs,
                     )
                     if stock_update.modified_count != 1:
-                        raise RuntimeError(f"Prodotto non trovato: {sale.get('codice')}")
+                        raise RuntimeError(
+                            f"Prodotto o contatore venduti incoerente: {sale.get('codice')}"
+                        )
                     current_stock_change = (sale, field, vend_field, quantity)
+                    event_id = str(uuid.uuid4())
+                    await db.audit_events.insert_one(
+                        {
+                            "id": event_id,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "azione": "annulla-vendita-bulk",
+                            "entita": "vendite",
+                            "entita_id": str(sale.get("id")),
+                            "operatore": request_operator(request),
+                            "prima": sale,
+                            "dopo": None,
+                            "idempotency_key": claimed.get("idempotency_key"),
+                            "batch_id": batch_id,
+                        },
+                        **kwargs,
+                    )
+                    audit_ids.append(event_id)
                     deletion = await db.vendite.delete_one(
-                        {"id": sale.get("id"), "batch_id": batch_id}, **kwargs
+                        {"id": sale.get("id"), "batch_id": batch_id, "sorgente": "BULK"},
+                        **kwargs,
                     )
                     if deletion.deleted_count != 1:
                         raise RuntimeError("Una vendita del caricamento non è stata eliminata")
                     completed.append(current_stock_change)
                     current_stock_change = None
 
-                await db.vendite_bulk_imports.update_one(
+                final = await db.vendite_bulk_imports.update_one(
                     {"id": batch_id, "status": "annulling"},
                     {
                         "$set": {
                             "status": "annulled",
                             "annulled_at": datetime.now(timezone.utc).isoformat(),
                             "rimossi": len(completed),
+                            "undo_audit_version": 1,
                         }
                     },
                     **kwargs,
                 )
+                if final.modified_count != 1:
+                    raise RuntimeError("Lo stato del batch è cambiato durante l'annullamento")
                 return len(completed)
             except Exception:
+                # Production uses MongoDB transactions. Local/mock databases
+                # have best-effort compensation for their non-transactional path.
                 if session is None:
                     if current_stock_change:
                         sale, field, vend_field, quantity = current_stock_change
@@ -760,21 +888,26 @@ def create_sales_router(
                             {"codice": sale.get("codice")},
                             {"$inc": {field: -quantity, vend_field: quantity}},
                         )
+                    if audit_ids:
+                        await db.audit_events.delete_many({"id": {"$in": audit_ids}})
+                    await db.vendite_bulk_imports.update_one(
+                        {"id": batch_id, "status": "annulling"},
+                        {"$set": {"status": "active"}},
+                    )
                 raise
 
         try:
             removed = await run_transactionally(operation)
+        except HTTPException:
+            raise
         except Exception as exc:
-            await db.vendite_bulk_imports.update_one(
-                {"id": batch_id, "status": "annulling"},
-                {"$set": {"status": "active"}},
-            )
             raise HTTPException(500, f"Impossibile annullare il caricamento: {exc}") from exc
         return {"ok": True, "batch_id": batch_id, "rimossi": removed}
 
     return {
         "router": router,
         "list_vendite": list_vendite,
+        "totali_vendite": totali_vendite,
         "add_vendita": add_vendita,
         "del_vendita": del_vendita,
         "ultima_vendita_manuale": ultima_vendita_manuale,

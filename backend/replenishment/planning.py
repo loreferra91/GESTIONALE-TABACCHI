@@ -41,8 +41,10 @@ def plan_inventory(*, today: date, shop_stock: int, vending_stock: int,
     if not math.isfinite(safety_factor) or safety_factor < 1:
         raise ValueError("Sicurezza non valida")
     if vending_capacity is not None:
-        if not isinstance(vending_capacity, int) or vending_capacity < vending_stock:
-            raise ValueError("Capacità vending incoerente con la giacenza")
+        if isinstance(vending_capacity, bool) or not isinstance(vending_capacity, int) or vending_capacity < 0:
+            raise ValueError("Capacità vending non valida")
+        # Preserve the real stock even when it exceeds the configured refill
+        # ceiling. Sales draw it down; headroom stays zero until below the cap.
 
     protection = lead_days + review_days if lead_days else max(1, review_days)
     supplier_day = today + timedelta(days=lead_days)

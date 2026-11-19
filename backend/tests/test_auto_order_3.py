@@ -241,15 +241,27 @@ def test_streamed_vs_materialized_comparison_agree():
     assert compare_policies(active, collector) == compare_policies(active, native)
 
 
-def test_vending_capacity_is_respected_and_inconsistent_capacity_suspends():
+def test_vending_capacity_limits_refills_without_discarding_existing_overstock():
     refill = plan(shop_stock=100, vending_stock=0, minimum_shop=0,
                   demand_vending=2, lead_days=2, review_days=12,
                   vending_capacity=5)
     assert refill["vending_transfer_schedule"][0]["quantita"] == 5
     assert len(refill["vending_transfer_schedule"]) > 1
     assert refill["planned_vending_transfer"] == 28
-    with pytest.raises(ValueError):
-        plan(shop_stock=10, vending_stock=6, vending_capacity=5)
+    overstock = plan(shop_stock=100, vending_stock=8, minimum_shop=0,
+                     demand_shop=0, demand_vending=1, lead_days=2, review_days=12,
+                     vending_capacity=5)
+    assert overstock['inventory_position'] == 108
+    assert overstock['vending_transfer_schedule'][0]['data'] == (TODAY + timedelta(days=5)).isoformat()
+    stock = 8
+    transfers = {r['data']: r['quantita'] for r in overstock['vending_transfer_schedule']}
+    for offset in range(15):
+        amount = transfers.get((TODAY + timedelta(days=offset)).isoformat(), 0)
+        if amount:
+            assert stock + amount <= 5
+        stock += amount
+        if offset:
+            stock = max(0, stock - 1)
 
     active = {
         "planning_day": TODAY.isoformat(), "parametri": {},
@@ -260,8 +272,14 @@ def test_vending_capacity_is_respected_and_inconsistent_capacity_suspends():
         ],
     }
     row = compare_policies(active, [])["rows"][0]
-    assert "CAPACITA_VENDING_INCOERENTE" in row["anomalie"]
+    assert "CAPACITA_VENDING_INCOERENTE" not in row["anomalie"]
+    assert row["giacenza_vending"] == 6
     assert row["quantita_suggerita"] == 0
+    for invalid in (-1, 2.5, True):
+        active['esclusi'][0]['vending_capacity'] = invalid
+        assert 'CAPACITA_VENDING_INCOERENTE' in compare_policies(active, [])['rows'][0]['anomalie']
+        with pytest.raises(ValueError):
+            plan(vending_capacity=invalid)
 
 
 

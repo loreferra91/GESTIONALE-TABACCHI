@@ -7,6 +7,7 @@ import { UploadSimple, CheckCircle, WarningCircle, DownloadSimple } from "@phosp
 import ConfirmDialog from "../components/ConfirmDialog";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_BACKUP_RESTORE_BYTES = 20 * 1024 * 1024; // Match backend/server.py MAX_UPLOAD_BYTES.
 
 function isValidIsoDate(year, month, day) {
   const date = new Date(Date.UTC(year, month - 1, day));
@@ -55,6 +56,7 @@ export default function Parametri() {
   const [backupRetention, setBackupRetention] = useState(null);
   const [restoreTarget, setRestoreTarget] = useState(null);
   const [restoreFile, setRestoreFile] = useState(null);
+  const [restorePreview, setRestorePreview] = useState(null);
   const [workingBackup, setWorkingBackup] = useState(false);
   const [openingVendingCash, setOpeningVendingCash] = useState("0");
   const [savingOpeningVendingCash, setSavingOpeningVendingCash] = useState(false);
@@ -221,13 +223,41 @@ export default function Parametri() {
     }
   };
 
-  const selectRestoreFile = (event) => {
+  const selectRestoreFile = async (event) => {
     const selected = event.target.files?.[0] || null;
-    setRestoreFile(selected);
+    setRestoreFile(null);
+    setRestorePreview(null);
+    if (!selected) return;
+    if (!/\.json$/i.test(selected.name)) {
+      toast.error("Seleziona un backup .json esportato dalla webapp (non un archivio MongoDB cifrato).");
+      if (restoreFileRef.current) restoreFileRef.current.value = "";
+      return;
+    }
+    if (selected.size > MAX_BACKUP_RESTORE_BYTES) {
+      toast.error("File troppo grande: massimo 20 MiB. Nessun dato è stato modificato.");
+      if (restoreFileRef.current) restoreFileRef.current.value = "";
+      return;
+    }
+    setWorkingBackup(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", selected);
+      const { data } = await api.post("/backup/restore-file/preview", formData);
+      setRestoreFile(selected);
+      setRestorePreview(data);
+      if (!data.can_restore) {
+        toast.error("Ripristino bloccato: il backup è incompatibile con i dati presenti nella destinazione.");
+      }
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "File di backup non valido"));
+      if (restoreFileRef.current) restoreFileRef.current.value = "";
+    } finally {
+      setWorkingBackup(false);
+    }
   };
 
   const restoreBackupFile = async () => {
-    if (!restoreFile) return;
+    if (!restoreFile || !restorePreview?.can_restore || workingBackup) return;
     setWorkingBackup(true);
     const formData = new FormData();
     formData.append("file", restoreFile);
@@ -235,10 +265,13 @@ export default function Parametri() {
       const response = await api.post("/backup/restore-file", formData);
       toast.success(`Backup ripristinato: ${formatNum(response.data.restored_docs)} documenti`);
       setRestoreFile(null);
+      setRestorePreview(null);
       if (restoreFileRef.current) restoreFileRef.current.value = "";
       await Promise.all([load(), loadAudit()]);
     } catch (err) {
-      toast.error(apiErrorMessage(err, "Errore ripristino file di backup"));
+      toast.error(err?.response
+        ? apiErrorMessage(err, "Errore ripristino file di backup")
+        : "Esito del ripristino non confermato: verifica lo stato del database prima di riprovare.");
     } finally {
       setWorkingBackup(false);
     }
@@ -426,6 +459,11 @@ export default function Parametri() {
               disabled={workingBackup}
               className="mt-3 block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-2 file:font-semibold file:text-blue-900"
             />
+            {restorePreview && !restorePreview.can_restore && (
+              <p role="alert" className="mt-2 text-xs font-semibold text-red-800">
+                Ripristino bloccato: collezioni assenti dal file ma presenti nella destinazione: {restorePreview.nonempty_missing_collections.join(", ")}.
+              </p>
+            )}
           </div>
           <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -546,19 +584,24 @@ export default function Parametri() {
         <p className="mt-2 text-slate-600">Prima del ripristino verrà creato automaticamente un nuovo backup dello stato attuale.</p>
       </ConfirmDialog>
       <ConfirmDialog
-        open={Boolean(restoreFile)}
+        open={Boolean(restoreFile && restorePreview?.can_restore)}
         title="Ripristinare il backup dal file?"
         confirmLabel="Ripristina dal file"
         danger
         loading={workingBackup}
         onCancel={() => {
           setRestoreFile(null);
+          setRestorePreview(null);
           if (restoreFileRef.current) restoreFileRef.current.value = "";
         }}
         onConfirm={restoreBackupFile}
       >
         <p>Verrà caricato <b>{restoreFile?.name}</b> e i dati operativi attuali saranno sostituiti.</p>
-        <p className="mt-2 text-slate-600">Il file viene controllato integralmente prima di modificare il database.</p>
+        <p className="mt-2 font-semibold">{formatNum(restorePreview?.total_docs || 0)} documenti in {Object.keys(restorePreview?.counts || {}).length} collezioni. Verifica formato e compatibilità superata.</p>
+        {restorePreview?.warnings?.map((warning, index) => (
+          <p key={index} className="mt-2 text-amber-800">{warning}</p>
+        ))}
+        <p className="mt-2 text-slate-600">Il file viene ricontrollato prima di modificare il database. Nessun ripristino viene eseguito con la sola anteprima.</p>
       </ConfirmDialog>
     </Layout>
   );

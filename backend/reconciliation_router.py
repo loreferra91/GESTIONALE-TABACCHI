@@ -1,5 +1,5 @@
 """HTTP routes and workflow persistence for operational reconciliation."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import re
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,8 +32,13 @@ def create_reconciliation_router(
     @router.get("/contabilita/riconciliazione")
     async def accounting_reconciliation(date_from: str | None = None, date_to: str | None = None):
         for value, label in ((date_from, "date_from"), (date_to, "date_to")):
-            if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-                raise HTTPException(422, f"{label} deve avere formato YYYY-MM-DD")
+            if value:
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise HTTPException(422, f"{label} deve avere formato YYYY-MM-DD")
+                try:
+                    date.fromisoformat(value)
+                except ValueError as exc:
+                    raise HTTPException(422, f"{label} non è una data valida") from exc
         if date_from and date_to and date_from > date_to:
             raise HTTPException(422, "date_from non può essere successiva a date_to")
 

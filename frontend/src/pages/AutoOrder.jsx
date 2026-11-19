@@ -229,8 +229,8 @@ export default function AutoOrder() {
       params.set("batch_key", savedBatchKey);
     } else {
       if (orderPolicy === "AUTO_ORDER_3_1") {
-        toast.error("Conferma prima l'ordine 3.1 per esportare un documento valido.");
-        return;
+        params.set("policy_version", orderPolicy);
+        params.set("policy_snapshot_key", comparison?.policy_snapshot_key || "");
       }
       params.set("snapshot_key", snapshotKey);
       params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare }))));
@@ -352,10 +352,10 @@ export default function AutoOrder() {
 
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={() => load(true)} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF fornitore
         </button>
-        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged || (orderPolicy === "AUTO_ORDER_3_1" && (!savedBatchKey || savedConfirmationKey !== confirmationKey))} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel fornitore
         </button>
         <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI" || (orderPolicy === "AUTO_ORDER_3_1" && (!comparison?.operational_ready || !comparison?.policy_snapshot_key))} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
@@ -466,7 +466,7 @@ export default function AutoOrder() {
               <Plus size={16} /> Aggiungi all’ordine
             </button>
           </div>
-          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. Una fornitura datata consente un ordine integrativo soltanto per il fabbisogno netto residuo; le forniture senza data affidabile richiedono verifica.</p>
+          <p className="text-xs text-slate-500">Seleziona il prodotto, indica una quantità multipla del lotto e aggiungilo. Il calcolo legge le giacenze reali, i carichi merce completati e le vendite registrate: la fornitura già arrivata viene quindi considerata disponibile e ciò che è stato venduto viene sottratto dalla previsione. Una fornitura senza data affidabile resta invece da verificare.</p>
         </div>
       </Card>
 
@@ -489,12 +489,12 @@ export default function AutoOrder() {
         <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="ao-policy-selector">
           <button type="button" data-testid="ao-use-3-1" aria-pressed={orderPolicy === "AUTO_ORDER_3_1"} disabled={!comparison?.operational_ready || loading} onClick={() => applyPolicy("AUTO_ORDER_3_1")} className={`rounded border px-3 py-2 text-sm font-semibold disabled:opacity-40 ${orderPolicy === "AUTO_ORDER_3_1" ? "border-emerald-700 bg-emerald-50 text-emerald-900" : "border-slate-300"}`}>Usa Auto-Order 3.1</button>
           <button type="button" data-testid="ao-use-2" aria-pressed={orderPolicy === "AUTO_ORDER_2"} disabled={loading} onClick={() => applyPolicy("AUTO_ORDER_2")} className={`rounded border px-3 py-2 text-sm font-semibold ${orderPolicy === "AUTO_ORDER_2" ? "border-slate-900 bg-slate-100" : "border-slate-300"}`}>Fallback 2.0</button>
-          <span className="text-xs font-semibold text-slate-600">Bozza attiva: {orderPolicy === "AUTO_ORDER_3_1" ? "3.1 — conferma validata" : "2.0"}</span>
+          <span className="text-xs font-semibold text-slate-600">Bozza attiva: {orderPolicy === "AUTO_ORDER_3_1" ? "3.1 — validazione al salvataggio" : "2.0"}</span>
         </div>
         {comparison && !comparison.operational_ready && <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" data-testid="ao-policy-blockers">
           <b>3.1 non ancora attivabile per gli ordini reali.</b>
           <ul className="mt-1 list-disc pl-4">{(comparison.operational_blockers || []).map((reason, i) => <li key={i}>{reason}</li>)}</ul>
-          <p className="mt-1">Configura i parametri reali in Parametri; nel frattempo resta disponibile 2.0. Il passaggio a 3.1 non avviene mai silenziosamente durante una bozza già modificata.</p>
+          <p className="mt-1">Risolvi le segnalazioni elencate; nel frattempo resta disponibile 2.0. Il passaggio a 3.1 non avviene mai silenziosamente durante una bozza già modificata.</p>
         </div>}
         {comparisonError && <p className="mt-2 text-sm text-amber-700">{comparisonError}</p>}
         {comparison && <>
@@ -513,7 +513,10 @@ export default function AutoOrder() {
             <div>Costo noto 3.1 <b>{formatEur(comparison.summary.known_purchase_cost)}</b>{comparison.summary.missing_purchase_costs ? ` · ${comparison.summary.missing_purchase_costs} senza costo` : ""}</div>
           </div>
           <p className="mt-2 text-xs text-slate-600">La quantità calcolata è il risultato matematico prima dei controlli e può basarsi su dati da verificare. La quantità ordinabile è quella che il backend può accettare; i motivi di sospensione sono nel dettaglio di ogni articolo.</p>
-          <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. Senza lead time configurato, la data di arrivo del nuovo ordine resta ignota.</p>
+          <p className="mt-2 text-xs text-slate-500">{comparison.native_history_days} giorni tra la prima e l’ultima evidenza nativa nella finestra di 90 giorni. {comparison.delivery_schedule ? "La previsione usa il calendario di consegna del venerdì." : "La data di arrivo del nuovo ordine dipende dal lead time configurato."}</p>
+          {comparison.legacy_vending_reconciliation?.matched_rows > 0 ? <p data-testid="ao-vending-reconciled" className="mt-2 text-xs text-emerald-800">
+            Storico vending verificato: {comparison.legacy_vending_reconciliation.canonical_events} vendite effettive ricostruite dal registro CSV; {comparison.legacy_vending_reconciliation.duplicate_copies} copie di import ripetuti escluse dalla previsione. Giacenze e incassi invariati.
+          </p> : null}
           <div className="mt-3 max-h-80 overflow-y-auto rounded border">
             {comparison.rows.map(row => <details key={row.codice} className="border-b px-3 py-2 text-sm last:border-b-0" data-testid={`ao-comparison-${row.codice}`}>
               <summary className="cursor-pointer"><span className="font-mono">{row.codice}</span> · {row.descrizione} · <b>2.0 {row.quantita_2}</b> / <b>3.1 calcolata {row.quantita_calcolata_3_1 ?? row.quantita_suggerita}</b> / <b>ordinabile {row.quantita_ordinabile_3_1 ?? row.quantita_suggerita}</b> · {row.metodo_previsione}{row.data_rischio_esaurimento ? ` · rischio ${row.data_rischio_esaurimento}` : ""}</summary>
@@ -534,7 +537,7 @@ export default function AutoOrder() {
       <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
         Il magazzino reale è la <b>giacenza negozio fisica</b> registrata nella WebApp. Il fabbisogno complessivo considera separatamente vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
-        Le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
+        Il calcolo interpreta i dati reali: giacenza e carichi completati rappresentano ciò che è arrivato, le vendite rappresentano ciò che è uscito e la domanda recente viene usata per stimare il fabbisogno futuro. Solo le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
         Ogni articolo venduto negli ultimi {lungoGg}gg viene analizzato; senza vendite e con scorta sotto il lotto viene segnalato per controllo manuale. La scorta minima facoltativa si gestisce in Magazzino → Prodotti.
       </div>
 
@@ -584,7 +587,7 @@ export default function AutoOrder() {
                   <td className="font-mono text-right">{formatNum(r.venduto_lungo ?? r.venduto_30gg)}</td>
                   <td className="font-mono text-right">{formatNum(r.domanda_gg, 2)}</td>
                   <td className={`font-mono text-right ${r.copertura_gg !== null && r.copertura_gg < coperturaMin ? 'text-red-600 font-bold' : ''}`} title={`Negozio: ${r.copertura_negozio_gg ?? '∞'} gg · Vending: ${r.copertura_vending_gg ?? '∞'} gg`}>{r.copertura_gg === null ? '∞' : r.copertura_gg}</td>
-                  <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
+                  <td className="font-mono text-right" title={r.quantita_senza_data ? `${r.quantita_senza_data} pezzi ancora non riconciliati come arrivati o senza data futura affidabile` : ""}>{formatNum(r.quantita_in_arrivo || 0)}{r.quantita_senza_data ? " ⚠" : ""}</td>
                   <td className="font-mono text-right">{formatNum(r.target_scorta)}</td>
                   <td className="font-mono text-right">{r.lotto_ordine}</td>
                   <td className="text-right">
