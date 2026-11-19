@@ -93,3 +93,45 @@ test("un errore non lascia visibile un precedente risultato pulito", async () =>
   expect(container.textContent).not.toContain("Nessuna discrepanza rilevata");
   expect(container.querySelector("button").disabled).toBe(false);
 });
+
+
+test("avverte che nessun movimento nativo non significa saldo cassa certificato", async () => {
+  api.get.mockResolvedValue({ data: {
+    ...report,
+    copertura_finanziaria: {
+      stato: "movimenti_nativi_assenti",
+      movimenti_cassa_esaminati: 0,
+      batch_cassa_rapida_esaminati: 0,
+      confronto_batch_pos_eseguito: true,
+      baseline_cassa_fisica_verificata: false,
+      saldo_cassa_certificato: false,
+      avviso: "Nessun movimento della cassa nativa nel periodo esaminato: non è possibile certificare alcun saldo cassa.",
+    },
+  } });
+  await act(async () => root.render(<ReconciliationPanel />));
+  await act(async () => container.querySelector("button").click());
+  const coverage = container.querySelector('[data-testid="financial-coverage"]');
+  expect(coverage).not.toBeNull();
+  expect(coverage.textContent).toContain("Saldo di cassa non certificato");
+  expect(coverage.textContent).toContain("Movimenti cassa esaminati: 0");
+  expect(coverage.textContent).toContain("Batch Cassa Rapida esaminati: 0");
+  expect(container.textContent).toContain("Nessuna discrepanza rilevata nei controlli eseguiti");
+});
+
+test("il filtro date segnala che il confronto globale batch non è stato eseguito", async () => {
+  api.get.mockResolvedValue({ data: {
+    ...report,
+    copertura_finanziaria: {
+      stato: "solo_verifiche_documentali",
+      movimenti_cassa_esaminati: 1,
+      batch_cassa_rapida_esaminati: null,
+      confronto_batch_pos_eseguito: false,
+      saldo_cassa_certificato: false,
+      avviso: "Movimenti cassa sottoposti ai soli controlli documentali.",
+    },
+  } });
+  await act(async () => root.render(<ReconciliationPanel />));
+  await act(async () => container.querySelector("button").click());
+  expect(container.querySelector('[data-testid="financial-coverage"]').textContent)
+    .toContain("Confronto batch POS non eseguito nell’intervallo filtrato");
+});

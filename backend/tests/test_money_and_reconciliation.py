@@ -648,3 +648,48 @@ def test_bulk_missing_batch_is_distinguished_from_unmatched_batch_and_keeps_case
         assert not any(key.startswith("BULK_") for key in filtered["conteggi"])
 
     asyncio.run(scenario())
+
+
+def test_reconciliation_cash_coverage_does_not_invent_opening_balance(database):
+    """No native cash records is a coverage gap, not proof the cash drawer is zero."""
+    async def scenario():
+        source_before = await database.cassa.find({}).to_list(None)
+        result = await server.accounting_reconciliation()
+        coverage = result["copertura_finanziaria"]
+        assert coverage["stato"] == "movimenti_nativi_assenti"
+        assert coverage["movimenti_cassa_esaminati"] == 0
+        assert coverage["batch_cassa_rapida_esaminati"] == 0
+        assert coverage["confronto_batch_pos_eseguito"] is True
+        assert coverage["baseline_cassa_fisica_verificata"] is False
+        assert coverage["saldo_cassa_certificato"] is False
+        assert "non è possibile certificare" in coverage["avviso"]
+        assert await database.cassa.find({}).to_list(None) == source_before
+        assert await database.cassa_rapida_batches.count_documents({}) == 0
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_cash_coverage_remains_partial_with_valid_cash_movements(database):
+    async def scenario():
+        await database.cassa.insert_one({
+            "id": "CASH-ONLY", "data": "2026-11-19",
+            "tipo": "ENTRATA", "importo": 10,
+        })
+        before = await database.cassa.find({}).to_list(None)
+        whole = await server.accounting_reconciliation()
+        coverage = whole["copertura_finanziaria"]
+        assert coverage["stato"] == "solo_verifiche_documentali"
+        assert coverage["movimenti_cassa_esaminati"] == 1
+        assert coverage["saldo_cassa_certificato"] is False
+        assert coverage["baseline_cassa_fisica_verificata"] is False
+        assert coverage["confronto_batch_pos_eseguito"] is True
+        partial = await server.accounting_reconciliation(
+            date_from="2026-11-19", date_to="2026-11-19",
+        )
+        assert partial["copertura_finanziaria"]["movimenti_cassa_esaminati"] == 1
+        assert partial["copertura_finanziaria"]["batch_cassa_rapida_esaminati"] is None
+        assert partial["copertura_finanziaria"]["confronto_batch_pos_eseguito"] is False
+        assert "filtri data" in partial["copertura_finanziaria"]["avviso"]
+        assert await database.cassa.find({}).to_list(None) == before
+
+    asyncio.run(scenario())
