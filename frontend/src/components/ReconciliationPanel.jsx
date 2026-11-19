@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, apiErrorMessage } from "../lib/api";
 import { Card } from "./UI";
+import CashCountEvidence from "./CashCountEvidence";
 
 const STATE_OPTIONS = [
   ["aperta", "Aperta"],
@@ -164,6 +165,7 @@ export default function ReconciliationPanel() {
           </ul>
         </details>
       </div>}
+      <CashCountEvidence />
     </Card>
   );
 }
