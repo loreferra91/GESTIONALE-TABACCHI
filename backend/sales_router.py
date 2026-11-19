@@ -864,6 +864,7 @@ def create_sales_router(
                             "status": "annulled",
                             "annulled_at": datetime.now(timezone.utc).isoformat(),
                             "rimossi": len(completed),
+                            "undo_audit_version": 1,
                         }
                     },
                     **kwargs,
