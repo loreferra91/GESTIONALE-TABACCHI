@@ -38,6 +38,7 @@ if __package__:
         EXCEL_IMPORT_BACKUP_COLLECTIONS, OPTIONAL_BACKUP_COLLECTIONS,
         create_backup_router,
     )
+    from .cash_count_evidence_router import create_cash_count_evidence_router
     from .cash_movements_router import (
         MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
         ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
@@ -131,6 +132,7 @@ else:
         EXCEL_IMPORT_BACKUP_COLLECTIONS, OPTIONAL_BACKUP_COLLECTIONS,
         create_backup_router,
     )
+    from cash_count_evidence_router import create_cash_count_evidence_router
     from cash_movements_router import (
         MovimentoCassa, MovimentoIn, PrelievoVending, PrelievoVendingIn,
         ScontrinoVending, ScontrinoVendingIn, VENDING_CASH_STATE_ID,
@@ -1696,6 +1698,13 @@ confirm_smart_venue_difference = smart_venue["confirm_smart_venue_difference"]
 confirm_smart_venue_entry = smart_venue["confirm_smart_venue_entry"]
 smart_venue_reconciliation_diagnostic = smart_venue["smart_venue_reconciliation_diagnostic"]
 delete_smart_venue_row = smart_venue["delete_smart_venue_row"]
+cash_count_evidence_router = create_cash_count_evidence_router(
+    get_database=lambda: db,
+    run_transactionally=lambda operation: _run_transactionally(operation),
+    request_operator=_request_operator,
+    enabled=_environment() == "staging",
+)
+api.include_router(cash_count_evidence_router)
 api.include_router(reconciliation_router)
 api.include_router(audit_router)
 api.include_router(backup_router)
