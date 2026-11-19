@@ -78,6 +78,7 @@ if __package__:
     )
     from .inventory_analytics_router import create_inventory_analytics_router
     from .index_migrations import migrate_unique_business_indexes
+    from .staging_readonly_startup import verify_readonly_staging_startup
     from .money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
     from .orders_router import (
@@ -169,6 +170,7 @@ else:
     )
     from inventory_analytics_router import create_inventory_analytics_router
     from index_migrations import migrate_unique_business_indexes
+    from staging_readonly_startup import verify_readonly_staging_startup
     from money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
     from orders_router import (
@@ -220,6 +222,16 @@ def _is_local_environment() -> bool:
 
 def _is_production() -> bool:
     return _environment() in {"production", "prod"}
+
+
+def _staging_startup_mode() -> str:
+    """Select an isolated, reversible startup mode; production ignores the flag."""
+    if _environment() != "staging":
+        return "legacy"
+    mode = str(os.environ.get("STAGING_STARTUP_MODE") or "legacy").strip().lower()
+    if mode not in {"legacy", "read_only"}:
+        raise RuntimeError("STAGING_STARTUP_MODE non valido: usare legacy o read_only")
+    return mode
 
 
 def _requires_secure_runtime() -> bool:
@@ -301,7 +313,11 @@ async def lifespan(_app: FastAPI):
             should_initialize = False
             logging.error("Staging restore requires recovery: startup migrations intentionally skipped")
     if should_initialize:
-        await on_start()
+        if _staging_startup_mode() == "read_only":
+            readiness = await verify_readonly_staging_startup(db, DEFAULT_PARAMS)
+            logging.info("Staging read-only startup preflight passed: %s", readiness)
+        else:
+            await on_start()
     try:
         yield
     finally:
@@ -699,8 +715,10 @@ async def on_start():
                 smart_venue_repair["pezzi_ripristinati"],
             )
     except Exception as e:
-        logging.exception("seed failed: %s", e)
-        if _is_production():
+        logging.exception("startup initialization failed: %s", type(e).__name__)
+        # Staging must not serve traffic after a partially failed migration.
+        # Production already failed closed; local test/dev behavior is preserved.
+        if _requires_secure_runtime():
             raise
 
 
