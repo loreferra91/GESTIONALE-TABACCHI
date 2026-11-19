@@ -608,8 +608,13 @@ def create_sales_router(
         for index, row in enumerate(body.righe):
             try:
                 codice = product_code_text(row.get("codice"))
-                quantity = int(row.get("quantita") or 0)
-                if not codice or quantity <= 0:
+                raw_quantity = row.get("quantita")
+                if isinstance(raw_quantity, bool) or not re.fullmatch(
+                    r"[0-9]+(?:[.,]0+)?", str(raw_quantity or "").strip()
+                ):
+                    raise ValueError("quantità intera positiva richiesta")
+                quantity = int(Decimal(str(raw_quantity).strip().replace(",", ".")))
+                if quantity > 9007199254740991 or not codice or quantity <= 0:
                     raise ValueError("prodotto o quantità non validi")
                 product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
                 if not product:
@@ -653,6 +658,8 @@ def create_sales_router(
         def replay(existing):
             if existing.get("request_fingerprint") != fingerprint:
                 raise HTTPException(409, "Chiave idempotente già usata con dati differenti")
+            if existing.get("status") != "active":
+                raise HTTPException(409, "Vendita Cassa Rapida già annullata o in elaborazione")
             return existing
 
         if key:
@@ -740,16 +747,13 @@ def create_sales_router(
             raise
 
     @router.post("/vendite/cassa-rapida/{batch_id}/annulla")
-    async def annulla_vendita_cassa_rapida(batch_id: str):
+    async def annulla_vendita_cassa_rapida(batch_id: str, request: Request = None):
         db = get_database()
-        batch = await db.cassa_rapida_batches.find_one(
-            {"id": batch_id, "status": "active"}, {"_id": 0}
-        )
-        if not batch:
-            raise HTTPException(404, "Vendita di Cassa Rapida non trovata o già annullata")
 
         async def operation(session):
             kwargs = session_kwargs(session)
+            # Claim, inventory, sales, cash, audit and status must commit together.
+            # A failed preflight must not alter inventory, even with missing rows.
             current = await db.cassa_rapida_batches.find_one_and_update(
                 {"id": batch_id, "status": "active"},
                 {"$set": {"status": "annulling"}},
@@ -757,52 +761,160 @@ def create_sales_router(
                 **kwargs,
             )
             if not current:
-                raise HTTPException(409, "La vendita è già in fase di annullo")
-            sales = await db.vendite.find(
-                {"batch_id": batch_id, "sorgente": "POS"}, {"_id": 0}, **kwargs
-            ).to_list(None)
-            cash_entry = await db.cassa.find_one(
-                {"id": current.get("movimento_cassa_id")}, {"_id": 0}, **kwargs
-            )
+                raise HTTPException(404, "Vendita Cassa Rapida non trovata o già annullata")
+
             restored = []
+            sales_deleted = False
+            cash_deleted = False
+            audit_written = False
+            event_id = str(uuid.uuid4())
+            sales = []
+            cash_entry = None
             try:
+                sales = await db.vendite.find(
+                    {"batch_id": batch_id, "sorgente": "POS"}, {"_id": 0}, **kwargs
+                ).to_list(None)
+                cash_entry = await db.cassa.find_one(
+                    {"id": current.get("movimento_cassa_id")}, {"_id": 0}, **kwargs
+                )
+                # These are native POS documents, not reconstructed Excel
+                # history. Missing records block cancellation; never invent
+                # a balancing entry to make stock or cash match.
+                quantities = {}
+                pieces = 0
+                sales_total = Decimal(0)
+                if not sales or cash_entry is None:
+                    raise HTTPException(409, "Cassa Rapida incoerente: vendite o movimento cassa assenti")
                 for sale in sales:
-                    quantity = int(sale.get("quantita") or 0)
-                    await db.prodotti.update_one(
-                        {"codice": sale.get("codice")},
-                        {"$inc": {"giacenza_negozio": quantity, "venduti_negozio": -quantity}},
+                    raw_quantity = sale.get("quantita")
+                    if (isinstance(raw_quantity, bool) or not re.fullmatch(
+                        r"[0-9]+(?:[.,]0+)?", str(raw_quantity or "")
+                    )):
+                        raise HTTPException(409, "Quantità POS storica non valida")
+                    quantity = int(Decimal(str(raw_quantity).replace(",", ".")))
+                    code = product_code_text(sale.get("codice"))
+                    if quantity <= 0 or not code:
+                        raise HTTPException(409, "Vendita POS con prodotto o quantità invalidi")
+                    quantities[code] = quantities.get(code, 0) + quantity
+                    pieces += quantity
+                    sales_total += decimal_money(sale.get("importo"), nonnegative=True)
+
+                try:
+                    expected_pieces = int(current["pezzi"])
+                    expected_total = decimal_money(current["totale"], nonnegative=True)
+                    cash_total = decimal_money(cash_entry.get("importo"), nonnegative=True)
+                except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                    raise HTTPException(409, "Metadati POS o movimento cassa non validi") from exc
+                expected_payment = str(current.get("pagamento") or "").strip().upper()
+                cash_payment = str(cash_entry.get("pagamento") or "").strip().upper()
+                if (
+                    expected_pieces <= 0
+                    or pieces != expected_pieces
+                    or sales_total != expected_total
+                    or cash_total != expected_total
+                    or cash_entry.get("batch_id") != batch_id
+                    or cash_entry.get("tipo") != "ENTRATA"
+                    or not expected_payment
+                    or expected_payment != cash_payment
+                    or any(str(sale.get("pagamento") or "").strip().upper()
+                           != expected_payment for sale in sales)
+                ):
+                    raise HTTPException(
+                        409, "Cassa Rapida incoerente: pezzi, importi o pagamento non coincidono"
+                    )
+
+                for code, quantity in quantities.items():
+                    update = await db.prodotti.update_one(
+                        {"codice": code, "venduti_negozio": {"$gte": quantity}},
+                        {"$inc": {
+                            "giacenza_negozio": quantity,
+                            "venduti_negozio": -quantity,
+                        }},
                         **kwargs,
                     )
-                    restored.append(sale)
-                await db.vendite.delete_many(
+                    if update.modified_count != 1:
+                        raise HTTPException(
+                            409, f"Contatore venduti insufficiente per {code}: annullamento bloccato"
+                        )
+                    restored.append((code, quantity))
+
+                deleted = await db.vendite.delete_many(
                     {"batch_id": batch_id, "sorgente": "POS"}, **kwargs
                 )
-                await db.cassa.delete_one(
-                    {"id": current.get("movimento_cassa_id")}, **kwargs
-                )
-                await db.cassa_rapida_batches.update_one(
-                    {"id": batch_id, "status": "annulling"},
-                    {"$set": {"status": "annullata", "annullata_at": datetime.now(timezone.utc).isoformat()}},
+                sales_deleted = deleted.deleted_count > 0
+                if deleted.deleted_count != len(sales):
+                    raise HTTPException(409, "Le vendite sono cambiate durante l'annullamento")
+
+                deleted_cash = await db.cassa.delete_one(
+                    {"id": current.get("movimento_cassa_id"), "batch_id": batch_id},
                     **kwargs,
                 )
+                cash_deleted = deleted_cash.deleted_count > 0
+                if deleted_cash.deleted_count != 1:
+                    raise HTTPException(409, "Il movimento cassa è cambiato durante l'annullamento")
+
+                await db.audit_events.insert_one(
+                    {
+                        "id": event_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "azione": "annulla-vendita-cassa-rapida",
+                        "entita": "CASSA_RAPIDA",
+                        "entita_id": batch_id,
+                        "operatore": request_operator(request),
+                        "idempotency_key": current.get("idempotency_key"),
+                        "batch_id": batch_id,
+                        "prima": {
+                            "batch": {k: v for k, v in current.items() if k != "_id"},
+                            "vendite": sales,
+                            "movimento_cassa": cash_entry,
+                        },
+                        "dopo": None,
+                    },
+                    **kwargs,
+                )
+                audit_written = True
+
+                status_update = await db.cassa_rapida_batches.update_one(
+                    {"id": batch_id, "status": "annulling"},
+                    {"$set": {
+                        "status": "annullata",
+                        "annullata_at": datetime.now(timezone.utc).isoformat(),
+                        "undo_audit_version": 1,
+                        "righe_annullate": len(sales),
+                    }},
+                    **kwargs,
+                )
+                if status_update.modified_count != 1:
+                    raise HTTPException(409, "Lo stato del batch è cambiato durante l'annullamento")
+
+                return {"ok": True, "batch_id": batch_id, "righe_annullate": len(sales)}
             except Exception:
+                # Production and staging require a real transaction. This is
+                # best-effort compensation for the isolated mock/local path.
                 if session is None:
-                    for sale in restored:
-                        quantity = int(sale.get("quantita") or 0)
+                    if audit_written:
+                        await db.audit_events.delete_one({"id": event_id})
+                    if cash_deleted and cash_entry and not await db.cassa.find_one(
+                        {"id": cash_entry.get("id")}
+                    ):
+                        await db.cassa.insert_one(dict(cash_entry))
+                    if sales_deleted:
+                        for sale in sales:
+                            if not await db.vendite.find_one({"id": sale.get("id")}):
+                                await db.vendite.insert_one(dict(sale))
+                    for code, quantity in reversed(restored):
                         await db.prodotti.update_one(
-                            {"codice": sale.get("codice")},
-                            {"$inc": {"giacenza_negozio": -quantity, "venduti_negozio": quantity}},
+                            {"codice": code},
+                            {"$inc": {
+                                "giacenza_negozio": -quantity,
+                                "venduti_negozio": quantity,
+                            }},
                         )
-                    for sale in sales:
-                        if not await db.vendite.find_one({"id": sale.get("id")}):
-                            await db.vendite.insert_one(sale)
-                    if cash_entry and not await db.cassa.find_one({"id": cash_entry.get("id")}):
-                        await db.cassa.insert_one(cash_entry)
                     await db.cassa_rapida_batches.update_one(
-                        {"id": batch_id, "status": "annulling"}, {"$set": {"status": "active"}}
+                        {"id": batch_id, "status": "annulling"},
+                        {"$set": {"status": "active"}},
                     )
                 raise
-            return {"ok": True, "batch_id": batch_id, "righe_annullate": len(sales)}
 
         return await run_transactionally(operation)
 
