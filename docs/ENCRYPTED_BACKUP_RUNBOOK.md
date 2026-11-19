@@ -108,8 +108,14 @@ Non eseguire questo esempio verso produzione. Nessun restore produttivo
   procedura coordinata, testarla e approvarne costi e retention.
 - La cancellazione automatica dei vecchi backup non è stata attivata;
   la retention va progettata in modo da non perdere l'ultima copia sana.
-- I test automatizzati usano un flusso di **byte sintetici**: non dimostrano
-  che un archivio MongoDB sia ripristinabile.
+- I test unitari usano anche un flusso di **byte sintetici**.
+  La pipeline `.github/workflows/staging-encrypted-backup-real-restore.yml`
+  esercita invece un vero `mongodump` cifrato GPG e un `mongorestore`
+  su un MongoDB replica set usa-e-getta. Verifica 5 collezioni, dati e indici
+  con **7 documenti sintetici**, senza credenziali Atlas.
+- Questa certificazione prova il percorso tecnico, **non** un recupero
+  completo dei dati operativi, una procedura PITR, un RPO/RTO approvato
+  o la persistenza esterna dei backup reali. Non attiva job periodici.
 
 ## Riferimenti documentali
 
