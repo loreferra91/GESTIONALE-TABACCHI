@@ -71,8 +71,15 @@ imports/operations before deciding whether any correction is warranted.
   operational fixture.
 - No operator-role authorization or individual operator migration.
 - No independent off-cluster scheduled backup with an approved RPO/RTO.
-- No proof of restricted Atlas database-user privileges (host and database
-  isolation were observed; privilege grants require separate inspection).
+- **SECURITY BLOCKER CONFIRMED:** the only MongoDB Atlas database user
+  in project `Gestionale Staging` currently has `readWriteAnyDatabase`
+  on `admin`, broader than required for `gestionale_staging`.
+  The project/cluster is separate from the production project; this
+  finding does not prove access to the production cluster.
+  Restrict runtime credentials to the staging database and separately
+  provision a read-only diagnostics user after validating the permission
+  changes without outage. Do not change roles blindly while Render
+  is using the account.
 - No proof that credentials previously shown in a screenshot were rotated.
 - No full restore of a sanitized 25k+ document archive into an isolated
   clone after the encrypted archive verification.
@@ -90,8 +97,10 @@ pathway must remain staging-only.
 Next gates:
 1. Inspect the 148 old BULK sales and establish provenance without
    modifying them.
-2. Verify staging-only Atlas user permissions; rotate known-exposed
-   credentials and verify access after rotation.
+2. **P0:** replace the broad `readWriteAnyDatabase` staging account with
+   a least-privilege `readWrite` account scoped only to
+   `gestionale_staging`. Coordinate credential rotation (known screenshot
+   exposure) and verify application startup/backup procedures afterward.
 3. Split any production-bound changes into minimal PRs with independent
    tests, migrations, rollback and backup evidence.
 4. Certify application-level retry/unknown-commit cases and stale stock
