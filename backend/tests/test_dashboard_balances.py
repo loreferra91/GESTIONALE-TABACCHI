@@ -16,6 +16,10 @@ class FakeCursor:
     async def to_list(self, _length):
         return self.documents
 
+    async def __aiter__(self):
+        for document in self.documents:
+            yield document
+
 
 class FakeCollection:
     def __init__(self, documents):
@@ -718,3 +722,42 @@ def test_sales_period_report_ignores_legacy_history_and_import_cutoff(monkeypatc
 
     assert result["totale"] == 104
     assert [product["codice"] for product in result["prodotti"]] == ["A1", "B2"]
+
+
+def test_report_streaming_ignores_invalid_future_amount_and_legacy_date(monkeypatch):
+    class StreamingCursor(FakeCursor):
+        async def to_list(self, _length):
+            raise AssertionError("Unbounded to_list must not be used")
+
+    class StreamingCollection:
+        def __init__(self, documents):
+            self.documents = documents
+
+        def find(self, *_args):
+            return StreamingCursor(self.documents)
+
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(vendite=StreamingCollection([
+            {"data": "2026-11-19", "codice": "P", "quantita": 2, "importo": 10},
+            {"data": "18/11/2026", "codice": "Q", "quantita": 1, "importo": 5},
+            {"data": "2099-01-01", "codice": "P", "quantita": 1, "importo": "invalid"},
+            {"data": "2025-01-01", "codice": "OLD", "quantita": 999, "importo": 999},
+        ])),
+    )
+    result = asyncio.run(server._sales_period_report(7))
+    assert result["data_a"] == "2026-11-19"
+    assert result["totale"] == 15
+    assert result["pezzi"] == 3
+    assert result["totale_precedente"] == 0
+    assert result["giorni_con_vendite"] == 2
+
+
+def test_rome_business_day_handles_midnight_and_dst_boundaries():
+    from datetime import datetime, timezone
+    from backend.dashboard_router import rome_business_day
+
+    assert rome_business_day(datetime(2026, 11, 19, 23, 30, tzinfo=timezone.utc)) == "2026-11-20"
+    assert rome_business_day(datetime(2026, 3, 28, 23, 30, tzinfo=timezone.utc)) == "2026-03-29"
+    assert rome_business_day(datetime(2026, 10, 24, 22, 30, tzinfo=timezone.utc)) == "2026-10-25"

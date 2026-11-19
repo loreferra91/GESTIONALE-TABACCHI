@@ -340,3 +340,68 @@ def test_bulk_failed_write_releases_claim_and_restores_stock(monkeypatch):
         await server.bulk_vendite(body)
         assert (await database.prodotti.find_one({'codice': 'P1'}))['giacenza_negozio'] == 8
     asyncio.run(scenario())
+
+
+def test_bulk_undo_writes_audit_and_cannot_restore_twice(monkeypatch):
+    database = AsyncMongoMockClient()["bulk_audited_undo_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "giacenza_negozio": 7, "venduti_negozio": 0,
+        })
+        imported = await server.bulk_vendite(server.BulkVenditaIn(
+            idempotency_key="audited-bulk-undo-001",
+            righe=[{"codice": "P1", "quantita": 3, "importo": 15}],
+        ))
+        results = await asyncio.gather(
+            server.annulla_bulk_vendite(imported["batch_id"]),
+            server.annulla_bulk_vendite(imported["batch_id"]),
+            return_exceptions=True,
+        )
+        successful = [result for result in results if isinstance(result, dict)]
+        rejected = [result for result in results if isinstance(result, HTTPException)]
+        assert len(successful) == 1 and successful[0]["rimossi"] == 1
+        assert len(rejected) == 1 and rejected[0].status_code == 404
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 7
+        assert product["venduti_negozio"] == 0
+        assert await database.vendite.count_documents({}) == 0
+        events = await database.audit_events.find(
+            {"azione": "annulla-vendita-bulk", "batch_id": imported["batch_id"]},
+            {"_id": 0},
+        ).to_list(None)
+        assert len(events) == 1
+        assert events[0]["prima"]["quantita"] == 3
+        assert events[0]["entita_id"] == events[0]["prima"]["id"]
+        batch = await database.vendite_bulk_imports.find_one({"id": imported["batch_id"]})
+        assert batch["status"] == "annulled"
+    asyncio.run(scenario())
+
+
+def test_bulk_undo_blocks_incoherent_counter_without_partial_restore(monkeypatch):
+    database = AsyncMongoMockClient()["bulk_undo_inconsistent_counter_test"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "giacenza_negozio": 7, "venduti_negozio": 0,
+        })
+        imported = await server.bulk_vendite(server.BulkVenditaIn(
+            idempotency_key="inconsistent-bulk-undo-001",
+            righe=[{"codice": "P1", "quantita": 3, "importo": 15}],
+        ))
+        await database.prodotti.update_one(
+            {"codice": "P1"}, {"$set": {"venduti_negozio": 0}}
+        )
+        with pytest.raises(HTTPException) as err:
+            await server.annulla_bulk_vendite(imported["batch_id"])
+        assert err.value.status_code == 500
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 4
+        assert product["venduti_negozio"] == 0
+        assert await database.vendite.count_documents({}) == 1
+        assert await database.audit_events.count_documents({}) == 0
+        batch = await database.vendite_bulk_imports.find_one({"id": imported["batch_id"]})
+        assert batch["status"] == "active"
+    asyncio.run(scenario())

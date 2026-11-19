@@ -42,3 +42,9 @@ test.each([['2.0', 2], ['2,0', 2], ['1.5', ''], ['1,5', ''], ['-1', ''], ['2x', 
 test('conserva le righe incomplete per bloccare import parziali', () => {
   expect(parseBulkSales('P1;Prodotto', '2026-11-19').rows[0].quantita).toBe('');
 });
+
+test('il formato verticale conserva le virgole decimali senza scambiare le colonne', () => {
+  const result = parseBulkSales('P1\nProdotto\n2,0\n6,40', '2026-11-19');
+  expect(result.rows).toHaveLength(1);
+  expect(result.rows[0]).toMatchObject({ codice: 'P1', quantita: 2, importo: 6.4 });
+});

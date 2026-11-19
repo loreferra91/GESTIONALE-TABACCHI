@@ -5,6 +5,7 @@ import { Card, Badge, formatEur, formatNum } from "../components/UI";
 import { toast } from "sonner";
 import { ArrowCounterClockwise, ArrowClockwise, Trash } from "@phosphor-icons/react";
 import { parseBulkQuantity, parseBulkSales } from "../lib/bulkSales";
+import { clearPendingBulkRequest, getOrCreateBulkRequest, hasPendingBulkRequest } from "../lib/bulkIdempotency";
 
 function UndoLastPanel({ testId, title, createdAt, description, buttonLabel, busy, disabled, onUndo }) {
   return (
@@ -180,6 +181,9 @@ export default function Vendite() {
     if (bulkRows.some(r => !r.codice.trim() || !Number.isSafeInteger(r.quantita) || r.quantita <= 0)) {
       return toast.error("Correggi le righe incomplete o le quantità: sono ammessi solo interi positivi");
     }
+    if (rowsWithStatus.some(r => ["stock insufficiente", "data non valida"].includes(r._stato))) {
+      return toast.error("Caricamento bloccato: correggi le date o la giacenza insufficiente");
+    }
     const righe = bulkRows;
     if (!righe.length) {
       if (bulkExcludedRows.length) {
@@ -192,12 +196,10 @@ export default function Vendite() {
     setBulkImporting(true);
     try {
       const payload = { canale: bulkCanale, pagamento: bulkPagamento, righe: righe.map(x => ({ data: x.data, codice: x.codice, descrizione: x.descrizione, quantita: x.quantita, importo: x.importo })) };
-      const fingerprint = JSON.stringify(payload);
-      if (bulkRequest.current?.fingerprint !== fingerprint) {
-        bulkRequest.current = { fingerprint, key: crypto.randomUUID() };
-      }
+      bulkRequest.current = getOrCreateBulkRequest(payload, bulkRequest.current);
       const r = await api.post("/vendite/bulk", { ...payload, idempotency_key: bulkRequest.current.key });
       bulkRequest.current = null;
+      clearPendingBulkRequest();
       setBulkResult(r.data);
       if (r.data.batch_id) setLastBulkImport({ id: r.data.batch_id, ...r.data, status: "active" });
       setBulkText("");
@@ -238,13 +240,42 @@ export default function Vendite() {
     setBulkExcludedRows(parsed.excludedRows);
   }, [bulkText, bulkData]);
 
-  // Deriva stato in tempo reale
+  // Aggregate quantities across all rows for the same product before
+  // calculating the inventory forecast shown to the operator.
+  const bulkRequiredByCode = useMemo(() => {
+    const required = new Map();
+    for (const row of bulkRows) {
+      const code = String(row.codice || "").trim();
+      if (!code || !Number.isSafeInteger(row.quantita) || row.quantita <= 0) continue;
+      required.set(code, (required.get(code) || 0) + row.quantita);
+    }
+    return required;
+  }, [bulkRows]);
+
+  // Informational snapshot: the backend remains authoritative at commit time.
   const rowsWithStatus = useMemo(() => bulkRows.map(r => {
-    const trimmed = (r.codice || "").trim();
-    const known = trimmed && prodMap.has(trimmed);
-    const stato = !trimmed ? "vuoto" : !known ? "sconosciuto" : (r.quantita <= 0 ? "qta zero" : (r.importo <= 0 ? "importo zero" : "ok"));
-    return { ...r, _known: known, _stato: stato };
-  }), [bulkRows, prodMap]);
+    const code = String(r.codice || "").trim();
+    const product = prodMap.get(code);
+    const rawStock = product?.giacenza_negozio;
+    const available = rawStock != null && Number.isFinite(Number(rawStock))
+      ? Number(rawStock) : null;
+    const requested = bulkRequiredByCode.get(code) || 0;
+    const projected = available == null ? null : available - requested;
+    const validQuantity = Number.isSafeInteger(r.quantita) && r.quantita > 0 &&
+      Number.isSafeInteger(requested);
+    const validDate = /^\d{4}-\d{2}-\d{2}$/.test(String(r.data || "")) &&
+      !Number.isNaN(Date.parse(r.data)) &&
+      new Date(`${r.data}T12:00:00Z`).toISOString().slice(0, 10) === r.data;
+    const stato = !code ? "vuoto"
+      : !product ? "sconosciuto"
+      : !validQuantity ? "qta non valida"
+      : !validDate ? "data non valida"
+      : projected != null && projected < 0 ? "stock insufficiente"
+      : r.importo <= 0 ? "importo zero"
+      : "ok";
+    return { ...r, _known: Boolean(product), _stato: stato,
+      _stock: available, _stockProjected: projected, _requested: requested };
+  }), [bulkRows, bulkRequiredByCode, prodMap]);
   const bulkTotals = useMemo(() => rowsWithStatus.reduce((acc, row) => {
     if (row.quantita > 0) acc.pezzi += row.quantita;
     if (row.importo > 0) acc.importo += row.importo;
@@ -258,6 +289,11 @@ export default function Vendite() {
     setBulkRows(rs => rs.filter((_, idx) => idx !== i));
   };
   const clearBulk = () => {
+    if (bulkRequest.current || hasPendingBulkRequest()) {
+      if (!window.confirm("Esiste un caricamento BULK con esito incerto. Prima di abbandonarlo verifica l'ultimo batch: un nuovo invio potrebbe scaricare nuovamente i pezzi. Confermi di creare una nuova operazione?")) return;
+      bulkRequest.current = null;
+      clearPendingBulkRequest();
+    }
     setBulkRows([]);
     setBulkExcludedRows([]);
     setBulkText("");
@@ -496,19 +532,19 @@ export default function Vendite() {
                 <div className="flex gap-2 text-xs">
                   <Badge tone="ok">OK {rowsWithStatus.filter(r => r._stato === "ok").length}</Badge>
                   <Badge tone="error">Sconosciuto {rowsWithStatus.filter(r => r._stato === "sconosciuto").length}</Badge>
-                  <Badge tone="warning">Errori {rowsWithStatus.filter(r => ["qta zero", "importo zero", "vuoto"].includes(r._stato)).length}</Badge>
+                  <Badge tone="warning">Errori {rowsWithStatus.filter(r => !["ok", "sconosciuto"].includes(r._stato)).length}</Badge>
                 </div>
                 <button data-testid="bulk-clear-all" onClick={clearBulk} className="text-red-600 hover:text-red-800 flex items-center gap-1 text-xs font-bold uppercase tracking-wider">
                   <Trash size={14} /> Svuota tutto
                 </button>
               </div>
             </div>
-            <div className="border border-slate-200 rounded-md overflow-hidden max-h-[500px] overflow-y-auto">
-              <table className="data-table w-full">
+            <div className="border border-slate-200 rounded-md overflow-auto max-h-[500px]">
+              <table className="data-table w-full min-w-[1000px]">
                 <thead>
                   <tr>
                     <th>#</th><th>Data</th><th>Codice</th><th className="wrap">Descrizione</th>
-                    <th className="text-right">Qtà</th><th className="text-right">Importo</th><th>Stato</th><th></th>
+                    <th className="text-right">Qtà</th><th className="text-right">Scorta</th><th className="text-right">Prevista</th><th className="text-right">Importo</th><th>Stato</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -534,6 +570,10 @@ export default function Vendite() {
                         <td className="text-right">
                           <input data-testid={`bulk-row-${i}-quantita`} type="number" min={0} value={r.quantita} onChange={e => updateBulkRow(i, "quantita", parseBulkQuantity(e.target.value))} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-16 text-right bg-white" />
                         </td>
+                        <td className="text-right tabular-nums">{r._stock == null ? "—" : formatNum(r._stock)}</td>
+                        <td data-testid={`bulk-row-${i}-projected`} className={`text-right tabular-nums font-semibold ${r._stockProjected != null && r._stockProjected < 0 ? "text-red-700" : ""}`}>
+                          {r._stockProjected == null ? "—" : formatNum(r._stockProjected)}
+                        </td>
                         <td className="text-right">
                           <input data-testid={`bulk-row-${i}-importo`} type="number" step="0.01" min={0} value={r.importo} onChange={e => updateBulkRow(i, "importo", parseFloat(e.target.value) || 0)} className="border border-slate-200 rounded-md px-2 py-1 text-sm font-mono w-20 text-right bg-white" />
                         </td>
@@ -550,7 +590,7 @@ export default function Vendite() {
               </table>
             </div>
             <p className="text-xs text-slate-500 mt-2">
-              Puoi <b>modificare il codice</b> di una riga rossa e la validazione si aggiorna in tempo reale. Elimina singole righe con il cestino o svuota tutto in un click.
+              La giacenza prevista somma tutte le righe dello stesso codice: è una stima basata sulla scorta caricata nella pagina. Il backend ricontrolla lo stock al momento della registrazione. Puoi modificare un codice, eliminare singole righe o svuotare tutto.
             </p>
           </div>
         )}
