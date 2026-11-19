@@ -256,3 +256,31 @@ def test_pos_failed_undo_does_not_modify_stock_on_real_mongo(monkeypatch):
         assert product["venduti_negozio"] == 3
 
     asyncio.run(_with_db(monkeypatch, scenario))
+
+
+def test_real_mongo_cash_deletions_are_audited_once_and_pos_cash_is_locked(monkeypatch):
+    async def scenario(db):
+        manual = await server.add_cassa(server.MovimentoIn(
+            data="2026-11-19", tipo="ENTRATA", importo=12.30,
+            pagamento="CONTANTI", idempotency_key="cert-real-cash-delete-001",
+        ))
+        assert (await server.del_cassa(manual["id"]))["ok"] is True
+        assert (await server.del_cassa(manual["id"]))["ok"] is True
+        assert await db.cassa.count_documents({"id": manual["id"]}) == 0
+        assert await db.audit_events.count_documents({
+            "azione": "ELIMINATO", "entita": "MOVIMENTO_CASSA",
+            "entita_id": manual["id"],
+        }) == 1
+
+        batch = await server.vendita_cassa_rapida(server.CassaRapidaIn(
+            data="2026-11-19T13:00:00Z", pagamento="POS",
+            idempotency_key="cert-real-pos-cash-delete-001",
+            righe=[{"codice": "CERT-P1", "quantita": 2, "prezzo": 5}],
+        ))
+        with pytest.raises(HTTPException) as error:
+            await server.del_cassa(batch["movimento_cassa_id"])
+        assert error.value.status_code == 409
+        assert await db.cassa.count_documents({"id": batch["movimento_cassa_id"]}) == 1
+        assert await db.vendite.count_documents({"batch_id": batch["id"]}) == 1
+
+    asyncio.run(_with_db(monkeypatch, scenario))
