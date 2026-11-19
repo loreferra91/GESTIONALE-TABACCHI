@@ -50,6 +50,11 @@ export function getOrCreateBulkRequest(
   return pending;
 }
 
+export function hasPendingBulkRequest(storage = sessionStore()) {
+  const pending = readPending(storage);
+  return Boolean(pending?.key);
+}
+
 export function clearPendingBulkRequest(storage = sessionStore()) {
   try { storage?.removeItem(BULK_PENDING_STORAGE_KEY); } catch (_) {
     // Private mode and disabled storage must not break a completed import.
