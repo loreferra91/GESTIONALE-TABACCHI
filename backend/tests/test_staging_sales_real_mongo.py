@@ -43,6 +43,8 @@ async def _with_db(monkeypatch, fn, *, available=12):
         await database.prodotti.create_index("codice", unique=True)
         await database.vendite.create_index("id", unique=True)
         await database.vendite_bulk_imports.create_index("idempotency_key", unique=True)
+        await database.cassa_rapida_batches.create_index("idempotency_key", unique=True, sparse=True)
+        await database.cassa.create_index("id", unique=True)
         await database.audit_events.create_index("id", unique=True)
         await database.prodotti.insert_one({
             "id": "cert-product-1", "codice": "CERT-P1",
@@ -192,5 +194,65 @@ def test_manual_sale_replay_conflicts_without_new_stock_movement(monkeypatch):
         restored = await db.prodotti.find_one({"codice": "CERT-P1"})
         assert restored["giacenza_negozio"] == 12
         assert restored["venduti_negozio"] == 0
+
+    asyncio.run(_with_db(monkeypatch, scenario))
+
+
+def test_pos_concurrent_undo_restores_exactly_once_and_audits(monkeypatch):
+    async def scenario(db):
+        body = server.CassaRapidaIn(
+            data="2026-11-19T13:00:00Z",
+            pagamento="POS",
+            idempotency_key="cert-pos-undo-real-001",
+            righe=[
+                {"codice": "CERT-P1", "quantita": 2, "prezzo": 5},
+                {"codice": "CERT-P1", "quantita": 1, "prezzo": 5},
+            ],
+        )
+        batch = await server.vendita_cassa_rapida(body)
+        assert await db.vendite.count_documents({"batch_id": batch["id"]}) == 2
+        attempts = await asyncio.gather(
+            server.annulla_vendita_cassa_rapida(batch["id"]),
+            server.annulla_vendita_cassa_rapida(batch["id"]),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, dict) for result in attempts) == 1
+        assert await db.cassa.count_documents({"batch_id": batch["id"]}) == 0
+        assert await db.vendite.count_documents({"batch_id": batch["id"]}) == 0
+        saved = await db.cassa_rapida_batches.find_one({"id": batch["id"]})
+        assert saved["status"] == "annullata"
+        assert saved["undo_audit_version"] == 1
+        assert await db.audit_events.count_documents({
+            "azione": "annulla-vendita-cassa-rapida", "batch_id": batch["id"],
+        }) == 1
+        product = await db.prodotti.find_one({"codice": "CERT-P1"})
+        assert product["giacenza_negozio"] == 12
+        assert product["venduti_negozio"] == 0
+        with pytest.raises(HTTPException) as replay:
+            await server.vendita_cassa_rapida(body)
+        assert replay.value.status_code == 409
+
+    asyncio.run(_with_db(monkeypatch, scenario))
+
+
+def test_pos_failed_undo_does_not_modify_stock_on_real_mongo(monkeypatch):
+    async def scenario(db):
+        body = server.CassaRapidaIn(
+            data="2026-11-19T13:00:00Z",
+            pagamento="CONTANTI", idempotency_key="cert-pos-missing-cash-001",
+            righe=[{"codice": "CERT-P1", "quantita": 3, "prezzo": 5}],
+        )
+        batch = await server.vendita_cassa_rapida(body)
+        await db.cassa.delete_one({"batch_id": batch["id"]})
+        with pytest.raises(HTTPException) as error:
+            await server.annulla_vendita_cassa_rapida(batch["id"])
+        assert error.value.status_code == 409
+        batch_after = await db.cassa_rapida_batches.find_one({"id": batch["id"]})
+        assert batch_after["status"] == "active"
+        assert await db.audit_events.count_documents({}) == 0
+        assert await db.vendite.count_documents({"batch_id": batch["id"]}) == 1
+        product = await db.prodotti.find_one({"codice": "CERT-P1"})
+        assert product["giacenza_negozio"] == 9
+        assert product["venduti_negozio"] == 3
 
     asyncio.run(_with_db(monkeypatch, scenario))
