@@ -812,11 +812,16 @@ async def root():
                 },
                 status_code=503,
             )
-    return {
+    response = {
         "app": "God Services Gestionale Tabacchi",
         "status": "ok",
         "database": "ok",
     }
+    if _environment() == "staging":
+        # Render provides this automatically. The staging-only revision enables
+        # end-to-end verification that its latest branch commit is actually live.
+        response["revision"] = os.environ.get("RENDER_GIT_COMMIT") or "unknown"
+    return response
 
 
 # ------------------------- Prodotti -------------------------
