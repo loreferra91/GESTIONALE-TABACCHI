@@ -465,3 +465,24 @@ def test_reconciliation_identifies_orphaned_pos_sales_without_guessing_cash(data
         assert await database.cassa.count_documents({}) == 0
 
     asyncio.run(scenario())
+
+
+def test_reconciliation_does_not_treat_csv_vending_batches_as_shop_bulk(database):
+    async def scenario():
+        await database.vendite_bulk_imports.insert_many([
+            {"id": "SHOP-1", "status": "active", "sorgente": "BULK", "inseriti": 1},
+            {"id": "CSV-ACTIVE", "status": "active", "sorgente": "CSV_VENDING", "inseriti": 79},
+            {"id": "CSV-FINAL", "status": "finalized", "sorgente": "CSV_VENDING", "inseriti": 18},
+            {"id": "CSV-UNDO", "status": "annulled", "sorgente": "CSV_VENDING", "inseriti": 12},
+        ])
+        await database.vendite.insert_one({
+            "id": "SHOP-SALE", "batch_id": "SHOP-1", "sorgente": "BULK",
+            "data": "2026-11-19", "codice": "P1", "quantita": 1,
+            "importo": 5, "pagamento": "CONTANTI",
+        })
+        result = await server.accounting_reconciliation()
+        assert result["conteggi"] == {}
+        assert result["documenti_esaminati"]["vendite_bulk_imports"] == 1
+        assert await database.vendite_bulk_imports.count_documents({}) == 4
+
+    asyncio.run(scenario())
