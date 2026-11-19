@@ -189,6 +189,11 @@ def create_sales_router(
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
                 return replay(existing)
+            if await db.audit_events.find_one({
+                "azione": "annulla-vendita-manuale",
+                "idempotency_key": key,
+            }, {"_id": 0, "id": 1}):
+                raise HTTPException(409, "Vendita già annullata: riutilizzo della chiave vietato")
 
         product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
         if not product:
@@ -223,6 +228,11 @@ def create_sales_router(
                 )
                 if existing:
                     return replay(existing)
+                if await db.audit_events.find_one({
+                    "azione": "annulla-vendita-manuale",
+                    "idempotency_key": key,
+                }, {"_id": 0, "id": 1}, **kwargs):
+                    raise HTTPException(409, "Vendita già annullata: riutilizzo della chiave vietato")
 
             column_changed = False
             product_changed = False
@@ -295,14 +305,14 @@ def create_sales_router(
         return result
 
     @router.delete("/vendite/{v_id}")
-    async def del_vendita(v_id: str):
+    async def del_vendita(v_id: str, request: Request = None):
         db = get_database()
         vendita = await db.vendite.find_one({"id": v_id})
         if not vendita:
             raise HTTPException(404, "Vendita non trovata")
         if vendita.get("sorgente", "MANUALE") != "MANUALE":
             raise HTTPException(409, "Questa vendita va annullata dal relativo caricamento")
-        return await annulla_vendita_manuale(v_id)
+        return await annulla_vendita_manuale(v_id, request)
 
     @router.get("/vendite/manuale/ultima")
     async def ultima_vendita_manuale():
@@ -314,7 +324,7 @@ def create_sales_router(
         )
 
     @router.post("/vendite/manuale/{sale_id}/annulla")
-    async def annulla_vendita_manuale(sale_id: str):
+    async def annulla_vendita_manuale(sale_id: str, request: Request = None):
         db = get_database()
         sale = await db.vendite.find_one(
             {"id": sale_id, "sorgente": "MANUALE"}, {"_id": 0}
@@ -323,6 +333,8 @@ def create_sales_router(
             raise HTTPException(404, "Vendita manuale non trovata o già annullata")
         vend_field = "venduti_vending" if sale.get("canale") == "VENDING" else "venduti_negozio"
         quantity = int(sale.get("quantita") or 0)
+        if quantity <= 0:
+            raise HTTPException(409, "Quantità della vendita incoerente: annullamento bloccato")
         increments = {vend_field: -quantity}
         is_vending = sale.get("canale") == "VENDING"
         column_code = normalize_vending_column(sale.get("colonna")) if is_vending else None
@@ -335,6 +347,9 @@ def create_sales_router(
             kwargs = session_kwargs(session)
             column_changed = False
             stock_changed = False
+            audit_written = False
+            sale_deleted = False
+            audit_id = str(uuid.uuid4())
             try:
                 if is_vending:
                     column_update = await db.vending.update_one(
@@ -346,20 +361,48 @@ def create_sales_router(
                         raise RuntimeError("La colonna Vending della vendita non esiste più")
                     column_changed = True
                 stock_update = await db.prodotti.update_one(
-                    {"codice": sale.get("codice")}, {"$inc": increments}, **kwargs
+                    {
+                        "codice": sale.get("codice"),
+                        vend_field: {"$gte": quantity},
+                    },
+                    {"$inc": increments},
+                    **kwargs,
                 )
                 if stock_update.modified_count != 1:
-                    raise RuntimeError("Il prodotto della vendita non esiste più")
+                    raise RuntimeError("Prodotto mancante o contatore venduti insufficiente")
                 stock_changed = True
+                # Append-only record of the original sale is written inside
+                # the same transaction as the inventory adjustment.
+                await db.audit_events.insert_one(
+                    {
+                        "id": audit_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "azione": "annulla-vendita-manuale",
+                        "entita": "vendite",
+                        "entita_id": str(sale_id),
+                        "operatore": request_operator(request),
+                        "prima": dict(sale),
+                        "dopo": None,
+                        "idempotency_key": sale.get("idempotency_key"),
+                        "batch_id": sale.get("batch_id"),
+                    },
+                    **kwargs,
+                )
+                audit_written = True
                 deletion = await db.vendite.delete_one(
                     {"id": sale_id, "sorgente": "MANUALE"}, **kwargs
                 )
                 if deletion.deleted_count != 1:
                     raise RuntimeError("La vendita è cambiata durante l'annullamento")
+                sale_deleted = True
                 if is_vending:
                     await sync_product_vending_stock(str(sale.get("codice") or ""), session)
             except Exception:
                 if session is None:
+                    if sale_deleted and not await db.vendite.find_one({"id": sale_id}):
+                        await db.vendite.insert_one(dict(sale))
+                    if audit_written:
+                        await db.audit_events.delete_one({"id": audit_id})
                     if stock_changed:
                         rollback = {vend_field: quantity}
                         if not is_vending:

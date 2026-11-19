@@ -177,5 +177,20 @@ def test_manual_sale_replay_conflicts_without_new_stock_movement(monkeypatch):
         assert product["giacenza_negozio"] == 10
         assert product["venduti_negozio"] == 2
         assert await db.vendite.count_documents({}) == 1
+        undone = await server.annulla_vendita_manuale(first["id"])
+        assert undone["rimossi"] == 1
+        assert await db.vendite.count_documents({}) == 0
+        event = await db.audit_events.find_one({
+            "azione": "annulla-vendita-manuale",
+            "entita_id": first["id"],
+        })
+        assert event["prima"]["id"] == first["id"]
+        assert event["idempotency_key"] == "cert-manual-sale-key-001"
+        with pytest.raises(HTTPException) as revoked:
+            await server.add_vendita(body, "cert-manual-sale-key-001")
+        assert revoked.value.status_code == 409
+        restored = await db.prodotti.find_one({"codice": "CERT-P1"})
+        assert restored["giacenza_negozio"] == 12
+        assert restored["venduti_negozio"] == 0
 
     asyncio.run(_with_db(monkeypatch, scenario))

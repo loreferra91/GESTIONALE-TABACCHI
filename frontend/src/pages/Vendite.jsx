@@ -459,7 +459,7 @@ export default function Vendite() {
               : "Nessuna vendita manuale annullabile"}
           createdAt={lastManualSale?.created_at}
           description={lastManualSale
-            ? "Rimuove solo questa vendita e ripristina la relativa scorta."
+            ? "Annulla la vendita, ripristina la scorta e conserva lo storno nel registro audit."
             : "Il comando sarà disponibile dopo la prossima vendita manuale."}
           buttonLabel="Annulla ultima vendita"
           busy={manualUndoing}

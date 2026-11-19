@@ -644,6 +644,7 @@ async def on_start():
             db.reconciliation_cases.create_index([("stato", 1), ("updated_at", -1)]),
             db.audit_events.create_index([("created_at", -1)]),
             db.audit_events.create_index([("entita", 1), ("entita_id", 1), ("created_at", -1)]),
+            db.audit_events.create_index([("azione", 1), ("idempotency_key", 1)]),
             db.backup_snapshots.create_index("created_at"),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1)]),
             db.backup_snapshot_items.create_index([("snapshot_id", 1), ("collection", 1), ("position", 1)]),

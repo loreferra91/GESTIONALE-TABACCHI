@@ -347,3 +347,72 @@ def test_manual_legacy_key_replay_checks_original_business_fields(monkeypatch):
         assert await database.vendite.count_documents({}) == 1
 
     asyncio.run(scenario())
+
+
+def test_manual_undo_preserves_original_sale_in_audit(monkeypatch):
+    from types import SimpleNamespace
+
+    database = AsyncMongoMockClient()["manual_undo_append_only_audit"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto",
+            "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        body = server.VenditaIn(
+            data="2026-11-19", codice="P1", quantita=3, importo=15,
+        )
+        sale = await server.add_vendita(body, "cert-manual-undo-key-001")
+        request = SimpleNamespace(state=SimpleNamespace(authenticated_user="cert-operator"))
+        result = await server.annulla_vendita_manuale(sale["id"], request)
+        assert result["rimossi"] == 1
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 10
+        assert product["venduti_negozio"] == 0
+        assert await database.vendite.count_documents({}) == 0
+        audit = await database.audit_events.find_one({
+            "azione": "annulla-vendita-manuale", "entita_id": sale["id"]
+        }, {"_id": 0})
+        assert audit["operatore"] == "cert-operator"
+        assert audit["prima"]["id"] == sale["id"]
+        assert audit["prima"]["quantita"] == 3
+        assert audit["idempotency_key"] == "cert-manual-undo-key-001"
+        with pytest.raises(HTTPException) as replay_error:
+            await server.add_vendita(body, "cert-manual-undo-key-001")
+        assert replay_error.value.status_code == 409
+        with pytest.raises(HTTPException) as error:
+            await server.annulla_vendita_manuale(sale["id"])
+        assert error.value.status_code == 404
+        assert await database.audit_events.count_documents({
+            "azione": "annulla-vendita-manuale"
+        }) == 1
+
+    asyncio.run(scenario())
+
+
+def test_manual_undo_blocks_missing_sold_counter_without_stock_change(monkeypatch):
+    database = AsyncMongoMockClient()["manual_undo_counter_guard"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prodotto",
+            "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        sale = await server.add_vendita(server.VenditaIn(
+            data="2026-11-19", codice="P1", quantita=3, importo=15,
+        ))
+        await database.prodotti.update_one(
+            {"codice": "P1"}, {"$set": {"venduti_negozio": 0}}
+        )
+        with pytest.raises(HTTPException) as error:
+            await server.annulla_vendita_manuale(sale["id"])
+        assert error.value.status_code == 409
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 7
+        assert product["venduti_negozio"] == 0
+        assert await database.vendite.count_documents({}) == 1
+        assert await database.audit_events.count_documents({}) == 0
+
+    asyncio.run(scenario())
