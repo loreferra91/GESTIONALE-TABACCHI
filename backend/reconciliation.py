@@ -76,14 +76,23 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
             return None
 
     def stock(collection, doc, field):
-        raw = doc.get(field, 0)
+        # Missing historical stock is UNKNOWN, not zero. Never fabricate a
+        # baseline or silently compare incomplete product/vending records.
+        if field not in doc or doc[field] is None:
+            issue(
+                "GIACENZA_MANCANTE", collection, doc,
+                f"{field}: valore assente; impossibile presumere una giacenza zero.",
+                campo=field,
+            )
+            return None
+        raw = doc[field]
         try:
             value = Decimal(str(raw))
             if isinstance(raw, bool) or not value.is_finite() or value < 0 or value != value.to_integral_value():
                 raise ValueError()
             return int(value)
         except (ValueError, ArithmeticError):
-            issue("GIACENZA_INVALIDA", collection, doc, f"{field}: la giacenza deve essere intera e non negativa.")
+            issue("GIACENZA_INVALIDA", collection, doc, f"{field}: la giacenza deve essere intera e non negativa.", campo=field)
             return None
 
     products = defaultdict(list)
@@ -359,7 +368,7 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
         "vendite_csv_confrontate": compared_sales, "vendite_csv_non_confrontabili": unmatched_sales,
         "copertura": [
             "Importi di prodotti, listino, vendite, ordini storici, movimenti, rettifiche, storico negozio, baseline contabile e fondo iniziale vending.",
-            "Giacenze non negative e intere; cache vending confrontata con le colonne associate.",
+            "Giacenze presenti, non negative e intere; cache vending confrontata con le colonne associate.",
             "Importo e pagamento delle vendite CSV con un evento contabile univoco.",
             "Controllo BULK non filtrato: righe attive, batch orfani e audit degli annullamenti nuovi.",
             "Controllo Cassa Rapida non filtrato: pezzi, importi, pagamento, movimento cassa, orfani e audit degli storni nuovi.",
