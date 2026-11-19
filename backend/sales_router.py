@@ -143,10 +143,52 @@ def create_sales_router(
         key = str(idempotency_key or "").strip() or None
         if key and not 10 <= len(key) <= 160:
             raise HTTPException(422, "X-Idempotency-Key deve contenere da 10 a 160 caratteri")
+        request_fingerprint = _request_fingerprint({
+            "data": vendita.data,
+            "codice": codice,
+            "descrizione": str(vendita.descrizione or ""),
+            "quantita": vendita.quantita,
+            "importo": float(vendita.importo),
+            "canale": channel,
+            "pagamento": str(vendita.pagamento or "CONTANTI").strip().upper(),
+            "colonna": normalize_vending_column(vendita.colonna) if channel == "VENDING" else None,
+        })
+
+        def replay(existing):
+            if existing.get("sorgente") not in (None, "MANUALE"):
+                raise HTTPException(409, "Chiave già associata a un'altra sorgente di vendita")
+            saved_fingerprint = existing.get("request_fingerprint")
+            if saved_fingerprint is not None:
+                if saved_fingerprint != request_fingerprint:
+                    raise HTTPException(409, "Chiave idempotente già usata con dati diversi")
+            else:
+                # Backwards compatibility for sales registered before fingerprints.
+                same_fields = (
+                    str(existing.get("data")) == str(vendita.data)
+                    and product_code_text(existing.get("codice")) == codice
+                    and int(existing.get("quantita") or 0) == vendita.quantita
+                    and Decimal(str(existing.get("importo") or 0)) == Decimal(str(vendita.importo))
+                    and str(existing.get("canale") or "NEGOZIO").strip().upper() == channel
+                    and str(existing.get("pagamento") or "CONTANTI").strip().upper()
+                        == str(vendita.pagamento or "CONTANTI").strip().upper()
+                    and (
+                        normalize_vending_column(existing.get("colonna"))
+                        if channel == "VENDING" else None
+                    ) == (
+                        normalize_vending_column(vendita.colonna)
+                        if channel == "VENDING" else None
+                    )
+                )
+                if not same_fields or (
+                    vendita.descrizione and str(existing.get("descrizione") or "") != vendita.descrizione
+                ):
+                    raise HTTPException(409, "Chiave legacy già usata con dati diversi")
+            return existing
+
         if key:
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if existing:
-                return existing
+                return replay(existing)
 
         product = await db.prodotti.find_one({"codice": codice}, {"_id": 0})
         if not product:
@@ -171,6 +213,7 @@ def create_sales_router(
         sale_doc = VenditaGiornaliera(**payload).model_dump()
         if key:
             sale_doc["idempotency_key"] = key
+            sale_doc["request_fingerprint"] = request_fingerprint
 
         async def operation(session):
             kwargs = session_kwargs(session)
@@ -179,7 +222,7 @@ def create_sales_router(
                     {"idempotency_key": key}, {"_id": 0}, **kwargs
                 )
                 if existing:
-                    return existing
+                    return replay(existing)
 
             column_changed = False
             product_changed = False
@@ -246,7 +289,7 @@ def create_sales_router(
             existing = await db.vendite.find_one({"idempotency_key": key}, {"_id": 0})
             if not existing:
                 raise
-            result = existing
+            result = replay(existing)
         if channel == "VENDING":
             await sync_product_vending_stock(codice)
         return result
