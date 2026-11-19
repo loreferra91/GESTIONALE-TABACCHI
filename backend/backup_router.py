@@ -21,7 +21,7 @@ BACKUP_COLLECTIONS = [
     "db_storico_vend", "db_storico_vending_ext", "vendite",
     "vendite_bulk_imports", "cassa_rapida_batches", "versamenti", "prelievi_vending",
     "scontrini_vending", "cassa_vending_stato", "vending_accounting_snapshots",
-    "vending_accounting_state", "vending_accounting_events", "vending_operations", "cassa",
+    "vending_accounting_state", "vending_accounting_events", "vending_operations", "accounting_baselines", "cassa",
     "ordini_fornitore", "ordini_fornitore_righe", "auto_order_import_state", "import_history", "adm_sync",
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
     "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
@@ -32,7 +32,7 @@ BACKUP_FILE_VERSION = 1
 OPTIONAL_BACKUP_COLLECTIONS = {
     "vendite_bulk_imports", "cassa_rapida_batches", "vending_operations", "scontrini_vending", "cassa_vending_stato",
     "vending_accounting_snapshots", "vending_accounting_state",
-    "vending_accounting_events", "anomalie_ignorate", "smart_venue",
+    "vending_accounting_events", "accounting_baselines", "anomalie_ignorate", "smart_venue",
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
     "audit_events", "auto_order_import_state",
