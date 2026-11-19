@@ -144,6 +144,8 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                 events[key].append((doc, value))
     compared_sales = unmatched_sales = 0
     bulk_sales_by_batch = Counter()
+    bulk_missing_batch_first_date = None
+    bulk_missing_batch_last_date = None
     pos_sales_by_batch = {}
     async for doc in database.vendite.find({}):
         if not in_date_range(doc):
@@ -151,7 +153,18 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
         scanned["vendite"] += 1
         value = amount("vendite", doc, "importo")
         if not date_from and not date_to and doc.get("sorgente") == "BULK":
-            bulk_sales_by_batch[str(doc.get("batch_id") or "")] += 1
+            batch_key = str(doc.get("batch_id") or "").strip()
+            bulk_sales_by_batch[batch_key] += 1
+            if not batch_key:
+                # Historic BULK rows may predate the introduction of batch IDs.
+                # Record their date range without inventing parent batches or
+                # assuming any undocumented database migration cutoff.
+                sale_day = str(doc.get("data") or "")[:10]
+                if len(sale_day) == 10 and sale_day[4:5] == "-" and sale_day[7:8] == "-":
+                    if bulk_missing_batch_first_date is None or sale_day < bulk_missing_batch_first_date:
+                        bulk_missing_batch_first_date = sale_day
+                    if bulk_missing_batch_last_date is None or sale_day > bulk_missing_batch_last_date:
+                        bulk_missing_batch_last_date = sale_day
         if not date_from and not date_to and doc.get("sorgente") == "POS":
             batch_id = str(doc.get("batch_id") or "")
             aggregate = pos_sales_by_batch.setdefault(batch_id, {
@@ -235,9 +248,20 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                 audited_undos[batch_id] = (batch, expected)
 
         for batch_id, count in bulk_sales_by_batch.items():
-            issue("BULK_BATCH_ORFANO", "vendite", {"id": batch_id},
-                  "Vendite BULK senza un batch valido collegato.",
-                  registrato=count)
+            if not batch_id:
+                # Keep the existing fingerprint for this finding. Reclassifying
+                # it would silently detach notes/state in reconciliation_cases.
+                issue("BULK_BATCH_ORFANO", "vendite", {"id": ""},
+                      "Vendite BULK senza batch_id. Lo schema precedente potrebbe "
+                      "non averlo registrato: verificare provenienza e date prima "
+                      "di qualsiasi rettifica.",
+                      registrato=count, collegamento="batch_id_assente",
+                      prima_data=bulk_missing_batch_first_date,
+                      ultima_data=bulk_missing_batch_last_date)
+            else:
+                issue("BULK_BATCH_ORFANO", "vendite", {"id": batch_id},
+                      "Vendite BULK con batch_id che non corrisponde a un batch registrato.",
+                      registrato=count, collegamento="batch_non_trovato")
 
         if audited_undos:
             audit_counts = Counter()
@@ -370,7 +394,7 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
             "Importi di prodotti, listino, vendite, ordini storici, movimenti, rettifiche, storico negozio, baseline contabile e fondo iniziale vending.",
             "Giacenze presenti, non negative e intere; cache vending confrontata con le colonne associate.",
             "Importo e pagamento delle vendite CSV con un evento contabile univoco.",
-            "Controllo BULK non filtrato: righe attive, batch orfani e audit degli annullamenti nuovi.",
+            "Controllo BULK non filtrato: righe attive, batch mancanti, vendite storiche senza batch_id e audit degli annullamenti nuovi.",
             "Controllo Cassa Rapida non filtrato: pezzi, importi, pagamento, movimento cassa, orfani e audit degli storni nuovi.",
         ],
         "limiti": [
