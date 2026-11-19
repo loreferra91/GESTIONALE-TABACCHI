@@ -752,3 +752,12 @@ def test_report_streaming_ignores_invalid_future_amount_and_legacy_date(monkeypa
     assert result["pezzi"] == 3
     assert result["totale_precedente"] == 0
     assert result["giorni_con_vendite"] == 2
+
+
+def test_rome_business_day_handles_midnight_and_dst_boundaries():
+    from datetime import datetime, timezone
+    from backend.dashboard_router import rome_business_day
+
+    assert rome_business_day(datetime(2026, 11, 19, 23, 30, tzinfo=timezone.utc)) == "2026-11-20"
+    assert rome_business_day(datetime(2026, 3, 28, 23, 30, tzinfo=timezone.utc)) == "2026-03-29"
+    assert rome_business_day(datetime(2026, 10, 24, 22, 30, tzinfo=timezone.utc)) == "2026-10-25"
