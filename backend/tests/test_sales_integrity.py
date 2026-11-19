@@ -416,3 +416,117 @@ def test_manual_undo_blocks_missing_sold_counter_without_stock_change(monkeypatc
         assert await database.audit_events.count_documents({}) == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("bad_quantity", [True, 1.5, "1,5", "1.1", -1, 0, "1e2"])
+def test_pos_rejects_fractional_or_invalid_quantities(bad_quantity, monkeypatch):
+    database = AsyncMongoMockClient()["pos_strict_quantity"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prova",
+            "prezzo": 5, "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        with pytest.raises(HTTPException) as exc:
+            await server.vendita_cassa_rapida(server.CassaRapidaIn(
+                data="2026-11-19T10:00:00Z", idempotency_key="cert-invalid-pos-quantity",
+                righe=[{"codice": "P1", "quantita": bad_quantity, "prezzo": 5}],
+            ))
+        assert exc.value.status_code == 422
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 10
+        assert product["venduti_negozio"] == 0
+        assert await database.vendite.count_documents({}) == 0
+        assert await database.cassa.count_documents({}) == 0
+
+    asyncio.run(scenario())
+
+
+def test_pos_undo_keeps_immutable_cash_and_sales_snapshot_and_revokes_key(monkeypatch):
+    database = AsyncMongoMockClient()["pos_undo_audit"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prova",
+            "prezzo": 5, "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        body = server.CassaRapidaIn(
+            data="2026-11-19T10:00:00Z", idempotency_key="cert-audited-pos-001",
+            righe=[
+                {"codice": "P1", "quantita": 2, "prezzo": 5},
+                {"codice": "P1", "quantita": 1, "prezzo": 5},
+            ],
+        )
+        batch = await server.vendita_cassa_rapida(body)
+        result = await server.annulla_vendita_cassa_rapida(batch["id"])
+        assert result["righe_annullate"] == 2
+        snapshot = await database.audit_events.find_one({
+            "azione": "annulla-vendita-cassa-rapida", "batch_id": batch["id"]
+        }, {"_id": 0})
+        assert snapshot["prima"]["batch"]["id"] == batch["id"]
+        assert len(snapshot["prima"]["vendite"]) == 2
+        assert snapshot["prima"]["movimento_cassa"]["importo"] == 15
+        assert snapshot["idempotency_key"] == "cert-audited-pos-001"
+        saved_batch = await database.cassa_rapida_batches.find_one({"id": batch["id"]})
+        assert saved_batch["status"] == "annullata"
+        assert saved_batch["undo_audit_version"] == 1
+        product = await database.prodotti.find_one({"codice": "P1"})
+        assert product["giacenza_negozio"] == 10
+        assert product["venduti_negozio"] == 0
+        assert await database.cassa.count_documents({}) == 0
+        assert await database.vendite.count_documents({}) == 0
+        with pytest.raises(HTTPException) as replay:
+            await server.vendita_cassa_rapida(body)
+        assert replay.value.status_code == 409
+        with pytest.raises(HTTPException) as repeated:
+            await server.annulla_vendita_cassa_rapida(batch["id"])
+        assert repeated.value.status_code in (404, 409)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("corruption", ["missing_cash", "missing_line", "sold_counter", "wrong_amount"])
+def test_pos_undo_refuses_inconsistent_ledgers_without_changes(monkeypatch, corruption):
+    database = AsyncMongoMockClient()[f"pos_inconsistency_{corruption}"]
+    monkeypatch.setattr(server, "db", database)
+
+    async def scenario():
+        await database.prodotti.insert_one({
+            "codice": "P1", "descrizione": "Prova",
+            "prezzo": 5, "giacenza_negozio": 10, "venduti_negozio": 0,
+        })
+        batch = await server.vendita_cassa_rapida(server.CassaRapidaIn(
+            data="2026-11-19T10:00:00Z", idempotency_key="cert-pos-corrupt-001",
+            righe=[{"codice": "P1", "quantita": 3, "prezzo": 5}],
+        ))
+        if corruption == "missing_cash":
+            await database.cassa.delete_many({})
+        elif corruption == "missing_line":
+            await database.vendite.delete_many({})
+        elif corruption == "sold_counter":
+            await database.prodotti.update_one(
+                {"codice": "P1"}, {"$set": {"venduti_negozio": 0}}
+            )
+        else:
+            await database.cassa.update_one(
+                {"batch_id": batch["id"]}, {"$set": {"importo": 11}}
+            )
+        before = {
+            name: await database[name].find({}, {"_id": 0}).to_list(None)
+            for name in ("prodotti", "vendite", "cassa")
+        }
+        with pytest.raises(HTTPException) as exc:
+            await server.annulla_vendita_cassa_rapida(batch["id"])
+        assert exc.value.status_code == 409
+        after = {
+            name: await database[name].find({}, {"_id": 0}).to_list(None)
+            for name in ("prodotti", "vendite", "cassa")
+        }
+        assert before == after
+        assert await database.audit_events.count_documents({}) == 0
+        saved = await database.cassa_rapida_batches.find_one({"id": batch["id"]})
+        assert saved["status"] == "active"
+
+    asyncio.run(scenario())
