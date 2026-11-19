@@ -380,9 +380,37 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
         scanned["parametri"] += 1
         amount("parametri", doc, "valore")
 
+    # A clean document scan does NOT certify a physical cash balance.
+    # No synthetic opening balance or Excel-derived cash baseline is inferred.
+    # POS batch comparisons intentionally run only for complete history.
+    cash_count = scanned["cassa"]
+    full_history = not date_from and not date_to
+    financial_coverage = {
+        "stato": "movimenti_nativi_assenti" if cash_count == 0 else "solo_verifiche_documentali",
+        "movimenti_cassa_esaminati": cash_count,
+        "batch_cassa_rapida_esaminati": (
+            scanned["cassa_rapida_batches"] if full_history else None
+        ),
+        "confronto_batch_pos_eseguito": bool(full_history),
+        "baseline_cassa_fisica_verificata": False,
+        "saldo_cassa_certificato": False,
+        "avviso": (
+            "Nessun movimento della cassa nativa nel periodo esaminato: "
+            "non è possibile certificare alcun saldo cassa."
+            if cash_count == 0 else
+            "Movimenti cassa sottoposti ai soli controlli documentali: "
+            "non è stato verificato un fondo fisico di apertura né un conteggio di chiusura."
+        ),
+    }
+    if not full_history:
+        financial_coverage["avviso"] += (
+            " I filtri data escludono il confronto globale dei batch Cassa Rapida."
+        )
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "intervallo": {"da": date_from, "a": date_to},
+        "copertura_finanziaria": financial_coverage,
         "esito": "da_verificare" if counts else "nessuna_discrepanza_rilevata",
         "totale_segnalazioni": sum(counts.values()), "conteggi": dict(counts),
         "conteggi_stato": dict(state_counts),
