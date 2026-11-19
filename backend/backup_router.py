@@ -599,6 +599,27 @@ def create_backup_router(
             if not meta:
                 raise HTTPException(404, "backup non trovato")
             collections = await load_restore_snapshot(meta)
+            if staging_mode:
+                outcome = await apply_staging_restore(
+                    database=database,
+                    collections=collections,
+                    make_checkpoint=lambda: create_backup_snapshot(
+                        f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
+                        "pre-restore",
+                    ),
+                    load_checkpoint=_load_verified_staging_checkpoint,
+                    vending_created_at=meta.get("created_at"),
+                )
+                await database.backup_snapshots.update_one(
+                    {"id": snapshot_id},
+                    {"$set": {"last_restored_at": datetime.now(timezone.utc).isoformat()}},
+                )
+                return {
+                    "ok": True,
+                    "restored": snapshot_id,
+                    "pre_restore_backup": outcome["pre_restore_backup"],
+                    "restore_strategy": outcome["restore_strategy"],
+                }
             pre_restore = await create_backup_snapshot(
                 f"Prima del ripristino {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')}",
                 "pre-restore",
