@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import PyMongoError
 
+from backend.staging_scoped_mongo import choose_staging_connection
+
 
 STAGING_DATABASE = "gestionale_staging"
 
@@ -59,13 +61,32 @@ def assess_effective_roles(connection_status: dict) -> dict:
     }
 
 
-async def audit_runtime() -> dict:
-    uri = os.environ.get("MONGO_URL") or ""
-    validate_target(
-        os.environ.get("ENVIRONMENT") or "",
-        os.environ.get("DB_NAME") or "",
-        uri,
+def select_effective_runtime_uri(environ) -> str:
+    """Inspect the actual active URI, not the obsolete rollback credential.
+
+    Refuse probe and legacy modes: the scoped user must really serve requests.
+    No URI or secret content appears in exceptions, reports or logs.
+    """
+    environment = environ.get("ENVIRONMENT") or ""
+    database = environ.get("DB_NAME") or ""
+    mode = str(environ.get("STAGING_MONGO_ROLE_MODE") or "legacy").lower().strip()
+    if environment.lower().strip() != "staging" or database != STAGING_DATABASE:
+        raise ValueError("Refusing non-staging RBAC preflight")
+    if mode != "active":
+        raise ValueError("Staging scoped credential is not the active runtime")
+    uri, effective_mode = choose_staging_connection(
+        environment, mode,
+        environ.get("MONGO_URL") or "",
+        environ.get("STAGING_SCOPED_MONGO_URL") or "",
     )
+    if effective_mode != "active":
+        raise ValueError("Scoped staging mode not active")
+    validate_target(environment, database, uri)
+    return uri
+
+
+async def audit_runtime() -> dict:
+    uri = select_effective_runtime_uri(os.environ)
     client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=6000)
     try:
         status = await client.admin.command("connectionStatus")
