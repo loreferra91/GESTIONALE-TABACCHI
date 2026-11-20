@@ -37,10 +37,21 @@ Desktop sync, and the full staging branch.
    Cassa Rapida and undo, cash movement delete protections, BULK
    idempotency, product stock, vending cache and read-only financial
    reconciliation.
-4. **Production-specific OFF-CLUSTER backup of `gestionale` must be
-   encrypted, checksummed, independently stored and test-restored to a
-   separate namespace/cluster.** The successful 27,171-document staging
-   JSON restore is not an acceptable substitute for a production backup.
+4. **Production-specific independent backup** must be recorded.
+   The operator may verify the downloaded 20 November JSON *locally*
+   without disclosing data using:
+   `python3 scripts/verify_backup_export.py /secure/path/gestionale-backup.json`.
+   The tool requires all 35 per-collection checksums, verifies every
+   record and emits only a local SHA-256, counts and non-sensitive status.
+   It explicitly does NOT certify that the copy is independent or that
+   the database can be recovered. Verify original production source,
+   durable independent storage, recovered indexes and a test restore
+   into an isolated cluster/namespace. Prefer encrypted off-cluster
+   S3 with a recoverable private GPG key and retained versions; no
+   production S3 destination is currently verified. The completed
+   27,171-document staging restore is strong *functional* evidence
+   only when the operator establishes that the JSON came from
+   production and was preserved independently.
 5. Verify production MongoDB's existing business unique indexes,
    `audit_events` size/performance and compatibility of historical
    records before applying the new additive index.
