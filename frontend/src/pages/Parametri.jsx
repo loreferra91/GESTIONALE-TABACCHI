@@ -57,6 +57,7 @@ export default function Parametri() {
   const [restoreTarget, setRestoreTarget] = useState(null);
   const [restoreFile, setRestoreFile] = useState(null);
   const [restorePreview, setRestorePreview] = useState(null);
+  const [restoreStatus, setRestoreStatus] = useState(null);
   const [workingBackup, setWorkingBackup] = useState(false);
   const [openingVendingCash, setOpeningVendingCash] = useState("0");
   const [savingOpeningVendingCash, setSavingOpeningVendingCash] = useState(false);
@@ -79,9 +80,28 @@ export default function Parametri() {
     setBackups(b.data || []);
     setBackupRetention(retention.data || null);
   };
+  const refreshRestoreStatus = async () => {
+    try {
+      const { data } = await api.get("/backup/restore-file/status");
+      setRestoreStatus(data);
+      return data;
+    } catch (err) {
+      // The staging-only endpoint is intentionally absent in production.
+      if (err?.response?.status === 404) {
+        setRestoreStatus(null);
+        return null;
+      }
+      // Fail closed if the status is unreachable: never assume READY.
+      setRestoreStatus({ phase: "UNKNOWN" });
+      throw err;
+    }
+  };
+
   useEffect(() => {
     load();
     loadAudit();
+    refreshRestoreStatus().catch(() => {});
+
     window.addEventListener("backup-daily-ready", loadAudit);
     return () => window.removeEventListener("backup-daily-ready", loadAudit);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -240,6 +260,12 @@ export default function Parametri() {
     }
     setWorkingBackup(true);
     try {
+      const status = await refreshRestoreStatus();
+      if (status && status.phase !== "READY") {
+        toast.error("Ripristino precedente incompleto: controlla lo stato staging prima di caricare un altro file.");
+        if (restoreFileRef.current) restoreFileRef.current.value = "";
+        return;
+      }
       const formData = new FormData();
       formData.append("file", selected);
       const { data } = await api.post("/backup/restore-file/preview", formData);
@@ -262,16 +288,32 @@ export default function Parametri() {
     const formData = new FormData();
     formData.append("file", restoreFile);
     try {
+      // Recheck immediately before the destructive POST: the prior preview
+      // can become stale while another restore is in progress.
+      const status = await refreshRestoreStatus();
+      if (status && status.phase !== "READY") {
+        toast.error("Ripristino bloccato: staging non è nello stato READY. Non ripetere il caricamento.");
+        return;
+      }
       const response = await api.post("/backup/restore-file", formData);
       toast.success(`Backup ripristinato: ${formatNum(response.data.restored_docs)} documenti`);
       setRestoreFile(null);
       setRestorePreview(null);
       if (restoreFileRef.current) restoreFileRef.current.value = "";
+      await refreshRestoreStatus().catch(() => {});
       await Promise.all([load(), loadAudit()]);
     } catch (err) {
-      toast.error(err?.response
-        ? apiErrorMessage(err, "Errore ripristino file di backup")
-        : "Esito del ripristino non confermato: verifica lo stato del database prima di riprovare.");
+      let current = null;
+      try { current = await refreshRestoreStatus(); } catch (_) {}
+      if (current?.phase && current.phase !== "READY") {
+        toast.error("Ripristino incompleto o in manutenzione: NON ricaricare il file. Verifica lo stato e il checkpoint.");
+      } else if (current?.phase === "READY" && err?.response?.status === 503) {
+        toast.error("Ripristino non completato: checkpoint precedente recuperato secondo il server. Verifica i dati prima di riprovare.");
+      } else {
+        toast.error(err?.response
+          ? apiErrorMessage(err, "Errore ripristino file di backup")
+          : "Esito del ripristino non confermato: verifica lo stato del database prima di riprovare.");
+      }
     } finally {
       setWorkingBackup(false);
     }
@@ -450,6 +492,16 @@ export default function Parametri() {
           <div className="mb-4 rounded-md border border-blue-100 bg-blue-50 p-3">
             <div className="text-xs font-bold uppercase tracking-wider text-blue-900">Ripristina da file</div>
             <p className="mt-1 text-xs text-blue-800">Seleziona un file <code>gestionale-backup-….json</code>. Prima del ripristino verrà salvata automaticamente una copia dello stato attuale.</p>
+            {restoreStatus?.phase && restoreStatus.phase !== "READY" && (
+              <p role="alert" data-testid="backup-restore-status-warning" className="mt-2 font-semibold text-red-800">
+                Ripristino staging: {restoreStatus.phase}. Non ricaricare il backup prima della verifica dello stato o del checkpoint.
+              </p>
+            )}
+            <button type="button" className="mt-2 rounded border border-blue-300 px-2 py-1 text-xs"
+              data-testid="backup-restore-status-refresh"
+              onClick={() => refreshRestoreStatus().catch(() => toast.error("Stato ripristino non disponibile"))}>
+              Verifica stato ripristino
+            </button>
             <input
               ref={restoreFileRef}
               data-testid="backup-restore-file"
@@ -584,7 +636,7 @@ export default function Parametri() {
         <p className="mt-2 text-slate-600">Prima del ripristino verrà creato automaticamente un nuovo backup dello stato attuale.</p>
       </ConfirmDialog>
       <ConfirmDialog
-        open={Boolean(restoreFile && restorePreview?.can_restore)}
+        open={Boolean(restoreFile && restorePreview?.can_restore && (!restoreStatus || restoreStatus.phase === "READY"))}
         title="Ripristinare il backup dal file?"
         confirmLabel="Ripristina dal file"
         danger
