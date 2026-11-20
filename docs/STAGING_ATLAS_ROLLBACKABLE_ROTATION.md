@@ -46,6 +46,11 @@ The production environment is unaffected even if the variables exist.
 
 - The legacy URI remains stored as a fallback during the observation
   period. Until the old Atlas user is revoked, exposure risk persists.
+- The new active staging backend can start without `MONGO_URL`, but
+  removing it disables the original rollback path. Do this **only after**
+  independent encrypted off-cluster recovery is established, a separate
+  administrator recovery route is proven and the old user is revoked.
+  Never replace the complete Render variable set to delete one key.
 - A `probe` failure must be investigated, not ignored as proof the
   scoped account works.
 - No writes or migration run during the credential probe.
