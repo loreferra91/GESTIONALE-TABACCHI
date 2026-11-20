@@ -82,7 +82,7 @@ def remote_roundtrip(archive: Path, record: dict, *, bucket: str,
                      endpoint: str, profile: str, destination: Path) -> tuple[Path, str]:
     aws_call(profile, endpoint, "s3api", "head-bucket", "--bucket", bucket)
     date = datetime.now(timezone.utc).strftime("%Y%m%d")
-    key = f"production/recovery-drills/{date}/{uuid.uuid4().hex}-{archive.name}"
+    key = f"gestionale/production/recovery-drills/{date}/{uuid.uuid4().hex}-{archive.name}"
     target = f"s3://{bucket}/{key}"
     # Random new key ensures normal retries never overwrite a retained backup.
     aws_call(profile, endpoint, "s3", "cp", str(archive), target,
