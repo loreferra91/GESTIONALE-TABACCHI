@@ -61,13 +61,18 @@ inutilizzabile dopo la revoca.
    backup, riconciliazione ed esito del ruolo attivo. Per prudenza,
    non modificare prodotti, vendite e cassa soltanto per
    provare l'autenticazione.
-6. Una volta completato il piano di recovery senza legacy,
-   rimuovere dal servizio Render la variabile `MONGO_URL`
-   obsoleta con una procedura di modifica env che preserva
-   tutte le altre variabili, poi documentare la nuova via di
-   rollback. Il codice richiede ancora il nome di questa
-   variabile: **non rimuoverla senza modifica applicativa
-   specifica testata**.
+6. Il backend ora supporta la modalità staging `active`
+   anche senza `MONGO_URL` (test automatici dedicati). Dopo
+   un backup indipendente provato e la revoca confermata,
+   **un operatore che controlla i segreti** può rimuovere
+   `MONGO_URL` dall'ambiente Render staging, preservando
+   tutte le altre variabili. Il connettore Render disponibile
+   può aggiungere/aggiornare, ma non ha un'operazione sicura
+   di rimozione singola senza sostituire l'intero set:
+   **non usare `replace:true` per cancellarla**.
+   Riavviare e verificare subito health, ruolo attivo e
+   conteggi: il rollback da quel momento usa solo la
+   nuova utenza limitata e il backup indipendente.
 7. Registrare orario, account revocato, screenshot non sensibili,
    test eseguiti ed esito. Non inserire credenziali in GitHub.
 
