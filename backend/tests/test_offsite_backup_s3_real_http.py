@@ -46,11 +46,16 @@ def _s3_bytes(uri):
 
 
 def _s3_exists(uri):
+    bucket, key = uri.removeprefix("s3://").split("/", 1)
     proc = subprocess.run(
-        ["aws", "s3", "ls", uri],
-        check=True, capture_output=True, text=True,
+        ["aws", "s3api", "head-object", "--bucket", bucket, "--key", key],
+        capture_output=True, text=True, check=False,
     )
-    return bool(proc.stdout.strip())
+    if proc.returncode != 0 and not (
+        "404" in proc.stderr or "Not Found" in proc.stderr
+    ):
+        raise AssertionError("Disposable S3 object lookup failed unexpectedly")
+    return proc.returncode == 0
 
 
 def test_disposable_s3_upload_readback_manifest_and_sse(monkeypatch):
