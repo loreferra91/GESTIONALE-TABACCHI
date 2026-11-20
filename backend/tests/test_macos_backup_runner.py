@@ -147,3 +147,36 @@ def test_no_production_access_without_explicit_flag(modules, capsys):
         runner.main(["--preflight"])
     assert exc.value.code == 2
     assert "--allow-production" in capsys.readouterr().err
+
+
+def test_local_diagnostics_do_not_retrieve_or_expose_password(modules, monkeypatch, tmp_path):
+    runner, _ = modules
+    calls = []
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[0] == "gpg":
+            return types.SimpleNamespace(returncode=0, stdout=f"fpr:::::::::{runner.FINGERPRINT}:\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="SECRET_SHOULD_NOT_APPEAR", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.shutil, "which", lambda binary: "/bin/" + binary)
+    root = tmp_path / "missing"
+    data = runner.local_diagnostics(root / "output", root / "tmp", root / "lock")
+    assert data["keychain_item_found"] is True
+    assert data["gpg_public_key_found"] is True
+    assert data["directories"]["backup"] == "not_created_yet"
+    assert not root.exists()
+    assert "SECRET_SHOULD_NOT_APPEAR" not in json.dumps(data)
+    assert "-w" not in calls[-1]
+
+
+def test_failure_displays_only_sanitized_stage(modules, monkeypatch, capsys):
+    runner, _ = modules
+    def bad_run(**kwargs):
+        kwargs["on_stage"]("keychain_access")
+        raise RuntimeError("CONTAINS_SENSITIVE_MONGODB_PASSWORD")
+    monkeypatch.setattr(runner, "run_backup", bad_run)
+    monkeypatch.setattr(runner, "notify_failure", lambda: None)
+    assert runner.main(["--allow-production", "--force"]) == 2
+    err = capsys.readouterr().err
+    assert "ERROR [keychain_access]" in err
+    assert "CONTAINS_SENSITIVE_MONGODB_PASSWORD" not in err
