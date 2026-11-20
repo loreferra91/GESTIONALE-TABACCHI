@@ -1,0 +1,75 @@
+name: Staging physical cash count - real MongoDB transaction certification
+
+on:
+  push:
+    branches:
+      - 'feature/staging-cash-evidence-real-mongo-cert-*'
+      - openclaw/render-staging-deploy
+    paths:
+      - backend/cash_count_evidence_router.py
+      - backend/tests/test_cash_count_evidence_real_mongo.py
+      - .github/workflows/staging-cash-count-real-mongo-cert.yml
+  pull_request:
+    branches:
+      - openclaw/render-staging-deploy
+    paths:
+      - backend/cash_count_evidence_router.py
+      - backend/tests/test_cash_count_evidence_real_mongo.py
+      - .github/workflows/staging-cash-count-real-mongo-cert.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cash-evidence-certification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-prod.txt
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-prod.txt
+          python -m pip install httpx==0.28.1 pytest==9.1.1 pytest-xdist==3.8.0 mongomock-motor==0.0.36
+      - name: Start disposable MongoDB replica set
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name cash-count-cert-mongo \
+            -p 127.0.0.1:27029:27017 \
+            mongo:7 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec cash-count-cert-mongo mongosh --quiet \
+              --eval 'db.adminCommand({ping:1}).ok' | grep -qx '1'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec cash-count-cert-mongo mongosh --quiet \
+            --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+          for attempt in $(seq 1 30); do
+            if docker exec cash-count-cert-mongo mongosh --quiet \
+              --eval 'db.hello().isWritablePrimary' | grep -qx 'true'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec cash-count-cert-mongo mongosh --quiet \
+            --eval 'if (!db.hello().isWritablePrimary) quit(2)'
+      - name: Certify count/audit atomicity without any booked cash
+        env:
+          CERT_MONGO_URL: mongodb://127.0.0.1:27029/?directConnection=true
+          CERT_DB_NAME: gestionale_cert_cash_ci
+          MONGO_URL: mongodb://127.0.0.1:27029/?directConnection=true
+          DB_NAME: gestionale_cert_cash_ci
+          ENVIRONMENT: test
+        run: python -m pytest backend/tests/test_cash_count_evidence_real_mongo.py -q --tb=short -rs
+      - name: Remove disposable database
+        if: always()
+        run: docker rm -f cash-count-cert-mongo || true
