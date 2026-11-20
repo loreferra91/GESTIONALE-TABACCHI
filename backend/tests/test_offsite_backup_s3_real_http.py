@@ -122,3 +122,32 @@ def test_corrupted_remote_readback_never_replaces_last_success(monkeypatch, tmp_
     assert not _s3_exists(
         "s3://cert-gestionale-backups/cert/transport-corrupt/last-success.json"
     )
+
+
+def test_official_b2_endpoint_over_real_disposable_s3_http(monkeypatch):
+    """Map B2 endpoint to localhost in CI; no Internet/provider credentials."""
+    monkeypatch.setattr(offsite, "backup", _synthetic_encrypted_archive)
+    original = offsite._run_aws
+    endpoint = "https://s3.eu-central-003.backblazeb2.com"
+    observed = []
+
+    def redirect_to_moto(*args, endpoint=None):
+        assert endpoint == "https://s3.eu-central-003.backblazeb2.com"
+        observed.append(args[:2])
+        return original(*args, endpoint="http://127.0.0.1:5000")
+
+    monkeypatch.setattr(offsite, "_run_aws", redirect_to_moto)
+    output = offsite.upload_encrypted_backup(
+        db_name="gestionale_staging",
+        config_file="/unused/disposable-mongo",
+        recipient="A" * 40,
+        bucket="cert-gestionale-backups",
+        prefix="cert/transport-b2",
+        endpoint=endpoint,
+    )
+    assert output["offcluster_verified"] is True
+    assert output["restore_certified"] is False
+    assert ("s3api", "list-object-versions") in observed
+    assert observed.count(("s3", "cp")) == 4
+    archive = _s3_bytes(output["archive_key"])
+    assert hashlib.sha256(archive).hexdigest() == output["archive_sha256"]
