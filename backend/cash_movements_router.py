@@ -6,7 +6,7 @@ import json
 import uuid
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import DuplicateKeyError
 import re
@@ -125,6 +125,60 @@ def create_cash_movements_router(
 
     def session_kwargs(session):
         return {"session": session} if session is not None else {}
+
+    async def _delete_audited_movement(collection_name: str, movement_id: str,
+                                       audit_entity: str, request: Request = None):
+        """Delete exactly once with its immutable audit record in one transaction.
+
+        No mutation is made for a repeated delete. POS-linked cash movements
+        must be cancelled through the linked sale batch to protect inventory.
+        """
+        database = get_database()
+        collection = getattr(database, collection_name)
+        event_id = str(uuid.uuid4())
+        operator = str(getattr(getattr(request, "state", None),
+                               "authenticated_user", "operatore-locale")
+                       or "operatore-locale")
+
+        async def operation(session):
+            kwargs = session_kwargs(session)
+            existing = await collection.find_one(
+                {"id": movement_id}, {"_id": 0}, **kwargs
+            )
+            if not existing:
+                return {"ok": True}
+            if collection_name == "cassa" and existing.get("batch_id"):
+                raise HTTPException(
+                    409,
+                    "Movimento collegato a Cassa Rapida: annullare il batch originale",
+                )
+            deletion = await collection.delete_one(
+                {"id": movement_id}, **kwargs
+            )
+            if deletion.deleted_count != 1:
+                raise HTTPException(409, "Movimento modificato durante l'annullamento")
+            try:
+                await database.audit_events.insert_one({
+                    "id": event_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "azione": "ELIMINATO",
+                    "entita": audit_entity,
+                    "entita_id": movement_id,
+                    "operatore": operator,
+                    "prima": dict(existing),
+                    "dopo": None,
+                    "idempotency_key": existing.get("idempotency_key"),
+                    "batch_id": existing.get("batch_id"),
+                }, **kwargs)
+            except Exception:
+                if session is None:
+                    # Fallback only for mock/local standalone deployments.
+                    # A real staging/production replica set rolls back both.
+                    await collection.insert_one(dict(existing))
+                raise
+            return {"ok": True}
+
+        return await run_transactionally(operation)
 
     def movement_fingerprint(movement, **overrides):
         payload = movement.model_dump(mode="json", exclude={"idempotency_key"})
@@ -255,13 +309,8 @@ def create_cash_movements_router(
         return response
 
     @router.delete("/versamenti/{m_id}")
-    async def del_versamento(m_id: str):
-        database = get_database()
-        existing = await database.versamenti.find_one({"id": m_id}, {"_id": 0})
-        await database.versamenti.delete_one({"id": m_id})
-        if existing:
-            await record_audit_event("ELIMINATO", "VERSAMENTO", m_id, prima=existing)
-        return {"ok": True}
+    async def del_versamento(m_id: str, request: Request = None):
+        return await _delete_audited_movement("versamenti", m_id, "VERSAMENTO", request)
 
     async def prelievi_vending_summary(limit: int = 500):
         return await movement_summary(get_database().prelievi_vending, limit)
@@ -405,15 +454,10 @@ def create_cash_movements_router(
         return response
 
     @router.delete("/scontrini-vending/{m_id}")
-    async def del_scontrino_vending(m_id: str):
-        database = get_database()
-        existing = await database.scontrini_vending.find_one({"id": m_id}, {"_id": 0})
-        await database.scontrini_vending.delete_one({"id": m_id})
-        if existing:
-            await record_audit_event(
-                "ELIMINATO", "SCONTRINO_VENDING", m_id, prima=existing
-            )
-        return {"ok": True}
+    async def del_scontrino_vending(m_id: str, request: Request = None):
+        return await _delete_audited_movement(
+            "scontrini_vending", m_id, "SCONTRINO_VENDING", request
+        )
 
     @router.get("/cassa")
     async def list_cassa(limit: int = 500):
@@ -480,15 +524,8 @@ def create_cash_movements_router(
         return response
 
     @router.delete("/cassa/{m_id}")
-    async def del_cassa(m_id: str):
-        database = get_database()
-        existing = await database.cassa.find_one({"id": m_id}, {"_id": 0})
-        await database.cassa.delete_one({"id": m_id})
-        if existing:
-            await record_audit_event(
-                "ELIMINATO", "MOVIMENTO_CASSA", m_id, prima=existing
-            )
-        return {"ok": True}
+    async def del_cassa(m_id: str, request: Request = None):
+        return await _delete_audited_movement("cassa", m_id, "MOVIMENTO_CASSA", request)
 
     return {
         "router": router,
