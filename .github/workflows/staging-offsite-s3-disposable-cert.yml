@@ -4,10 +4,14 @@ on:
   push:
     branches:
       - 'feature/staging-offsite-s3-disposable-cert-*'
+      - 'feature/staging-free-b2-backup-*'
       - openclaw/render-staging-deploy
     paths:
       - scripts/offsite_backup_s3.py
       - backend/tests/test_offsite_backup_s3_real_http.py
+      - backend/tests/test_offsite_backup_backblaze_free.py
+      - scripts/install_macos_b2_backup_schedule.py
+      - backend/tests/test_macos_b2_backup_schedule.py
       - .github/workflows/staging-offsite-s3-disposable-cert.yml
   pull_request:
     branches:
@@ -15,6 +19,9 @@ on:
     paths:
       - scripts/offsite_backup_s3.py
       - backend/tests/test_offsite_backup_s3_real_http.py
+      - backend/tests/test_offsite_backup_backblaze_free.py
+      - scripts/install_macos_b2_backup_schedule.py
+      - backend/tests/test_macos_b2_backup_schedule.py
       - .github/workflows/staging-offsite-s3-disposable-cert.yml
   workflow_dispatch:
 

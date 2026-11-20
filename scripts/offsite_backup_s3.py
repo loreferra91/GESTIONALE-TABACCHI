@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from urllib.parse import urlsplit
 
 try:
     from .encrypted_backup import backup
@@ -36,8 +37,63 @@ def s3_location(bucket, prefix):
     return f"s3://{bucket}/{normalized}"
 
 
-def _run_aws(*args):
-    subprocess.run(["aws", *args], check=True, capture_output=True, text=True)
+BACKBLAZE_ENDPOINT_RE = re.compile(r"^s3\.[a-z0-9]+(?:-[a-z0-9]+)*\.backblazeb2\.com$")
+BACKBLAZE_FREE_GUARD_BYTES = 8 * 1024**3  # reserve headroom below provider's 10 GB free allowance
+
+
+def validate_endpoint(endpoint):
+    """Only accept HTTPS regional Backblaze S3 endpoints or AWS default."""
+    if endpoint is None:
+        return None
+    try:
+        parsed = urlsplit(endpoint)
+        hostname = (parsed.hostname or "").lower()
+        allowed = (
+            parsed.scheme == "https"
+            and BACKBLAZE_ENDPOINT_RE.fullmatch(hostname)
+            and not parsed.username and not parsed.password
+            and parsed.port is None and not parsed.path
+            and not parsed.query and not parsed.fragment
+        )
+    except (TypeError, ValueError):
+        allowed = False
+    if not allowed:
+        raise ValueError("Only the official regional Backblaze HTTPS S3 endpoint is accepted")
+    return endpoint
+
+
+def _run_aws(*args, endpoint=None):
+    cmd = ["aws"]
+    if endpoint:
+        cmd.extend(["--endpoint-url", endpoint])
+    cmd.extend(args)
+    return subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def _remote_version_bytes(bucket, *, endpoint):
+    """Conservative S3 version inventory including historical object versions.
+
+    A dedicated private bucket is required. This does not account for other
+    buckets in the account; operator B2 caps and alerts remain mandatory.
+    """
+    result = _run_aws(
+        "s3api", "list-object-versions", "--bucket", bucket,
+        "--output", "json", endpoint=endpoint,
+    )
+    try:
+        data = json.loads(result.stdout)
+        versions = data.get("Versions", [])
+        # Do not underestimate usage if the API/client returns a partial page.
+        if data.get("IsTruncated") is True:
+            raise ValueError("Incomplete version inventory")
+        if not isinstance(versions, list):
+            raise ValueError("Bad versions payload")
+        sizes = [x["Size"] for x in versions]
+        if any(type(size) is not int or size < 0 for size in sizes):
+            raise ValueError("Bad object size")
+        return sum(sizes)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Unable to verify full remote B2 storage inventory") from None
 
 
 def _sha256_file(path):
@@ -45,10 +101,16 @@ def _sha256_file(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def upload_encrypted_backup(*, db_name, config_file, recipient, bucket, prefix):
+def upload_encrypted_backup(*, db_name, config_file, recipient, bucket, prefix, endpoint=None):
     if db_name not in {"gestionale_staging", "gestionale"}:
         raise ValueError("Only explicit staging or production database names are supported")
     destination = s3_location(bucket, prefix)
+    endpoint = validate_endpoint(endpoint)
+
+    def aws_call(*args):
+        if endpoint:
+            return _run_aws(*args, endpoint=endpoint)
+        return _run_aws(*args)
     with tempfile.TemporaryDirectory(prefix="gestionale-offsite-") as tmp:
         temporary_dir = Path(tmp)
         record = backup(
@@ -63,11 +125,18 @@ def upload_encrypted_backup(*, db_name, config_file, recipient, bucket, prefix):
 
         archive_key = f"{destination}/{record['filename']}"
         manifest_key = f"{destination}/last-success.json"
+        if endpoint:
+            # Backblaze has a perpetual 10 GB free storage allowance.
+            # Account-level usage may include other buckets and multipart uploads;
+            # this 8 GiB *bucket* cap is an additional guard, not a billing guarantee.
+            stored = _remote_version_bytes(bucket, endpoint=endpoint)
+            if stored + record["bytes"] + 16_384 > BACKBLAZE_FREE_GUARD_BYTES:
+                raise RuntimeError("B2 free storage safety budget exceeded; no archive uploaded")
         # No bearer tokens, database URI or plaintext passed as command args.
-        _run_aws("s3", "cp", str(encrypted), archive_key, "--only-show-errors",
+        aws_call("s3", "cp", str(encrypted), archive_key, "--only-show-errors",
                  "--sse", "AES256")
         downloaded = temporary_dir / "verified-remote.archive.gpg"
-        _run_aws("s3", "cp", archive_key, str(downloaded), "--only-show-errors")
+        aws_call("s3", "cp", archive_key, str(downloaded), "--only-show-errors")
         if downloaded.stat().st_size != record["bytes"] or _sha256_file(downloaded) != record["sha256"]:
             raise RuntimeError("Off-cluster archive read-back verification failed")
 
@@ -83,11 +152,11 @@ def upload_encrypted_backup(*, db_name, config_file, recipient, bucket, prefix):
         manifest = temporary_dir / "verified-last-success.json"
         manifest.write_text(json.dumps(verified_record, sort_keys=True), encoding="utf-8")
         manifest.chmod(0o600)
-        _run_aws("s3", "cp", str(manifest), manifest_key, "--only-show-errors",
+        aws_call("s3", "cp", str(manifest), manifest_key, "--only-show-errors",
                  "--sse", "AES256")
         # Confirm exact remote manifest bytes as well.
         returned_manifest = temporary_dir / "verified-last-success-remote.json"
-        _run_aws("s3", "cp", manifest_key, str(returned_manifest), "--only-show-errors")
+        aws_call("s3", "cp", manifest_key, str(returned_manifest), "--only-show-errors")
         if _sha256_file(manifest) != _sha256_file(returned_manifest):
             raise RuntimeError("Remote backup success manifest verification failed")
         return {
@@ -105,6 +174,10 @@ def main():
     parser.add_argument("--recipient", required=True)
     parser.add_argument("--s3-bucket", required=True)
     parser.add_argument("--s3-prefix", required=True)
+    parser.add_argument(
+        "--s3-endpoint",
+        help="Official https://s3.REGION.backblazeb2.com endpoint; omit for AWS S3",
+    )
     parser.add_argument("--allow-production", action="store_true")
     args = parser.parse_args()
     if args.db_name == "gestionale" and not args.allow_production:
@@ -112,6 +185,7 @@ def main():
     summary = upload_encrypted_backup(
         db_name=args.db_name, config_file=args.mongodump_config,
         recipient=args.recipient, bucket=args.s3_bucket, prefix=args.s3_prefix,
+        endpoint=args.s3_endpoint,
     )
     print(json.dumps(summary, sort_keys=True))
 
