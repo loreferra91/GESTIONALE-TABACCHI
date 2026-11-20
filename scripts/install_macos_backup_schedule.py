@@ -14,7 +14,8 @@ LABEL = "it.gestionale.tabacchi.backup"
 
 
 def launch_agent(*, python: Path, runner: Path, logs: Path,
-                 hour: int = 3, minute: int = 0, usb_volume: Path | None = None) -> dict:
+                 hour: int = 11, minute: int = 0, usb_volume: Path | None = None,
+                 output_dir: Path | None = None) -> dict:
     if not 0 <= hour < 24 or not 0 <= minute < 60:
         raise ValueError("Invalid schedule")
     if not python.is_file() or not runner.is_file() or runner.is_symlink():
@@ -22,6 +23,8 @@ def launch_agent(*, python: Path, runner: Path, logs: Path,
     args = [str(python.resolve()), str(runner.resolve()), "--allow-production"]
     if usb_volume is not None:
         args.extend(["--usb-volume", str(usb_volume)])
+    if output_dir is not None:
+        args.extend(["--output-dir", str(output_dir.expanduser().absolute())])
     return {"Label": LABEL, "ProgramArguments": args,
             "StartCalendarInterval": {"Hour": hour, "Minute": minute},
             "RunAtLoad": True, "KeepAlive": False,
@@ -33,16 +36,20 @@ def launch_agent(*, python: Path, runner: Path, logs: Path,
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install", action="store_true", help="Write plist, but do not load it")
-    parser.add_argument("--hour", type=int, default=3)
+    parser.add_argument("--hour", type=int, default=11)
     parser.add_argument("--minute", type=int, default=0)
     parser.add_argument("--usb-volume", type=Path, help="Optional mounted USB destination")
+    parser.add_argument("--output-dir", type=Path,
+                        default=Path.home() / "Backup-Gestionale-Tabacchi",
+                        help="Local private archive directory")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent
     home = Path.home()
     logs = home / "Library/Logs/GestionaleTabacchiBackup"
     output = home / "Library/LaunchAgents" / f"{LABEL}.plist"
     agent = launch_agent(python=Path(sys.executable), runner=root / "macos_backup_runner.py",
-                         logs=logs, hour=args.hour, minute=args.minute, usb_volume=args.usb_volume)
+                         logs=logs, hour=args.hour, minute=args.minute, usb_volume=args.usb_volume,
+                         output_dir=args.output_dir)
     if not args.install:
         print("PREFLIGHT OK: LaunchAgent prepared but not installed or loaded")
         print(f"Schedule: {args.hour:02}:{args.minute:02} local time; RunAtLoad enabled")
