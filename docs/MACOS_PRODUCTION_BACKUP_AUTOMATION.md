@@ -5,7 +5,7 @@
 ## Obiettivo e limiti
 
 - Backup di sola lettura del database di produzione `gestionale` sul cluster `Cluster0`.
-- Pianificazione alle **03:00 ora locale macOS (Europe/Rome, se il Mac usa tale fuso)** tramite LaunchAgent dell'utente; `RunAtLoad` permette un tentativo quando l'utente effettua l'accesso. Gli eventi durante il sonno possono essere raggruppati al risveglio; il Mac **spento** non esegue backup.
+- Pianificazione alle **11:00 ora locale macOS (Europe/Rome, se il Mac usa tale fuso)** tramite LaunchAgent dell'utente; `RunAtLoad` permette un tentativo quando l'utente effettua l'accesso. Gli eventi durante il sonno possono essere raggruppati al risveglio; il Mac **spento** non esegue backup.
 - `mongodump --archive --gzip` → `gpg --encrypt` tramite pipeline, senza un archivio BSON in chiaro su disco; file `.partial` fino al completamento.
 - Password letta da un elemento del Portachiavi **login** mediante `/usr/bin/security`, senza password nell'URI, negli argomenti CLI, nel repository o nei log. Viene creato solo durante l'esecuzione un file YAML credenziali in directory privata 0700, file 0600, rimosso in uscita. Come per ogni credenziale di backup, il Mac va protetto con FileVault e accesso utente protetto.
 - Filtro per evitare un secondo backup se l'ultimo file è verificato e risale a meno di 12 ore. Lock per evitare due esecuzioni contemporanee.
@@ -85,7 +85,7 @@ python3 scripts/backup_health.py --directory "$HOME/Gestionale-Backups" \
 
 `--force` esegue un nuovo dump. Controllare che il comando termini con `local_verified` e `backup_fresh: true`. **Non** lanciare il comando su un Mac che non si considera attendibile.
 
-### 4. Attivazione alle 03:00
+### 4. Attivazione alle 11:00
 
 ```bash
 launchctl bootstrap "gui/$(id -u)" \
@@ -126,3 +126,44 @@ Il comando disattiva il job, **senza cancellare** file di backup, manifest o pas
 - `python3 -m pytest backend/tests/test_macos_backup_runner.py -q` — test del wrapper e dell'installer su dati fittizi, senza accesso Mac/Atlas.
 - `python3 -m compileall scripts` — verifica sintattica.
 - Esecuzione reale di `launchctl`, Keychain e `mongodump`: **NON VERIFICATA su questo Mac dalla sessione remota**. Seguire i passaggi sopra e registrare il risultato.
+
+## Cambio orario e percorso locale (20 novembre 2026)
+
+Nuova pianificazione: **11:00 ora locale**, destinazione **~/Backup-Gestionale-Tabacchi**.
+
+Lo strumento scripts/reconfigure_macos_backup.py esegue una **copia conservativa**
+degli archivi GPG e del manifest last-success.json. Verifica i byte con SHA-256,
+non sovrascrive file differenti e non cancella la directory originale.
+Salva il plist precedente e tenta il rollback se il bootstrap aggiornato fallisce.
+
+### Installazione sul Mac (la chat non ha accesso al computer locale)
+
+```bash
+cd "$HOME/GESTIONALE-TABACCHI-BACKUP"
+git status --short
+git pull --ff-only origin feature/macos-encrypted-backup-launchd-20261120
+python3 scripts/reconfigure_macos_backup.py
+```
+
+Dopo PREFLIGHT OK:
+
+```bash
+python3 scripts/reconfigure_macos_backup.py --apply
+python3 scripts/backup_health.py --directory "$HOME/Backup-Gestionale-Tabacchi" --max-age-hours 24 --verify-hash
+plutil -extract StartCalendarInterval json -o - "$HOME/Library/LaunchAgents/it.gestionale.tabacchi.backup.plist"
+launchctl print "gui/$(id -u)/it.gestionale.tabacchi.backup"
+```
+
+Il risultato atteso include SCHEDULE: 11:00 local time e LAUNCHAGENT: loaded.
+Verificare backup_fresh: true e hash_valid: true nella nuova directory.
+La prima **esecuzione realmente pianificata** alle 11:00 resta da verificare.
+
+### Backup manuale nel nuovo percorso
+
+```bash
+python3 scripts/macos_backup_runner.py --allow-production --output-dir "$HOME/Backup-Gestionale-Tabacchi" --force
+```
+
+**Rollback:** conservare la copia del precedente plist indicata dallo script.
+Non eliminare i backup originali. Se il LaunchAgent è ancora running, la
+migrazione si interrompe prima di disattivare il servizio.
