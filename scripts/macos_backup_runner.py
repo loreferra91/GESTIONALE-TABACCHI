@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import shutil
 import subprocess
 import sys
@@ -121,10 +122,13 @@ def should_skip_recent_backup(output_dir: Path, threshold_hours: float = 12) -> 
 
 
 def run_backup(*, output_dir: Path, temp_root: Path, lock_dir: Path,
-               usb_volume: Path | None, force: bool = False) -> dict:
+               usb_volume: Path | None, force: bool = False, on_stage=None) -> dict:
+    stage = on_stage or (lambda name: None)
+    stage("local_directories")
     _require_private_directory(output_dir)
     _require_private_directory(temp_root)
     _require_private_directory(lock_dir)
+    stage("acquire_lock")
     lock_file = lock_dir / "production-backup.lock"
     with lock_file.open("a+b") as lock:
         os.chmod(lock_file, 0o600)
@@ -132,24 +136,31 @@ def run_backup(*, output_dir: Path, temp_root: Path, lock_dir: Path,
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError("Backup already running on this Mac") from exc
+        stage("freshness_check")
         if not force and should_skip_recent_backup(output_dir):
             result = {"status": "recent_verified_backup_present", "backup_created": False}
             if usb_volume is not None:
                 record = json.loads((output_dir / "last-success.json").read_text(encoding="utf-8"))
                 # check_backup verified the name, length, and hash above.
                 archive = output_dir / Path(record["filename"]).name
+                stage("usb_copy")
                 result["usb_path"] = str(mirror_to_removable_volume(archive, record, usb_volume))
                 result["usb_verified"] = True
             return result
+        stage("toolchain")
         for binary in ("mongodump", "gpg"):
             if not shutil.which(binary):
                 raise RuntimeError(f"Required tool unavailable: {binary}")
+        stage("keychain_access")
         password = read_keychain_password()
+        stage("temporary_credentials")
         with private_mongodump_config(password, temp_root) as config:
             password = ""  # Do not retain an additional reference longer than needed.
+            stage("mongodump_gpg")
             record = backup(db_name=DATABASE, config_file=str(config),
                             output_dir=str(output_dir), recipient=FINGERPRINT)
         archive = output_dir / record["filename"]
+        stage("local_integrity")
         health = check_backup(str(output_dir), max_age_hours=1, verify_hash=True)
         if not health["backup_fresh"] or sha256(archive) != record["sha256"]:
             raise RuntimeError("Local backup post-write verification failed")
@@ -158,12 +169,60 @@ def run_backup(*, output_dir: Path, temp_root: Path, lock_dir: Path,
                   "bytes": record["bytes"], "restore_certified": False,
                   "consistency": "not_transactionally_certified"}
         if usb_volume is not None:
+            stage("usb_copy")
             target = mirror_to_removable_volume(archive, record, usb_volume)
             result["usb_verified"] = True
             result["usb_path"] = str(target)
         else:
             result["usb_verified"] = False
         return result
+
+
+def local_diagnostics(output_dir: Path, temp_root: Path, lock_dir: Path) -> dict:
+    """Read-only environment inventory. Never prints or retrieves a secret."""
+    def private_dir_state(path: Path) -> str:
+        if path.is_symlink():
+            return "unsafe_symlink"
+        if not path.exists():
+            return "not_created_yet"
+        if not path.is_dir() or path.stat().st_uid != os.getuid():
+            return "wrong_type_or_owner"
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            return "permissions_not_private"
+        return "ok"
+
+    tools_ok = {name: shutil.which(name) is not None for name in ("mongodump", "gpg")}
+    gpg_key = False
+    if tools_ok["gpg"]:
+        try:
+            keys = subprocess.run(["gpg", "--batch", "--with-colons", "--list-keys", FINGERPRINT],
+                                  capture_output=True, text=True, timeout=20, check=False)
+            gpg_key = (keys.returncode == 0 and any(
+                row.startswith("fpr:") and row.split(":")[9].upper() == FINGERPRINT
+                for row in keys.stdout.splitlines()))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    keychain_found = False
+    try:
+        item = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", ACCOUNT,
+                               "-s", SERVICE], capture_output=True, text=True,
+                              timeout=20, check=False)
+        keychain_found = item.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return {
+        "status": "local_diagnostics_only",
+        "tools_available": tools_ok,
+        "gpg_public_key_found": gpg_key,
+        "keychain_item_found": keychain_found,
+        "directories": {
+            "backup": private_dir_state(output_dir),
+            "temporary": private_dir_state(temp_root),
+            "locks": private_dir_state(lock_dir),
+        },
+        "atlas_credentials_verified": False,
+        "mongodb_connection_tested": False,
+    }
 
 
 def notify_failure():
@@ -184,6 +243,8 @@ def main(argv=None) -> int:
     parser.add_argument("--usb-volume", type=Path,
                         help="Optional mounted USB volume; failure if missing")
     parser.add_argument("--preflight", action="store_true", help="No backup and no Keychain access")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Read-only local checks without displaying or retrieving passwords")
     args = parser.parse_args(argv)
     if not args.allow_production:
         parser.error("Production backup requires explicit --allow-production")
@@ -199,14 +260,19 @@ def main(argv=None) -> int:
                               "tools_available": {b: bool(shutil.which(b)) for b in ("mongodump", "gpg")}},
                              sort_keys=True))
             return 0
+        if args.diagnose:
+            print(json.dumps(local_diagnostics(output_dir, temp_root, lock_dir), sort_keys=True))
+            return 0
+        last_stage = ["startup"]
         result = run_backup(output_dir=output_dir, temp_root=temp_root,
                             lock_dir=lock_dir, usb_volume=args.usb_volume,
-                            force=args.force)
+                            force=args.force, on_stage=lambda stage: last_stage.__setitem__(0, stage))
         print(json.dumps(result, sort_keys=True))
         return 0
-    except Exception as exc:
-        # Avoid printing exception strings, which might include sensitive paths or values.
-        print("ERROR: production backup was not fully verified; inspect local setup", file=sys.stderr)
+    except Exception:
+        # Never print underlying exception messages: tools could embed credentials.
+        stage = last_stage[0] if "last_stage" in locals() else "startup"
+        print(f"ERROR [{stage}]: production backup was not fully verified", file=sys.stderr)
         notify_failure()
         return 2
 
