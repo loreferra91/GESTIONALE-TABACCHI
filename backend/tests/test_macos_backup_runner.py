@@ -180,3 +180,33 @@ def test_failure_displays_only_sanitized_stage(modules, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "ERROR [keychain_access]" in err
     assert "CONTAINS_SENSITIVE_MONGODB_PASSWORD" not in err
+
+
+def test_runner_accepts_explicit_local_archive_dir(modules, monkeypatch, tmp_path, capsys):
+    runner, _ = modules
+    destination = tmp_path / "Backup-Gestionale-Tabacchi"
+    captured = {}
+
+    def fake_run_backup(**kwargs):
+        captured.update(kwargs)
+        return {"status": "recent_verified_backup_present", "backup_created": False}
+
+    monkeypatch.setattr(runner, "run_backup", fake_run_backup)
+    assert runner.main(["--allow-production", "--output-dir", str(destination)]) == 0
+    assert captured["output_dir"] == destination
+    assert "recent_verified_backup_present" in capsys.readouterr().out
+
+
+def test_installer_encodes_new_path_and_11am(modules, tmp_path):
+    _, installer = modules
+    python = tmp_path / "python3"
+    runner = tmp_path / "backup.py"
+    python.touch()
+    runner.touch()
+    destination = tmp_path / "Backup-Gestionale-Tabacchi"
+    plist = installer.launch_agent(
+        python=python, runner=runner, logs=tmp_path,
+        hour=11, minute=0, output_dir=destination,
+    )
+    assert plist["StartCalendarInterval"] == {"Hour": 11, "Minute": 0}
+    assert plist["ProgramArguments"][-2:] == ["--output-dir", str(destination)]
