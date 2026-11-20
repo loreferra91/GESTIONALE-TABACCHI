@@ -92,3 +92,9 @@ def test_scoped_probe_reads_only_and_does_not_modify_other_collections():
         ("db_command", "ping"),
         ("find_one", {}, {"_id": 1}),
     ]
+
+
+def test_staging_scoped_active_mode_does_not_need_legacy_uri():
+    assert choose_staging_connection("staging", "active", "", NEW) == (NEW, "active")
+    # Mode selection outside staging must never silently accept the staging URL.
+    assert choose_staging_connection("production", "active", "", NEW) == ("", "legacy")
