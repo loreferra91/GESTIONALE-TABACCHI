@@ -38,6 +38,27 @@ security find-generic-password -a gestionale_backup_reader_prod \
 
 Alla prima esecuzione automatica, macOS potrebbe chiedere di autorizzare la lettura dell'elemento. Verificare l'identità del processo prima di consentirla. Se il Portachiavi è bloccato, il job deve fallire, senza degradare la sicurezza.
 
+## Risoluzione errori durante il primo avvio
+
+Se `git clone` segnala che `~/GESTIONALE-TABACCHI-BACKUP` esiste, non cancellarla. Esamina prima il checkout:
+
+```bash
+git -C "$HOME/GESTIONALE-TABACCHI-BACKUP" status --short
+git -C "$HOME/GESTIONALE-TABACCHI-BACKUP" branch --show-current
+```
+
+Se il branch è `feature/macos-encrypted-backup-launchd-20261120` e la directory non contiene modifiche locali, aggiornare senza forzature:
+
+```bash
+git -C "$HOME/GESTIONALE-TABACCHI-BACKUP" pull --ff-only origin feature/macos-encrypted-backup-launchd-20261120
+cd "$HOME/GESTIONALE-TABACCHI-BACKUP"
+python3 scripts/macos_backup_runner.py --allow-production --diagnose
+```
+
+`--diagnose` è **in sola lettura**, non legge la password e non effettua connessioni Atlas. Restituisce soltanto presenza dell'elemento Portachiavi, della chiave pubblica GPG, strumenti disponibili e permessi delle directory. `keychain_item_found: false` indica elemento assente/non accessibile, non una password errata. `permissions_not_private` richiede ispezione dei permessi prima di modificarli. `not_created_yet` per cartelle temporanee è normale al primo avvio. Se `--force` continua a fallire, il codice aggiornato stampa una fase, ad esempio `ERROR [keychain_access]` o `ERROR [mongodump_gpg]`, senza stampare eccezioni potenzialmente sensibili. Il preflight originale non prova Keychain, autenticazione o comunicazione con Atlas.
+
+Non pubblicare in issue, log o chat il risultato di `security ... -w`, il file YAML temporaneo, gli URI con password o screenshot del Portachiavi contenenti credenziali.
+
 ## 2. Configurare il LaunchAgent (non attiva la pianificazione finché non caricato)
 
 Con il branch dedicato aperto nel terminale, eseguire:
