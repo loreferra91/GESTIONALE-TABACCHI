@@ -211,9 +211,11 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url, staging_mongo_role_mode = choose_staging_connection(
     os.environ.get("ENVIRONMENT"),
     os.environ.get("STAGING_MONGO_ROLE_MODE", "legacy"),
-    os.environ["MONGO_URL"],
+    os.environ.get("MONGO_URL") or "",
     os.environ.get("STAGING_SCOPED_MONGO_URL"),
 )
+if not mongo_url:
+    raise RuntimeError("MONGO_URL non configurato per la modalità attiva")
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
@@ -269,11 +271,20 @@ def _validate_runtime_security() -> None:
         # for Atlas database-user least-privilege verification.
         if os.environ.get("DB_NAME") != "gestionale_staging":
             raise RuntimeError("Staging bloccato: DB_NAME diverso dal database isolato")
+        # Validate the URI actually selected at startup, not the old
+        # rollback-only MONGO_URL. After controlled revocation, the active
+        # scoped URI must be sufficient even without a legacy credential.
+        active_url, _ = choose_staging_connection(
+            os.environ.get("ENVIRONMENT"),
+            os.environ.get("STAGING_MONGO_ROLE_MODE", "legacy"),
+            os.environ.get("MONGO_URL") or "",
+            os.environ.get("STAGING_SCOPED_MONGO_URL"),
+        )
         try:
-            parsed_mongo = urlsplit(os.environ.get("MONGO_URL") or "")
+            parsed_mongo = urlsplit(active_url or "")
             host = (parsed_mongo.hostname or "").lower()
         except ValueError as exc:
-            raise RuntimeError("Staging bloccato: MONGO_URL non valido") from exc
+            raise RuntimeError("Staging bloccato: URI MongoDB attivo non valido") from exc
         if not (
             parsed_mongo.scheme == "mongodb+srv"
             and host.startswith("gestionale-staging.")

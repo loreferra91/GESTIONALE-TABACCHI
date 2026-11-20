@@ -14,6 +14,7 @@ def _set_staging(monkeypatch, db_name="gestionale_staging", url=None):
         url or "mongodb+srv://staging_user:synthetic_pass@gestionale-staging.example.mongodb.net/gestionale_staging",
     )
     monkeypatch.setenv("AGENT_INTEGRATION_ENABLED", "false")
+    monkeypatch.setenv("STAGING_MONGO_ROLE_MODE", "legacy")
 
 
 def test_staging_accepts_known_database_and_dedicated_cluster(monkeypatch):
@@ -46,3 +47,32 @@ def test_prod_does_not_inherit_staging_only_guard(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("MONGO_URL", "mongodb+srv://other_user:synthetic_pass@production.example.mongodb.net/gestionale")
     server._validate_runtime_security()
+
+
+def test_staging_active_scoped_uri_is_valid_even_without_legacy_secret(monkeypatch):
+    _set_staging(monkeypatch)
+    monkeypatch.delenv("MONGO_URL")
+    monkeypatch.setenv("STAGING_MONGO_ROLE_MODE", "active")
+    monkeypatch.setenv(
+        "STAGING_SCOPED_MONGO_URL",
+        "mongodb+srv://scoped:synthetic@gestionale-staging.example.mongodb.net/gestionale_staging",
+    )
+    server._validate_runtime_security()
+
+
+def test_staging_legacy_without_mongo_uri_still_fails_closed(monkeypatch):
+    _set_staging(monkeypatch)
+    monkeypatch.delenv("MONGO_URL")
+    with pytest.raises(RuntimeError, match="cluster MongoDB"):
+        server._validate_runtime_security()
+
+
+def test_staging_active_rejects_wrong_cluster_even_if_legacy_is_valid(monkeypatch):
+    _set_staging(monkeypatch)
+    monkeypatch.setenv("STAGING_MONGO_ROLE_MODE", "active")
+    monkeypatch.setenv(
+        "STAGING_SCOPED_MONGO_URL",
+        "mongodb+srv://scoped:synthetic@production.example.mongodb.net/gestionale",
+    )
+    with pytest.raises(RuntimeError):
+        server._validate_runtime_security()
