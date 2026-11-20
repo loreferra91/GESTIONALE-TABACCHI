@@ -20,7 +20,9 @@ let root;
 
 beforeEach(async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
-  api.get.mockResolvedValue({ data: [] });
+  api.get.mockImplementation(path => Promise.resolve({
+    data: path === "/backup/restore-file/status" ? { phase: "READY" } : [],
+  }));
   api.post.mockImplementation(path => {
     if (path === "/backup/restore-file/preview") {
       return Promise.resolve({
@@ -103,4 +105,57 @@ test("rejects oversized file in browser without network or DB writes", async () 
   expect(api.post).not.toHaveBeenCalled();
   expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("20 MiB"));
   expect(container.textContent).not.toContain("Ripristinare il backup dal file?");
+});
+
+
+test("blocks a new upload while a staging restore is incomplete", async () => {
+  api.get.mockImplementation(path => Promise.resolve({
+    data: path === "/backup/restore-file/status"
+      ? { phase: "RESTORING", checkpoint_id: "cert-synthetic" } : [],
+  }));
+  await chooseRestoreFile(new File(["{}"], "gestionale-backup-test.json", { type: "application/json" }));
+  expect(api.post).not.toHaveBeenCalled();
+  expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("Ripristino precedente incompleto"));
+  expect(container.querySelector('[data-testid="backup-restore-status-warning"]').textContent)
+    .toContain("RESTORING");
+});
+
+test("rechecks restore state immediately before destructive POST", async () => {
+  await chooseRestoreFile(new File(["{}"], "gestionale-backup-test.json", { type: "application/json" }));
+  api.get.mockImplementation(path => Promise.resolve({
+    data: path === "/backup/restore-file/status" ? { phase: "FAILED" } : [],
+  }));
+  const confirm = [...container.querySelectorAll("button")].find(
+    button => button.textContent === "Ripristina dal file",
+  );
+  await act(async () => confirm.click());
+  expect(api.post.mock.calls.map(call => call[0])).toEqual(["/backup/restore-file/preview"]);
+  expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("staging non è nello stato READY"));
+  expect(container.querySelector('[data-testid="backup-restore-status-warning"]').textContent)
+    .toContain("FAILED");
+});
+
+test("HTTP 503 with READY state reports checkpoint recovery but never retries automatically", async () => {
+  await chooseRestoreFile(new File(["{}"], "gestionale-backup-test.json", { type: "application/json" }));
+  api.post.mockImplementation(path => {
+    if (path === "/backup/restore-file") {
+      return Promise.reject({ response: { status: 503, data: { detail: "Rollback verified" } } });
+    }
+    return Promise.reject(new Error("Unexpected POST"));
+  });
+  const confirm = [...container.querySelectorAll("button")].find(
+    button => button.textContent === "Ripristina dal file",
+  );
+  await act(async () => confirm.click());
+  expect(api.post.mock.calls.filter(call => call[0] === "/backup/restore-file")).toHaveLength(1);
+  expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("checkpoint precedente recuperato"));
+});
+
+test("status endpoint failure blocks a fresh restore preview", async () => {
+  api.get.mockImplementation(path => path === "/backup/restore-file/status"
+    ? Promise.reject({ response: { status: 503 } }) : Promise.resolve({ data: [] }));
+  await chooseRestoreFile(new File(["{}"], "gestionale-backup-test.json", { type: "application/json" }));
+  expect(api.post).not.toHaveBeenCalled();
+  expect(container.querySelector('[data-testid="backup-restore-status-warning"]').textContent)
+    .toContain("UNKNOWN");
 });
