@@ -240,6 +240,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-production", action="store_true")
     parser.add_argument("--force", action="store_true", help="Ignore freshness gate")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Private local destination for encrypted backup archives")
     parser.add_argument("--usb-volume", type=Path,
                         help="Optional mounted USB volume; failure if missing")
     parser.add_argument("--preflight", action="store_true", help="No backup and no Keychain access")
@@ -249,7 +251,7 @@ def main(argv=None) -> int:
     if not args.allow_production:
         parser.error("Production backup requires explicit --allow-production")
     home = Path.home()
-    output_dir = home / "Gestionale-Backups"
+    output_dir = args.output_dir if args.output_dir is not None else home / "Gestionale-Backups"
     state_dir = home / "Library/Application Support/GestionaleTabacchiBackup"
     temp_root = state_dir / "tmp"
     lock_dir = state_dir / "locks"
