@@ -34,7 +34,8 @@ jobs:
       - name: Install isolated S3 protocol test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install 'moto[server]>=5.1,<5.2' 'awscli>=1.40,<1.43' pytest==9.1.1
+          python -m pip install -r backend/requirements-prod.txt
+          python -m pip install 'moto[server]>=5.1,<5.2' 'awscli>=1.40,<1.43' pytest==9.1.1 pytest-xdist==3.8.0 mongomock-motor==0.0.36 httpx==0.28.1
           aws --version
 
       - name: Exercise offsite upload, read-back and fail-closed manifest on disposable S3
