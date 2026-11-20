@@ -37,7 +37,7 @@ def s3_location(bucket, prefix):
     return f"s3://{bucket}/{normalized}"
 
 
-BACKBLAZE_ENDPOINT_RE = re.compile(r"^s3\\.[a-z0-9]+(?:-[a-z0-9]+)*\\.backblazeb2\\.com$")
+BACKBLAZE_ENDPOINT_RE = re.compile(r"^s3\.[a-z0-9]+(?:-[a-z0-9]+)*\.backblazeb2\.com$")
 BACKBLAZE_FREE_GUARD_BYTES = 8 * 1024**3  # reserve headroom below provider's 10 GB free allowance
 
 
@@ -83,6 +83,9 @@ def _remote_version_bytes(bucket, *, endpoint):
     try:
         data = json.loads(result.stdout)
         versions = data.get("Versions", [])
+        # Do not underestimate usage if the API/client returns a partial page.
+        if data.get("IsTruncated") is True:
+            raise ValueError("Incomplete version inventory")
         if not isinstance(versions, list):
             raise ValueError("Bad versions payload")
         sizes = [x["Size"] for x in versions]
