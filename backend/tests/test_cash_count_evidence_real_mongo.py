@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 from motor.motor_asyncio import AsyncIOMotorClient
 import pytest
 from fastapi import HTTPException
-from pymongo.errors import DuplicateKeyError
 
 from backend.cash_count_evidence_router import (
     CashCountEvidenceIn,
@@ -108,8 +107,10 @@ def test_cash_count_audit_conflict_aborts_observation_atomically():
         await db.audit_events.insert_one({
             "_id": f"cash-count-audit:{key}", "id": "collision",
         })
-        with pytest.raises(DuplicateKeyError):
+        with pytest.raises(HTTPException) as conflict:
             await append(_body(key), request)
+        # The API intentionally translates MongoDB duplicate-key exceptions.
+        assert conflict.value.status_code == 409
         assert await db.cash_count_evidence.count_documents({}) == 0
         assert await db.audit_events.count_documents({}) == 1
         for col in ["cassa", "vendite", "prodotti", "accounting_baselines"]:
