@@ -76,7 +76,16 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
             return None
 
     def stock(collection, doc, field):
-        raw = doc.get(field, 0)
+        # Missing historical stock is UNKNOWN, not zero. Never fabricate a
+        # baseline or silently compare incomplete product/vending records.
+        if field not in doc or doc[field] is None:
+            issue(
+                "GIACENZA_MANCANTE", collection, doc,
+                f"{field}: valore assente; impossibile presumere una giacenza zero.",
+                campo=field,
+            )
+            return None
+        raw = doc[field]
         try:
             value = Decimal(str(raw))
             if isinstance(raw, bool) or not value.is_finite() or value < 0 or value != value.to_integral_value():
@@ -135,13 +144,49 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                 events[key].append((doc, value))
     compared_sales = unmatched_sales = 0
     bulk_sales_by_batch = Counter()
+    bulk_missing_batch_first_date = None
+    bulk_missing_batch_last_date = None
+    pos_sales_by_batch = {}
     async for doc in database.vendite.find({}):
         if not in_date_range(doc):
             continue
         scanned["vendite"] += 1
         value = amount("vendite", doc, "importo")
         if not date_from and not date_to and doc.get("sorgente") == "BULK":
-            bulk_sales_by_batch[str(doc.get("batch_id") or "")] += 1
+            batch_key = str(doc.get("batch_id") or "").strip()
+            bulk_sales_by_batch[batch_key] += 1
+            if not batch_key:
+                # Historic BULK rows may predate the introduction of batch IDs.
+                # Record their date range without inventing parent batches or
+                # assuming any undocumented database migration cutoff.
+                sale_day = str(doc.get("data") or "")[:10]
+                if len(sale_day) == 10 and sale_day[4:5] == "-" and sale_day[7:8] == "-":
+                    if bulk_missing_batch_first_date is None or sale_day < bulk_missing_batch_first_date:
+                        bulk_missing_batch_first_date = sale_day
+                    if bulk_missing_batch_last_date is None or sale_day > bulk_missing_batch_last_date:
+                        bulk_missing_batch_last_date = sale_day
+        if not date_from and not date_to and doc.get("sorgente") == "POS":
+            batch_id = str(doc.get("batch_id") or "")
+            aggregate = pos_sales_by_batch.setdefault(batch_id, {
+                "righe": 0, "pezzi": 0, "importo": Decimal(0),
+                "valido": True, "pagamenti": set(),
+            })
+            aggregate["righe"] += 1
+            aggregate["pagamenti"].add(str(doc.get("pagamento") or "").strip().upper())
+            try:
+                quantity = Decimal(str(doc.get("quantita")))
+                if (not quantity.is_finite() or quantity <= 0
+                        or quantity != quantity.to_integral_value()):
+                    raise ValueError()
+                aggregate["pezzi"] += int(quantity)
+            except (TypeError, ValueError, ArithmeticError):
+                aggregate["valido"] = False
+                issue("POS_QUANTITA_INVALIDA", "vendite", doc,
+                      "Riga Cassa Rapida con quantità non intera o non positiva.")
+            if value is None:
+                aggregate["valido"] = False
+            else:
+                aggregate["importo"] += value
         if doc.get("sorgente") != "CSV_VENDING":
             continue
         matches = []
@@ -167,7 +212,14 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
     # than reporting false mismatches for partial batches.
     if not date_from and not date_to:
         audited_undos = {}
-        async for batch in database.vendite_bulk_imports.find({}):
+        # This collection also stores CSV vending import batches:
+        # only shop BULK and legacy source-less batches belong here.
+        async for batch in database.vendite_bulk_imports.find({
+            "$or": [
+                {"sorgente": "BULK"},
+                {"sorgente": {"$exists": False}},
+            ],
+        }):
             scanned["vendite_bulk_imports"] += 1
             batch_id = str(batch.get("id") or "")
             actual = bulk_sales_by_batch.pop(batch_id, 0)
@@ -196,9 +248,20 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                 audited_undos[batch_id] = (batch, expected)
 
         for batch_id, count in bulk_sales_by_batch.items():
-            issue("BULK_BATCH_ORFANO", "vendite", {"id": batch_id},
-                  "Vendite BULK senza un batch valido collegato.",
-                  registrato=count)
+            if not batch_id:
+                # Keep the existing fingerprint for this finding. Reclassifying
+                # it would silently detach notes/state in reconciliation_cases.
+                issue("BULK_BATCH_ORFANO", "vendite", {"id": ""},
+                      "Vendite BULK senza batch_id. Lo schema precedente potrebbe "
+                      "non averlo registrato: verificare provenienza e date prima "
+                      "di qualsiasi rettifica.",
+                      registrato=count, collegamento="batch_id_assente",
+                      prima_data=bulk_missing_batch_first_date,
+                      ultima_data=bulk_missing_batch_last_date)
+            else:
+                issue("BULK_BATCH_ORFANO", "vendite", {"id": batch_id},
+                      "Vendite BULK con batch_id che non corrisponde a un batch registrato.",
+                      registrato=count, collegamento="batch_non_trovato")
 
         if audited_undos:
             audit_counts = Counter()
@@ -215,6 +278,7 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
                           "Mancano documenti di audit per un batch annullato.",
                           registrato=actual, atteso=expected)
 
+    pos_cash_by_batch = defaultdict(list)
     for name, field, signed in (
         ("versamenti", "importo", False), ("prelievi_vending", "importo", False),
         ("scontrini_vending", "importo", False), ("cassa", "importo", True),
@@ -228,7 +292,85 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
             scanned[name] += 1
             if name == "rettifiche_venduti" and field not in doc:
                 continue  # Legacy corrections deliberately have no monetary effect.
-            amount(name, doc, field, signed)
+            parsed = amount(name, doc, field, signed)
+            if name == "cassa" and not date_from and not date_to and doc.get("batch_id"):
+                pos_cash_by_batch[str(doc["batch_id"])].append((doc, parsed))
+
+    # Only native POS rows can be compared to their own batch and cash entry.
+    # Historic Excel, manual and vending amounts are NOT added to POS revenue.
+    if not date_from and not date_to:
+        audited_pos_undos = {}
+        seen_pos_batch_ids = set()
+        async for batch in database.cassa_rapida_batches.find({}):
+            scanned["cassa_rapida_batches"] += 1
+            batch_id = str(batch.get("id") or "")
+            if not batch_id or batch_id in seen_pos_batch_ids:
+                issue("POS_BATCH_DUPLICATO_O_INVALIDO", "cassa_rapida_batches", batch,
+                      "Identificativo batch Cassa Rapida mancante o duplicato.")
+                continue
+            seen_pos_batch_ids.add(batch_id)
+            rows = pos_sales_by_batch.pop(batch_id, None)
+            cash = pos_cash_by_batch.pop(batch_id, [])
+            status = str(batch.get("status") or "").strip().lower()
+
+            if status == "active":
+                try:
+                    expected_pieces = Decimal(str(batch.get("pezzi")))
+                    if (not expected_pieces.is_finite() or expected_pieces <= 0
+                            or expected_pieces != expected_pieces.to_integral_value()):
+                        raise ValueError()
+                    expected_total = money_decimal(batch.get("totale"), nonnegative=True)
+                except (ValueError, TypeError, ArithmeticError):
+                    issue("POS_METADATI_INVALIDI", "cassa_rapida_batches", batch,
+                          "Totale o numero di pezzi del batch non valido.")
+                    continue
+                if (rows is None or not rows["valido"]
+                        or rows["pezzi"] != int(expected_pieces)
+                        or rows["importo"] != expected_total
+                        or rows["pagamenti"] != {
+                            str(batch.get("pagamento") or "").strip().upper()
+                        }):
+                    issue("POS_VENDITE_INCOERENTI", "cassa_rapida_batches", batch,
+                          "Le vendite POS non corrispondono a pezzi, incasso o pagamento del batch.")
+                if (len(cash) != 1
+                        or cash[0][0].get("id") != batch.get("movimento_cassa_id")
+                        or cash[0][0].get("tipo") != "ENTRATA"
+                        or str(cash[0][0].get("pagamento") or "").strip().upper()
+                            != str(batch.get("pagamento") or "").strip().upper()
+                        or cash[0][1] != expected_total):
+                    issue("POS_CASSA_INCOERENTE", "cassa_rapida_batches", batch,
+                          "Il movimento cassa collegato è assente, duplicato o non corrispondente.")
+            elif status in {"annullata", "annulled"}:
+                if rows is not None or cash:
+                    issue("POS_STORNO_INCOMPLETO", "cassa_rapida_batches", batch,
+                          "Un batch annullato contiene ancora vendite o movimenti cassa.")
+                if batch.get("undo_audit_version") == 1:
+                    audited_pos_undos[batch_id] = batch
+            else:
+                issue("POS_STATO_INVALIDO", "cassa_rapida_batches", batch,
+                      "Stato batch Cassa Rapida non riconosciuto.")
+
+        for batch_id, rows in pos_sales_by_batch.items():
+            issue("POS_VENDITE_ORFANE", "vendite", {"id": batch_id},
+                  "Vendite Cassa Rapida prive di un batch valido.",
+                  registrato=rows["righe"])
+        for batch_id, cash in pos_cash_by_batch.items():
+            issue("POS_CASSA_ORFANA", "cassa", {"id": batch_id},
+                  "Movimento Cassa Rapida senza un batch valido.",
+                  registrato=len(cash))
+        if audited_pos_undos:
+            audit_counts = Counter()
+            async for event in database.audit_events.find({
+                "azione": "annulla-vendita-cassa-rapida",
+                "batch_id": {"$in": list(audited_pos_undos)},
+            }):
+                scanned["audit_events_pos"] += 1
+                audit_counts[str(event.get("batch_id"))] += 1
+            for batch_id, batch in audited_pos_undos.items():
+                if audit_counts[batch_id] != 1:
+                    issue("POS_AUDIT_STORNO_INCOERENTE", "cassa_rapida_batches", batch,
+                          "Batch annullato senza un unico evento audit di storno.",
+                          registrato=audit_counts[batch_id], atteso=1)
 
     async for doc in database.vending_accounting_state.find({}):
         scanned["vending_accounting_state"] += 1
@@ -238,9 +380,37 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
         scanned["parametri"] += 1
         amount("parametri", doc, "valore")
 
+    # A clean document scan does NOT certify a physical cash balance.
+    # No synthetic opening balance or Excel-derived cash baseline is inferred.
+    # POS batch comparisons intentionally run only for complete history.
+    cash_count = scanned["cassa"]
+    full_history = not date_from and not date_to
+    financial_coverage = {
+        "stato": "movimenti_nativi_assenti" if cash_count == 0 else "solo_verifiche_documentali",
+        "movimenti_cassa_esaminati": cash_count,
+        "batch_cassa_rapida_esaminati": (
+            scanned["cassa_rapida_batches"] if full_history else None
+        ),
+        "confronto_batch_pos_eseguito": bool(full_history),
+        "baseline_cassa_fisica_verificata": False,
+        "saldo_cassa_certificato": False,
+        "avviso": (
+            "Nessun movimento della cassa nativa nel periodo esaminato: "
+            "non è possibile certificare alcun saldo cassa."
+            if cash_count == 0 else
+            "Movimenti cassa sottoposti ai soli controlli documentali: "
+            "non è stato verificato un fondo fisico di apertura né un conteggio di chiusura."
+        ),
+    }
+    if not full_history:
+        financial_coverage["avviso"] += (
+            " I filtri data escludono il confronto globale dei batch Cassa Rapida."
+        )
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "intervallo": {"da": date_from, "a": date_to},
+        "copertura_finanziaria": financial_coverage,
         "esito": "da_verificare" if counts else "nessuna_discrepanza_rilevata",
         "totale_segnalazioni": sum(counts.values()), "conteggi": dict(counts),
         "conteggi_stato": dict(state_counts),
@@ -250,9 +420,10 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
         "vendite_csv_confrontate": compared_sales, "vendite_csv_non_confrontabili": unmatched_sales,
         "copertura": [
             "Importi di prodotti, listino, vendite, ordini storici, movimenti, rettifiche, storico negozio, baseline contabile e fondo iniziale vending.",
-            "Giacenze non negative e intere; cache vending confrontata con le colonne associate.",
+            "Giacenze presenti, non negative e intere; cache vending confrontata con le colonne associate.",
             "Importo e pagamento delle vendite CSV con un evento contabile univoco.",
-            "Controllo BULK non filtrato: righe attive, batch orfani e audit degli annullamenti nuovi.",
+            "Controllo BULK non filtrato: righe attive, batch mancanti, vendite storiche senza batch_id e audit degli annullamenti nuovi.",
+            "Controllo Cassa Rapida non filtrato: pezzi, importi, pagamento, movimento cassa, orfani e audit degli storni nuovi.",
         ],
         "limiti": [
             "Controllo in sola lettura, non certificazione contabile. Ripetere a operazioni ferme: le letture non sono una fotografia transazionale.",
@@ -260,5 +431,6 @@ async def reconcile(database, payment_bucket, detail_limit=100, date_from=None, 
             "Vendite CSV senza un evento univoco non sono errori: possono appartenere alla baseline storica. Eventi senza vendita sono ammessi dall'allineamento solo contabile.",
             "Non si confronta la cassa tecnica legacy con i saldi: baseline e copertura temporale non sono equivalenti. Non è un conteggio fisico del contante.",
             "Coerenza dei batch BULK verificata soltanto nell'analisi senza filtri data; annullamenti legacy senza versione audit non sono giudicati retroattivamente.",
+            "Coerenza Cassa Rapida verificata senza filtri data e solo su registrazioni native POS; nessuna ricostruzione del saldo fisico o del pregresso Excel.",
         ],
     }
