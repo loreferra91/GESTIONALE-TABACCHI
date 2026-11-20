@@ -182,6 +182,7 @@ def main(argv=None) -> int:
     parser.add_argument("--upload-and-restore", action="store_true",
                         help="Explicitly upload encrypted bytes to B2 and restore from download")
     args = parser.parse_args(argv)
+    stage = "local_validation"
     try:
         validate_target(args.bucket, args.endpoint, args.profile)
         archive, record = checked_local_archive(args.directory.expanduser())
@@ -190,16 +191,19 @@ def main(argv=None) -> int:
         if not args.upload_and_restore:
             print("PREFLIGHT OK: nothing uploaded or restored; use --upload-and-restore")
             return 0
+        stage = "toolchain"
         for binary in ("aws", "gpg", "docker"):
             if not shutil.which(binary):
                 raise RuntimeError(f"Required tool unavailable: {binary}")
         with tempfile.TemporaryDirectory(prefix="gestionale-b2-verify-") as temp:
+            stage = "b2_upload_and_readback"
             downloaded, key = remote_roundtrip(archive, record, bucket=args.bucket,
                                                 endpoint=args.endpoint,
                                                 profile=args.profile,
                                                 destination=Path(temp))
             print(json.dumps({"step": "b2_readback_verified", "bucket": args.bucket,
                               "object_key": key, "sha256": digest(downloaded)}, sort_keys=True))
+            stage = "isolated_docker_restore"
             summary = restore_isolated(downloaded)
         print(json.dumps({"status": "B2_REMOTE_RESTORE_VERIFIED", "restore": summary,
                           "note": "Logical isolated restore; live dump is not a transactional snapshot"},
@@ -207,7 +211,7 @@ def main(argv=None) -> int:
         return 0
     except Exception as error:
         # Never show AWS CLI stderr, credentials or database documents.
-        print(f"ERROR [{type(error).__name__}]: B2 proof NOT completed", file=sys.stderr)
+        print(f"ERROR [{stage}/{type(error).__name__}]: B2 proof NOT completed", file=sys.stderr)
         return 2
 
 
