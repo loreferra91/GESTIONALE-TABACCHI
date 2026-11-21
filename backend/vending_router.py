@@ -8,7 +8,7 @@ import re
 import uuid
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import DuplicateKeyError
@@ -237,16 +237,25 @@ def create_vending_router(
         kwargs = session_kwargs(session)
         columns = await database.vending.find(
             {"codice": code}, {"_id": 0, "giacenza": 1}, **kwargs
-        ).to_list(500)
+        ).to_list(None)
         total = sum(
             max(0, int(row.get("giacenza", 0) or 0)) for row in columns
         )
-        await database.prodotti.update_one(
+        result = await database.prodotti.update_one(
             {"codice": code}, {"$set": {"giacenza_vending": total}}, **kwargs
         )
+        if result.matched_count != 1:
+            raise HTTPException(409, "Prodotto vending non trovato: riconciliazione bloccata")
 
     @router.put("/vending/{column_id}/giacenza")
-    async def update_vending_giacenza(column_id: str, body: Dict[str, Any]):
+    async def update_vending_giacenza(
+        column_id: str, body: Dict[str, Any], request: Request = None,
+    ):
+        """Atomically correct the column, product total and immutable audit.
+
+        A repeated PUT for the already-recorded quantity is a no-op. All
+        cross-document writes share the same Mongo transaction in Atlas.
+        """
         raw_value = body.get("giacenza")
         try:
             stock = int(raw_value)
@@ -264,37 +273,65 @@ def create_vending_router(
             raise HTTPException(422, "La giacenza non può essere negativa")
 
         database = get_database()
-        current = await database.vending.find_one({"id": column_id})
-        if not current:
-            raise HTTPException(404, "Colonna vending non trovata")
-        capacity = int(current.get("capacita_max", 0) or 0)
-        if capacity > 0 and stock > capacity:
-            raise HTTPException(
-                422,
-                f"La giacenza supera la capacità della colonna ({capacity})",
-            )
-        old_value = int(current.get("giacenza", 0) or 0)
-        result = await database.vending.update_one(
-            {"id": column_id, "giacenza": current.get("giacenza", 0)},
-            {"$set": {
+
+        async def correct(session):
+            kwargs = session_kwargs(session)
+            current = await database.vending.find_one({"id": column_id}, **kwargs)
+            if not current:
+                raise HTTPException(404, "Colonna vending non trovata")
+            capacity = int(current.get("capacita_max", 0) or 0)
+            if capacity > 0 and stock > capacity:
+                raise HTTPException(
+                    422, f"La giacenza supera la capacità della colonna ({capacity})"
+                )
+            old_value = int(current.get("giacenza", 0) or 0)
+            response = {
+                "ok": True,
+                "id": column_id,
+                "colonna": current.get("colonna"),
+                "giacenza_precedente": old_value,
                 "giacenza": stock,
-                "giacenza_aggiornata_il": datetime.now(timezone.utc).isoformat(),
-                "giacenza_sorgente": "CORREZIONE_MANUALE",
-            }},
-        )
-        if result.matched_count == 0:
-            raise HTTPException(
-                409,
-                "La giacenza è cambiata nel frattempo: aggiorna la pagina e riprova",
+            }
+            if old_value == stock:
+                return response
+
+            result = await database.vending.update_one(
+                {"id": column_id, "giacenza": current.get("giacenza", 0)},
+                {"$set": {
+                    "giacenza": stock,
+                    "giacenza_aggiornata_il": datetime.now(timezone.utc).isoformat(),
+                    "giacenza_sorgente": "CORREZIONE_MANUALE",
+                }},
+                **kwargs,
             )
-        await sync_product_vending_stock(str(current.get("codice") or ""))
-        return {
-            "ok": True,
-            "id": column_id,
-            "colonna": current.get("colonna"),
-            "giacenza_precedente": old_value,
-            "giacenza": stock,
-        }
+            if result.matched_count != 1:
+                raise HTTPException(
+                    409, "La giacenza è cambiata nel frattempo: aggiorna la pagina e riprova"
+                )
+            code = str(current.get("codice") or "")
+            if not code:
+                raise HTTPException(409, "Colonna vending senza codice prodotto")
+            await sync_product_vending_stock(code, session=session)
+
+            operator = (
+                str(getattr(request.state, "authenticated_user", "operatore-locale"))
+                if request is not None else "operatore-locale"
+            )
+            await database.audit_events.insert_one({
+                "id": str(uuid.uuid4()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "azione": "GIACENZA_CORRETTA",
+                "entita": "VENDING_COLONNA",
+                "entita_id": str(column_id),
+                "operatore": operator,
+                "prima": {"codice": code, "giacenza": old_value},
+                "dopo": {"codice": code, "giacenza": stock},
+                "idempotency_key": None,
+                "batch_id": None,
+            }, **kwargs)
+            return response
+
+        return await run_transactionally(correct)
 
     @router.put("/vending/{column_id}")
     async def update_vending(column_id: str, body: Dict[str, Any]):
