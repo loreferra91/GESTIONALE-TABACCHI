@@ -292,6 +292,11 @@ def create_vending_router(
                 "giacenza_precedente": old_value,
                 "giacenza": stock,
             }
+            code = str(current.get("codice") or "")
+            if not code or not await database.prodotti.find_one(
+                {"codice": code}, **kwargs
+            ):
+                raise HTTPException(409, "Prodotto vending non trovato: correzione bloccata")
             if old_value == stock:
                 return response
 
@@ -308,9 +313,6 @@ def create_vending_router(
                 raise HTTPException(
                     409, "La giacenza è cambiata nel frattempo: aggiorna la pagina e riprova"
                 )
-            code = str(current.get("codice") or "")
-            if not code:
-                raise HTTPException(409, "Colonna vending senza codice prodotto")
             await sync_product_vending_stock(code, session=session)
 
             operator = (
