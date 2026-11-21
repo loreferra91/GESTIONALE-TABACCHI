@@ -12,6 +12,7 @@ FILENAME = "gestionale_staging-20261121T080000Z-aabbccddeeff.archive.gz.gpg"
 
 
 def _manifest(*, verified_at=None, database="gestionale_staging"):
+    timestamp = verified_at or NOW - timedelta(hours=1)
     return {
         "filename": FILENAME,
         "sha256": "a" * 64,
@@ -20,10 +21,8 @@ def _manifest(*, verified_at=None, database="gestionale_staging"):
         "status": "encrypted",
         "offcluster_verified": True,
         "offcluster_destination": f"s3://{BUCKET}/{PREFIX}/{FILENAME}",
-        "offcluster_verified_at": (
-            verified_at or NOW - timedelta(hours=1)
-        ).isoformat(),
-        "created_at": (NOW - timedelta(hours=2)).isoformat(),
+        "offcluster_verified_at": timestamp.isoformat(),
+        "created_at": (timestamp - timedelta(hours=1)).isoformat(),
         "restore_certified": False,
     }
 
