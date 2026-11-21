@@ -71,4 +71,4 @@ jobs:
             --eval 'if (!db.hello().isWritablePrimary) quit(2)'
       - name: Verify atomic vending correction, rejected writes and idempotent retries
         run: |
-          python -m pytest -q -rs -tb=short backend/tests/test_vending_stock_atomic.py
+          python -m pytest -q -rs --tb=short backend/tests/test_vending_stock_atomic.py
