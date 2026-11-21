@@ -1,0 +1,56 @@
+name: Service health watch (read-only)
+
+on:
+  schedule:
+    - cron: '7 */6 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/service-health-watch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-public-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Verify both public health endpoints with cold-start tolerance
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_service() {
+            local label="$1"
+            local url="$2"
+            local body="$RUNNER_TEMP/$label.json"
+            local code="000"
+            for attempt in $(seq 1 5); do
+              code=$(curl --silent --show-error --location \
+                --max-time 40 --output "$body" --write-out '%{http_code}' \
+                "$url") || code="000"
+              if [[ "$code" == "200" ]] && \
+                python3 - "$body" <<'PY'
+          import json
+          import sys
+          try:
+              with open(sys.argv[1], encoding="utf-8") as source:
+                  data = json.load(source)
+              assert data.get("status") == "ok"
+              assert data.get("database") == "ok"
+          except (OSError, ValueError, AssertionError, TypeError):
+              sys.exit(1)
+          PY
+              then
+                echo "Verified $label health (HTTP 200, database OK)"
+                return 0
+              fi
+              echo "Health not confirmed for $label (attempt $attempt/5, HTTP $code)"
+              sleep 12
+            done
+            echo "::error title=$label health failure::Public health endpoint failed repeated verification"
+            return 1
+          }
+          check_service production "https://gestionale-tabacchi.onrender.com/api/"
+          check_service staging "https://gestionale-tabacchi-staging.onrender.com/api/"
