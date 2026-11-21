@@ -137,6 +137,22 @@ export default function ReconciliationPanel() {
         <p className="my-2 text-sm text-slate-600">
           {new Date(report.generated_at).toLocaleString("it-IT")} · {report.prodotti_confrontati} prodotti confrontati · {report.vendite_csv_confrontate} vendite CSV confrontate · {report.vendite_csv_non_confrontabili} non confrontabili (non necessariamente errate).
         </p>
+        {report.copertura_finanziaria && (
+          <div data-testid="financial-coverage" className="my-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+            <p className="font-semibold">
+              {report.copertura_finanziaria.saldo_cassa_certificato
+                ? "Saldo di cassa verificato"
+                : "Saldo di cassa non certificato"}
+            </p>
+            <p className="mt-1">{report.copertura_finanziaria.avviso}</p>
+            <p className="mt-1 text-xs text-slate-600">
+              Movimenti cassa esaminati: {report.copertura_finanziaria.movimenti_cassa_esaminati}
+              {report.copertura_finanziaria.confronto_batch_pos_eseguito
+                ? ` · Batch Cassa Rapida esaminati: ${report.copertura_finanziaria.batch_cassa_rapida_esaminati}`
+                : " · Confronto batch POS non eseguito nell’intervallo filtrato"}
+            </p>
+          </div>
+        )}
         <ul className="space-y-2 text-sm">
           {report.dettagli.map(item => <FindingRow key={`${item.fingerprint}-${item.aggiornato_il || "new"}`} item={item} onUpdated={updateFinding} />)}
         </ul>
