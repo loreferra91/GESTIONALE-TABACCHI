@@ -62,6 +62,8 @@ def test_manual_correction_rejects_missing_product_instead_of_silent_success(mon
         with pytest.raises(HTTPException) as error:
             await server.update_vending_giacenza("V1", {"giacenza": 2})
         assert error.value.status_code == 409
+        unchanged = await db.vending.find_one({"id": "V1"})
+        assert unchanged["giacenza"] == 1
         assert await db.audit_events.count_documents({}) == 0
 
     asyncio.run(scenario())
