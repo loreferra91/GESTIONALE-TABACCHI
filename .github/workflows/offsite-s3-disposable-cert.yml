@@ -1,0 +1,95 @@
+name: Offsite S3 protocol - disposable HTTP certification
+
+on:
+  push:
+    branches:
+      - 'feature/main-b2-operator-recovery-*'
+      - main
+    paths:
+      - scripts/offsite_backup_s3.py
+      - backend/tests/test_offsite_backup_s3_real_http.py
+      - backend/tests/test_offsite_backup_backblaze_free.py
+      - scripts/install_macos_b2_backup_schedule.py
+      - backend/tests/test_macos_b2_backup_schedule.py
+      - .github/workflows/offsite-s3-disposable-cert.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/offsite_backup_s3.py
+      - backend/tests/test_offsite_backup_s3_real_http.py
+      - backend/tests/test_offsite_backup_backblaze_free.py
+      - scripts/install_macos_b2_backup_schedule.py
+      - backend/tests/test_macos_b2_backup_schedule.py
+      - .github/workflows/offsite-s3-disposable-cert.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-s3-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install isolated S3 protocol test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-prod.txt
+          python -m pip install 'moto[server]>=5.1,<5.2' 'awscli>=1.40,<1.43' pytest==9.1.1 pytest-xdist==3.8.0 mongomock-motor==0.0.36 httpx==0.28.1
+          aws --version
+
+      - name: Exercise offsite upload, read-back and fail-closed manifest on disposable S3
+        shell: bash
+        env:
+          # Fake credentials accepted ONLY by Moto on localhost.
+          AWS_ACCESS_KEY_ID: dummy-ci-key
+          AWS_SECRET_ACCESS_KEY: dummy-ci-secret
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: 'true'
+          CERT_DISPOSABLE_S3: '1'
+        run: |
+          set -euo pipefail
+          umask 077
+          AWS_BIN=$(command -v aws)
+          mkdir -p "$RUNNER_TEMP/cert-bin"
+          cat > "$RUNNER_TEMP/cert-bin/aws" <<EOF
+          #!/usr/bin/env bash
+          exec "$AWS_BIN" --endpoint-url http://127.0.0.1:5000 "\$@"
+          EOF
+          chmod 700 "$RUNNER_TEMP/cert-bin/aws"
+          export PATH="$RUNNER_TEMP/cert-bin:$PATH"
+          cat > "$RUNNER_TEMP/aws-config" <<'EOF'
+          [default]
+          region = us-east-1
+          s3 =
+              addressing_style = path
+          EOF
+          export AWS_CONFIG_FILE="$RUNNER_TEMP/aws-config"
+          moto_server -H 127.0.0.1 -p 5000 > "$RUNNER_TEMP/moto-s3.log" 2>&1 &
+          moto_pid=$!
+          trap 'kill "$moto_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 35); do
+            if aws s3 mb s3://cert-gestionale-backups >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::Disposable local S3 server did not start"
+            exit 1
+          fi
+          python -m pytest -q backend/tests/test_offsite_backup_s3_real_http.py --tb=short -rs
+
+      - name: Declare isolation boundaries
+        if: always()
+        run: |
+          echo "No Atlas URI, AWS production credentials, or Render services were accessed."
+          echo "This certifies S3 protocol/read-back behavior, not real S3 provisioning or MongoDB restore."
