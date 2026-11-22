@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - scripts/offsite_backup_s3.py
+      - scripts/b2_backup_monitor.py
+      - backend/tests/test_b2_backup_monitor.py
       - backend/tests/test_offsite_backup_s3_real_http.py
       - backend/tests/test_offsite_backup_backblaze_free.py
       - scripts/install_macos_b2_backup_schedule.py
@@ -17,6 +19,8 @@ on:
       - main
     paths:
       - scripts/offsite_backup_s3.py
+      - scripts/b2_backup_monitor.py
+      - backend/tests/test_b2_backup_monitor.py
       - backend/tests/test_offsite_backup_s3_real_http.py
       - backend/tests/test_offsite_backup_backblaze_free.py
       - scripts/install_macos_b2_backup_schedule.py
