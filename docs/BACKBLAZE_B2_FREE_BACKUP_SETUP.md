@@ -1,6 +1,8 @@
 # GESTIONALE TABACCHI — backup cloud a 0 € con Backblaze B2
 
-**Stato (22 novembre 2026): strumenti promossi dal collaudo staging; CI e prove sintetiche non dimostrano un backup operativo.\nAccount B2 reale, job macOS, alert, retention e restore dal bucket DEVONO essere verificati separatamente.\nPrecedente stato (20 novembre 2026): codice adattato e pronto alle prove CI;
+**Stato (22 novembre 2026): strumenti promossi dal collaudo staging; CI e prove sintetiche non dimostrano un backup operativo.
+Account B2 reale, job macOS, alert, retention e restore dal bucket DEVONO essere verificati separatamente.
+Precedente stato (20 novembre 2026): codice adattato e pronto alle prove CI;
 account B2, bucket, chiave S3, chiave GPG e restore da B2 reale NON
 ancora configurati né verificati. Non confondere questo documento con
 un backup di produzione già attivo.**
