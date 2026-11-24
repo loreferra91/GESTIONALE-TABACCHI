@@ -14,10 +14,11 @@ jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }))
 
 import GrattaVinci from "./GrattaVinci";
 import { api } from "../lib/api";
-import { clearIdempotencyKey } from "../lib/idempotency";
+import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
 test("Gratta e Vinci shows separate stock and records sales with an idempotency key", async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
+  idempotencyKeyFor.mockReturnValue("test-idempotency-key-1234");
   const rows = [{
     id: "gv-1", codice: "GV001", descrizione: "Biglietto 5 euro",
     prezzo_centesimi: 500, quantita_magazzino: 12,
