@@ -23,6 +23,7 @@ BACKUP_COLLECTIONS = (
     "smart_venue", "smart_venue_hidden", "smart_venue_values",
     "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
     "rettifiche_venduti", "reconciliation_cases", "audit_events",
+    "gratta_vinci_prodotti", "gratta_vinci_movimenti",
 )
 OPTIONAL_COLLECTIONS = frozenset((
     "vendite_bulk_imports", "cassa_rapida_batches", "vending_operations",
@@ -32,6 +33,7 @@ OPTIONAL_COLLECTIONS = frozenset((
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti",
     "ricezioni_merce", "rettifiche_inventario", "rettifiche_venduti",
     "reconciliation_cases", "audit_events", "auto_order_import_state",
+    "gratta_vinci_prodotti", "gratta_vinci_movimenti",
 ))
 MAX_BACKUP_BYTES = 20 * 1024 * 1024
 
