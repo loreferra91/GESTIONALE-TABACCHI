@@ -78,6 +78,7 @@ if __package__:
     )
     from .inventory_analytics_router import create_inventory_analytics_router
     from .index_migrations import migrate_unique_business_indexes
+    from .gratta_vinci_router import create_gratta_vinci_router
     from .money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from .operations_router import create_operations_router
     from .orders_router import (
@@ -169,6 +170,7 @@ else:
     )
     from inventory_analytics_router import create_inventory_analytics_router
     from index_migrations import migrate_unique_business_indexes
+    from gratta_vinci_router import create_gratta_vinci_router
     from money import Money, money, money_decimal, money_sum, money_product, nonnegative_money
     from operations_router import create_operations_router
     from orders_router import (
@@ -562,6 +564,10 @@ async def on_start():
         # scandire le collezioni per ogni riga, anche quando usiamo bulk_write.
         await asyncio.gather(
             db.listino_adm.create_index("codice"),
+            db.gratta_vinci_prodotti.create_index("codice", unique=True),
+            db.gratta_vinci_prodotti.create_index("id", unique=True),
+            db.gratta_vinci_movimenti.create_index("idempotency_key", unique=True),
+            db.gratta_vinci_movimenti.create_index([("tipo", 1), ("giorno_locale", 1), ("codice", 1)]),
             db.vendite.create_index("data"),
             db.vendite.create_index("codice"),
             db.vendite.create_index("batch_id"),
@@ -1368,6 +1374,12 @@ list_categorie_prodotti = real_stock["list_categorie_prodotti"]
 list_giacenze_reali = real_stock["list_giacenze_reali"]
 update_giacenza_reale = real_stock["update_giacenza_reale"]
 storico_rettifiche_inventario = real_stock["storico_rettifiche_inventario"]
+gratta_vinci_router = create_gratta_vinci_router(
+    get_database=lambda: db,
+    run_transactionally=_run_transactionally,
+    session_kwargs=_session_kwargs,
+    request_operator=_request_operator,
+)
 products = create_products_router(
     get_database=lambda: db,
     query_regex=_q_regex,
@@ -1604,6 +1616,7 @@ api.include_router(csv_vending_accounting_router)
 api.include_router(real_stock_router)
 api.include_router(inventory_analytics_router)
 api.include_router(products_router)
+api.include_router(gratta_vinci_router)
 api.include_router(adm_router)
 api.include_router(operations_router)
 api.include_router(import_history_router)
