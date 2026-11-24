@@ -36,6 +36,7 @@ export default function GrattaVinci() {
     let alive = true;
     setLoading(true);
     setError("");
+    setReport({ righe: [], totale_biglietti: 0, totale_centesimi: 0 });
     api.get("/gratta-e-vinci/riepilogo", {
       params: reportMode === "giorno" ? { giorno } : {},
     }).then(response => {
@@ -285,7 +286,7 @@ export default function GrattaVinci() {
                         onChange={event => setQuantities(previous => ({ ...previous, [busyKey]: event.target.value }))}
                         disabled={Boolean(busy)} />
                       <button type="button" data-testid={`gv-action-${busyKey}`}
-                        onClick={() => moveStock(row, kind)} disabled={Boolean(busy) || loading ||
+                        onClick={() => moveStock(row, kind)} disabled={Boolean(busy) || loading || Boolean(error) ||
                           (kind === "vendita" && row.quantita_magazzino <= 0)}
                         className="rounded-md bg-slate-900 text-white px-3 py-1.5 text-xs font-semibold disabled:opacity-40">
                         {busy === busyKey ? "Registro…" : kind === "vendita" ? "Vendi" : "Carica"}
