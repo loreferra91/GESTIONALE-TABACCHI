@@ -14,6 +14,7 @@ import {
   List,
   ListChecks,
   Package,
+  Ticket,
   Receipt,
   ShoppingCart,
   Storefront,
@@ -39,6 +40,7 @@ const GROUPS = [
     icon: Warehouse,
     items: [
       { to: "/prodotti", label: "Prodotti", icon: Package, testid: "nav-prodotti" },
+      { to: "/gratta-e-vinci", label: "Gratta e Vinci", icon: Ticket, testid: "nav-gratta-e-vinci" },
       { to: "/listino", label: "Listino ADM", icon: ListChecks, testid: "nav-listino" },
     ],
   },
