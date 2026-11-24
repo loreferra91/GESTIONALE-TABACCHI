@@ -40,7 +40,6 @@ const GROUPS = [
     icon: Warehouse,
     items: [
       { to: "/prodotti", label: "Prodotti", icon: Package, testid: "nav-prodotti" },
-      { to: "/gratta-e-vinci", label: "Gratta e Vinci", icon: Ticket, testid: "nav-gratta-e-vinci" },
       { to: "/listino", label: "Listino ADM", icon: ListChecks, testid: "nav-listino" },
     ],
   },
@@ -68,13 +67,22 @@ const GROUPS = [
   },
 ];
 
+const GRATTA_VINCI_GROUP = {
+  id: "grattaVinci", label: "Gratta e Vinci", icon: Ticket,
+  items: [
+    { to: "/gratta-e-vinci/prodotti", label: "Prodotti", icon: Package, testid: "nav-gratta-prodotti" },
+    { to: "/gratta-e-vinci/vendite", label: "Vendite", icon: Receipt, testid: "nav-gratta-vendite" },
+    { to: "/gratta-e-vinci/auto-order", label: "Auto-Order", icon: ShoppingCart, testid: "nav-gratta-auto-order" },
+  ],
+};
+
 const DIRECT_ITEMS = {
   dashboard: { to: "/", label: "Dashboard", icon: ChartBar, testid: "nav-dashboard", end: true },
   vending: { to: "/vending", label: "Vending", icon: Storefront, testid: "nav-vending" },
   accounting: { to: "/contabilita", label: "Contabilità", icon: Calculator, testid: "nav-contabilita" },
 };
 
-const DEFAULT_OPEN = Object.fromEntries(GROUPS.map(group => [group.id, false]));
+const DEFAULT_OPEN = Object.fromEntries([...GROUPS, GRATTA_VINCI_GROUP].map(group => [group.id, false]));
 
 function NavItem({ item, closeMenu }) {
   const Icon = item.icon;
@@ -127,7 +135,7 @@ export default function Sidebar() {
   const [expanded, setExpanded] = useState(DEFAULT_OPEN);
 
   useEffect(() => {
-    const currentGroup = GROUPS.find(group => group.items.some(item => item.to === location.pathname));
+    const currentGroup = [...GROUPS, GRATTA_VINCI_GROUP].find(group => group.items.some(item => item.to === location.pathname));
     if (currentGroup) setExpanded(value => ({ ...value, [currentGroup.id]: true }));
   }, [location.pathname]);
 
@@ -144,6 +152,7 @@ export default function Sidebar() {
         <Group group={GROUPS[0]} expanded={expanded.vendite} toggle={() => toggleGroup("vendite")} closeMenu={closeMenu} />
         <Group group={GROUPS[1]} expanded={expanded.magazzino} toggle={() => toggleGroup("magazzino")} closeMenu={closeMenu} />
         <div className="border-t border-white/10 py-2"><NavItem item={DIRECT_ITEMS.vending} closeMenu={closeMenu} /></div>
+        <Group group={GRATTA_VINCI_GROUP} expanded={expanded.grattaVinci} toggle={() => toggleGroup("grattaVinci")} closeMenu={closeMenu} />
         <Group group={GROUPS[2]} expanded={expanded.ordini} toggle={() => toggleGroup("ordini")} closeMenu={closeMenu} />
         <div className="border-t border-white/10 py-2"><NavItem item={DIRECT_ITEMS.accounting} closeMenu={closeMenu} /></div>
         <Group group={GROUPS[3]} expanded={expanded.impostazioni} toggle={() => toggleGroup("impostazioni")} closeMenu={closeMenu} />

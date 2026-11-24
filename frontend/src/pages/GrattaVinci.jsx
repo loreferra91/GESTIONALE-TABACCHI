@@ -18,8 +18,9 @@ function italianDay() {
 const moneyFromCents = cents => formatEur((Number(cents) || 0) / 100);
 const positiveInteger = text => /^\d+$/.test(String(text).trim()) && Number(text) > 0 && Number.isSafeInteger(Number(text));
 
-export default function GrattaVinci() {
-  const [tab, setTab] = useState("magazzino");
+export default function GrattaVinci({ section }) {
+  const [localTab, setTab] = useState("magazzino");
+  const tab = section || localTab;
   const [reportMode, setReportMode] = useState("giorno");
   const [giorno, setGiorno] = useState(italianDay);
   const [report, setReport] = useState({ righe: [], totale_biglietti: 0, totale_centesimi: 0 });
@@ -140,8 +141,8 @@ export default function GrattaVinci() {
   };
 
   return (
-    <Layout title="Gratta e Vinci" subtitle="Magazzino indipendente e vendite">
-      <div className="mb-5 flex gap-2 border-b border-slate-200" role="tablist" aria-label="Gratta e Vinci">
+    <Layout title={section ? `Gratta e Vinci — ${tab === "magazzino" ? "Prodotti" : "Vendite"}` : "Gratta e Vinci"} subtitle="Gestione indipendente dai tabacchi">
+      {!section && <div className="mb-5 flex gap-2 border-b border-slate-200" role="tablist" aria-label="Gratta e Vinci">
         {[
           ["magazzino", "Magazzino"],
           ["vendite", "Registrazione vendite"],
@@ -153,7 +154,7 @@ export default function GrattaVinci() {
             {label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {tab === "magazzino" && (
         <Card className="p-4 mb-5">

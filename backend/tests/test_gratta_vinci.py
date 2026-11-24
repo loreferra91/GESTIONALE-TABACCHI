@@ -144,3 +144,27 @@ def test_report_date_validation_and_history():
 def test_backup_includes_new_inventory_and_history():
     assert {"gratta_vinci_prodotti", "gratta_vinci_movimenti"} <= set(BACKUP_COLLECTIONS)
     assert {"gratta_vinci_prodotti", "gratta_vinci_movimenti"} <= set(OPTIONAL_BACKUP_COLLECTIONS)
+
+
+def test_auto_order_uses_only_scratch_card_sales_and_never_writes():
+    from datetime import datetime, timedelta, timezone
+
+    async def check(client, db):
+        await client.post("/api/gratta-e-vinci/prodotti", json=product(stock=5))
+        now = datetime.now(timezone.utc)
+        await db.gratta_vinci_prodotti.update_one({"codice": "GV001"}, {"$set": {"created_at": (now - timedelta(days=40)).isoformat()}})
+        from zoneinfo import ZoneInfo
+        day = (now.astimezone(ZoneInfo("Europe/Rome")).date() - timedelta(days=1)).isoformat()
+        await db.gratta_vinci_movimenti.insert_one({"tipo": "VENDITA", "codice": "GV001", "giorno_locale": day, "quantita": 7})
+        await db.vendite.insert_one({"codice": "GV001", "quantita": 999})
+        before = await db.gratta_vinci_prodotti.find_one({"codice": "GV001"})
+        response = await client.get("/api/gratta-e-vinci/auto-order", params={"copertura_giorni": 14, "lead_time_giorni": 7, "lotto": 10})
+        assert response.status_code == 200
+        row = response.json()["righe"][0]
+        assert row["venduti_7"] == row["venduti_30"] == 7
+        assert row["da_ordinare"] == 20
+        assert response.json()["ordini_pendenti_verificati"] is False
+        assert before == await db.gratta_vinci_prodotti.find_one({"codice": "GV001"})
+        assert await db.gratta_vinci_movimenti.count_documents({}) == 1
+        assert await db.vendite.count_documents({}) == 1
+    scenario_runner(check)
