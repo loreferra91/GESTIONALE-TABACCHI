@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
 import { Toaster } from "sonner";
 import Dashboard from "./pages/Dashboard";
 import Prodotti from "./pages/Prodotti";
+import GrattaVinci from "./pages/GrattaVinci";
 import Listino from "./pages/Listino";
 import Vending from "./pages/Vending";
 import Vendite from "./pages/Vendite";
@@ -63,6 +64,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/prodotti" element={<Prodotti />} />
+          <Route path="/gratta-e-vinci" element={<GrattaVinci />} />
           <Route path="/listino" element={<Listino />} />
           <Route path="/magazzino" element={<Navigate to="/giacenze-reali?tab=analisi" replace />} />
           <Route path="/vending" element={<Vending />} />
