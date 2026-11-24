@@ -90,6 +90,7 @@ if __package__:
         receipt_quantities_by_code as _receipt_quantities_by_code,
     )
     from .parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
+    from .gratta_vinci_router import create_gratta_vinci_router
     from .products_router import (
         PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
         create_products_router,
@@ -184,6 +185,7 @@ else:
         receipt_quantities_by_code as _receipt_quantities_by_code,
     )
     from parameters_router import PARAM_BOUNDS, ParametroIn, create_parameters_router
+    from gratta_vinci_router import create_gratta_vinci_router
     from products_router import (
         PRODUCT_CATEGORIES, Prodotto, ProdottoIn, VendutiNegozioIn,
         create_products_router,
@@ -1483,6 +1485,7 @@ list_categorie_prodotti = real_stock["list_categorie_prodotti"]
 list_giacenze_reali = real_stock["list_giacenze_reali"]
 update_giacenza_reale = real_stock["update_giacenza_reale"]
 storico_rettifiche_inventario = real_stock["storico_rettifiche_inventario"]
+gratta_vinci_router = create_gratta_vinci_router(get_database=lambda: db, run_transactionally=_run_transactionally, session_kwargs=_session_kwargs, request_operator=_request_operator)
 products = create_products_router(
     get_database=lambda: db,
     query_regex=_q_regex,
@@ -1726,6 +1729,7 @@ api.include_router(csv_vending_accounting_router)
 api.include_router(real_stock_router)
 api.include_router(inventory_analytics_router)
 api.include_router(products_router)
+api.include_router(gratta_vinci_router)
 api.include_router(adm_router)
 api.include_router(operations_router)
 api.include_router(import_history_router)
