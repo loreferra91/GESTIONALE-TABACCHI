@@ -3,13 +3,13 @@
 This module never reads or writes the tobacco products, vending or cash ledgers.
 All multi-document mutations use the server's MongoDB transaction helper.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Literal, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
@@ -268,6 +268,52 @@ def create_gratta_vinci_router(*, get_database, run_transactionally, session_kwa
             "totale_biglietti": sum(item["venduti"] for item in rows),
             "totale_centesimi": sum(item["totale_centesimi"] for item in rows),
         }
+
+    @router.get("/auto-order")
+    async def auto_order(
+        copertura_giorni: int = Query(14, ge=1, le=90),
+        lead_time_giorni: int = Query(7, ge=0, le=60),
+        lotto: int = Query(1, ge=1, le=100000),
+    ):
+        """Read-only proposal. No tobacco queries, supplier orders or stock writes."""
+        database = get_database()
+        today = _now().astimezone(ROME).date()
+        start30 = (today - timedelta(days=30)).isoformat()
+        start7 = (today - timedelta(days=7)).isoformat()
+        sales = await database.gratta_vinci_movimenti.aggregate([
+            {"$match": {"tipo": "VENDITA", "giorno_locale": {"$gte": start30, "$lt": today.isoformat()}}},
+            {"$group": {"_id": "$codice", "venduti_30": {"$sum": "$quantita"},
+                        "venduti_7": {"$sum": {"$cond": [{"$gte": ["$giorno_locale", start7]}, "$quantita", 0]}}}},
+        ]).to_list(None)
+        indexed = {row["_id"]: row for row in sales}
+        products = await database.gratta_vinci_prodotti.find({}, {"_id": 0}).sort("codice", 1).to_list(None)
+        rows = []
+        for product in products:
+            sales_row = indexed.get(product["codice"], {})
+            v7, v30 = sales_row.get("venduti_7", 0), sales_row.get("venduti_30", 0)
+            stock = product.get("quantita_magazzino")
+            row = {"codice": product["codice"], "descrizione": product["descrizione"],
+                   "giacenza": stock, "venduti_7": v7, "venduti_30": v30,
+                   "copertura": None, "da_ordinare": None, "stato": "CONTROLLO MANUALE"}
+            try:
+                created = datetime.fromisoformat(product["created_at"]).astimezone(ROME).date()
+                age = (today - created).days
+            except (KeyError, ValueError, TypeError):
+                age = -1
+            if type(stock) is not int or stock < 0:
+                row["stato"] = "ANOMALIA"
+            elif age >= 30 and v30 > 0:
+                # Exact integer ceiling of the higher 7/30-day demand estimate.
+                num = max(v7 * 30, v30 * 7)
+                target = (num * (copertura_giorni + lead_time_giorni) + 209) // 210
+                shortage = max(0, target - stock)
+                row.update(copertura=round(stock * 210 / num, 1),
+                           da_ordinare=((shortage + lotto - 1) // lotto) * lotto,
+                           stato="PROPOSTA DA VERIFICARE")
+            rows.append(row)
+        return {"righe": rows, "giorno": today.isoformat(), "copertura_giorni": copertura_giorni,
+                "lead_time_giorni": lead_time_giorni, "lotto": lotto,
+                "ordini_pendenti_verificati": False}
 
     @router.get("/movimenti")
     async def movement_history(codice: Optional[str] = None, limit: int = 100):

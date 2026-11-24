@@ -70,3 +70,6 @@ un requisito approvato e una specifica separata per le scritture di cassa.
 
 ### Staging integration
 Read-only startup is preserved. Additive indexes for the two new collections are ensured before an explicit catalogue creation or stock movement; failures block the operation. No existing collection or index is changed.
+
+## Dedicated navigation and preliminary Auto-Order
+Separate sidebar group and routes for Prodotti, Vendite and Auto-Order. Read-only proposals use the greater of 7-day and 30-day average sales from completed local days, after 30 days of catalogue age. Editable provisional coverage, lead time and lot parameters are independent of tobacco. Pending supply orders are not tracked yet: proposals require manual verification and never create orders or change inventory.

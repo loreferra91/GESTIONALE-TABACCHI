@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import Dashboard from "./pages/Dashboard";
 import Prodotti from "./pages/Prodotti";
 import GrattaVinci from "./pages/GrattaVinci";
+import GrattaVinciAutoOrder from "./pages/GrattaVinciAutoOrder";
 import Listino from "./pages/Listino";
 import Vending from "./pages/Vending";
 import Vendite from "./pages/Vendite";
@@ -64,7 +65,10 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/prodotti" element={<Prodotti />} />
-          <Route path="/gratta-e-vinci" element={<GrattaVinci />} />
+          <Route path="/gratta-e-vinci" element={<Navigate to="/gratta-e-vinci/prodotti" replace />} />
+          <Route path="/gratta-e-vinci/prodotti" element={<GrattaVinci key="prodotti" section="magazzino" />} />
+          <Route path="/gratta-e-vinci/vendite" element={<GrattaVinci key="vendite" section="vendite" />} />
+          <Route path="/gratta-e-vinci/auto-order" element={<GrattaVinciAutoOrder />} />
           <Route path="/listino" element={<Listino />} />
           <Route path="/magazzino" element={<Navigate to="/giacenze-reali?tab=analisi" replace />} />
           <Route path="/vending" element={<Vending />} />
