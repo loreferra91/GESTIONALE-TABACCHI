@@ -1,9 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Layout from "../components/Layout";
 import { Card } from "../components/UI";
 import { api, apiErrorMessage } from "../lib/api";
 
+import { SortHeader, sortScratchCardRows, nextSort } from "../components/GrattaVinciSort";
+
+const columns = [
+  ["codice", "Codice", false],
+  ["descrizione", "Descrizione", false],
+  ["giacenza", "Giacenza", true],
+  ["venduti_7", "Venduti 7 gg", true],
+  ["venduti_30", "Venduti 30 gg", true],
+  ["copertura", "Copertura (gg)", true],
+  ["da_ordinare", "Da ordinare", true],
+  ["stato", "Stato", false],
+];
+const numericFields = columns.filter(column => column[2]).map(column => column[0]);
+
 export default function GrattaVinciAutoOrder() {
+  const [sort, setSort] = useState({ field: "codice", direction: "asc" });
+  const changeSort = field => setSort(previous => nextSort(previous, field));
   const [settings, setSettings] = useState({ copertura_giorni: "14", lead_time_giorni: "7", lotto: "1" });
   const [applied, setApplied] = useState(settings);
   const [result, setResult] = useState(null);
@@ -21,6 +37,7 @@ export default function GrattaVinciAutoOrder() {
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [applied]);
+  const rows = useMemo(() => sortScratchCardRows(result?.righe || [], sort, numericFields), [result, sort]);
   return (
     <Layout title="Gratta e Vinci — Auto-Order" subtitle="Proposte di riordino indipendenti">
       <Card className="p-4 mb-4">
@@ -41,8 +58,8 @@ export default function GrattaVinciAutoOrder() {
       {error && <p role="alert" className="text-red-700">{error}</p>}
       {result && <Card className="overflow-x-auto">
         <table className="min-w-full text-sm">
-          <thead className="bg-slate-50"><tr>{["Codice", "Descrizione", "Giacenza", "Venduti 7 gg", "Venduti 30 gg", "Copertura (gg)", "Da ordinare", "Stato"].map(label => <th scope="col" key={label} className="p-3 text-left">{label}</th>)}</tr></thead>
-          <tbody className="divide-y divide-slate-100">{result.righe.map(row => (
+          <thead className="bg-slate-50"><tr>{columns.map(([field, label, numeric]) => <SortHeader key={field} field={field} label={label} numeric={numeric} sort={sort} onSort={changeSort} />)}</tr></thead>
+          <tbody className="divide-y divide-slate-100">{rows.map(row => (
             <tr key={row.codice}>{[row.codice, row.descrizione, row.giacenza, row.venduti_7, row.venduti_30, row.copertura, row.da_ordinare, row.stato].map((value, i) => <td key={i} className="p-3">{value ?? "—"}</td>)}</tr>
           ))}</tbody>
         </table>

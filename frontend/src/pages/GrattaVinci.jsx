@@ -5,20 +5,7 @@ import { api, apiErrorMessage } from "../lib/api";
 import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 import { toast } from "sonner";
 
-const productCollator = new Intl.Collator("it-IT", { numeric: true, sensitivity: "base" });
-
-function SortHeader({ field, label, sort, onSort, numeric = false }) {
-  const active = sort.field === field;
-  return (
-    <th scope="col" aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}
-      className={`p-3 ${numeric ? "text-right" : "text-left"}`}>
-      <button type="button" onClick={() => onSort(field)}
-        className={`inline-flex items-center gap-1.5 rounded px-1 py-1 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-600 ${active ? "text-slate-900" : ""}`}>
-        {label}<span aria-hidden="true">{active ? (sort.direction === "asc" ? "↑" : "↓") : "↕"}</span>
-      </button>
-    </th>
-  );
-}
+import { SortHeader, sortScratchCardRows, nextSort } from "../components/GrattaVinciSort";
 
 const blankProduct = { codice: "", descrizione: "", prezzo: "", quantita_magazzino: "" };
 
@@ -41,7 +28,7 @@ export default function GrattaVinci({ section }) {
   const [report, setReport] = useState({ righe: [], totale_biglietti: 0, totale_centesimi: 0 });
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ field: "codice", direction: "asc" });
-  const changeSort = field => setSort(previous => ({ field, direction: previous.field === field && previous.direction === "asc" ? "desc" : "asc" }));
+  const changeSort = field => setSort(previous => nextSort(previous, field));
   const [form, setForm] = useState(blankProduct);
   const [editing, setEditing] = useState(null);
   const [quantities, setQuantities] = useState({});
@@ -72,19 +59,11 @@ export default function GrattaVinci({ section }) {
     const filtered = (report.righe || []).filter(row =>
       !text || [row.codice, row.descrizione].some(value => String(value || "").toLocaleLowerCase("it-IT").includes(text))
     );
-    if (tab !== "magazzino") return filtered;
-    const numeric = ["prezzo_centesimi", "quantita_magazzino"].includes(sort.field);
-    return filtered.sort((a, b) => {
-      const av = a[sort.field], bv = b[sort.field];
-      if (numeric) {
-        const aValid = typeof av === "number" && Number.isFinite(av);
-        const bValid = typeof bv === "number" && Number.isFinite(bv);
-        if (aValid !== bValid) return aValid ? -1 : 1;
-        if (!aValid) return productCollator.compare(a.codice, b.codice);
-      }
-      const cmp = numeric ? av - bv : productCollator.compare(String(av ?? ""), String(bv ?? ""));
-      return cmp * (sort.direction === "asc" ? 1 : -1) || productCollator.compare(a.codice, b.codice);
-    });
+    const numericFields = ["prezzo_centesimi", "quantita_magazzino", "venduti", "totale_centesimi"];
+    const activeSort = tab === "vendite" && sort.field === "prezzo_centesimi" ||
+      tab === "magazzino" && ["venduti", "totale_centesimi"].includes(sort.field)
+      ? { field: "codice", direction: "asc" } : sort;
+    return sortScratchCardRows(filtered, activeSort, numericFields);
   }, [report.righe, query, tab, sort]);
 
   const refresh = () => setRevision(current => current + 1);
@@ -178,7 +157,7 @@ export default function GrattaVinci({ section }) {
           ["vendite", "Registrazione vendite"],
         ].map(([key, label]) => (
           <button key={key} type="button" role="tab" aria-selected={tab === key}
-            onClick={() => setTab(key)}
+            onClick={() => { setTab(key); setSort({ field: "codice", direction: "asc" }); }}
             className={`px-4 py-3 text-sm font-semibold border-b-2 ${tab === key
               ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-900"}`}>
             {label}
@@ -270,13 +249,8 @@ export default function GrattaVinci({ section }) {
         <table className="min-w-full text-sm">
           <thead className="bg-slate-50 text-left text-slate-600">
             <tr>
-              {tab === "magazzino" ? <>
-                <SortHeader field="codice" label="Codice" sort={sort} onSort={changeSort} />
-                <SortHeader field="descrizione" label="Descrizione" sort={sort} onSort={changeSort} />
-              </> : <>
-                <th scope="col" className="p-3">Codice</th>
-                <th scope="col" className="p-3">Descrizione</th>
-              </>}
+              <SortHeader field="codice" label="Codice" sort={sort} onSort={changeSort} />
+              <SortHeader field="descrizione" label="Descrizione" sort={sort} onSort={changeSort} />
               {tab === "magazzino" ? (
                 <>
                   <SortHeader field="prezzo_centesimi" label="Prezzo" sort={sort} onSort={changeSort} numeric />
@@ -285,9 +259,9 @@ export default function GrattaVinci({ section }) {
                 </>
               ) : (
                 <>
-                  <th scope="col" className="p-3 text-right">Biglietti venduti</th>
-                  <th scope="col" className="p-3 text-right">Totale</th>
-                  <th scope="col" className="p-3 text-right">Disponibili</th>
+                  <SortHeader field="venduti" label="Biglietti venduti" sort={sort} onSort={changeSort} numeric />
+                  <SortHeader field="totale_centesimi" label="Totale" sort={sort} onSort={changeSort} numeric />
+                  <SortHeader field="quantita_magazzino" label="Disponibili" sort={sort} onSort={changeSort} numeric />
                   <th scope="col" className="p-3">Registra vendita</th>
                 </>
               )}

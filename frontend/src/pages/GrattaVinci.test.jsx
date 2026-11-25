@@ -13,6 +13,7 @@ jest.mock("../lib/idempotency", () => ({
 jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }));
 
 import GrattaVinci from "./GrattaVinci";
+import GrattaVinciAutoOrder from "./GrattaVinciAutoOrder";
 import { api } from "../lib/api";
 import { clearIdempotencyKey, idempotencyKeyFor } from "../lib/idempotency";
 
@@ -89,6 +90,61 @@ test("product columns toggle ascending and descending without mutating stock or 
     expect(order()).toEqual(["GV2", "GV10", "GV1"]);
     expect(container.querySelector('th[aria-sort="descending"]').textContent).toContain("Quantità disponibile");
     expect(rows.map(row => row.codice)).toEqual(["GV10", "GV2", "GV1"]);
+    expect(api.post).not.toHaveBeenCalled();
+    expect(api.put).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    jest.clearAllMocks();
+    delete global.IS_REACT_ACT_ENVIRONMENT;
+  }
+});
+
+test.each([
+  ["sales", GrattaVinci, { section: "vendite" }, [
+    { id: "1", codice: "GV10", descrizione: "Alfa", venduti: 10, totale_centesimi: 2000, quantita_magazzino: 1 },
+    { id: "2", codice: "GV2", descrizione: "Beta", venduti: 2, totale_centesimi: 1000, quantita_magazzino: 10 },
+    { id: "3", codice: "GV1", descrizione: "Gamma", venduti: 0, totale_centesimi: 0, quantita_magazzino: 2 },
+  ], [
+    ["Codice", ["GV10", "GV2", "GV1"], ["GV1", "GV2", "GV10"]],
+    ["Descrizione", ["GV10", "GV2", "GV1"], ["GV1", "GV2", "GV10"]],
+    ["Biglietti venduti", ["GV1", "GV2", "GV10"], ["GV10", "GV2", "GV1"]],
+    ["Totale", ["GV1", "GV2", "GV10"], ["GV10", "GV2", "GV1"]],
+    ["Disponibili", ["GV10", "GV1", "GV2"], ["GV2", "GV1", "GV10"]],
+  ]],
+  ["auto-order", GrattaVinciAutoOrder, {}, [
+    { codice: "GV10", descrizione: "Alfa", giacenza: 1, venduti_7: 10, venduti_30: 20, copertura: 2, da_ordinare: 10, stato: "PROPOSTA" },
+    { codice: "GV2", descrizione: "Beta", giacenza: 10, venduti_7: 2, venduti_30: 3, copertura: 12, da_ordinare: 0, stato: "PROPOSTA" },
+    { codice: "GV1", descrizione: "Gamma", giacenza: 2, venduti_7: 0, venduti_30: 0, copertura: null, da_ordinare: null, stato: "CONTROLLO" },
+  ], [
+    ["Codice", ["GV10", "GV2", "GV1"], ["GV1", "GV2", "GV10"]],
+    ["Descrizione", ["GV10", "GV2", "GV1"], ["GV1", "GV2", "GV10"]],
+    ["Giacenza", ["GV10", "GV1", "GV2"], ["GV2", "GV1", "GV10"]],
+    ["Venduti 7 gg", ["GV1", "GV2", "GV10"], ["GV10", "GV2", "GV1"]],
+    ["Venduti 30 gg", ["GV1", "GV2", "GV10"], ["GV10", "GV2", "GV1"]],
+    ["Copertura", ["GV10", "GV2", "GV1"], ["GV2", "GV10", "GV1"]],
+    ["Da ordinare", ["GV2", "GV10", "GV1"], ["GV10", "GV2", "GV1"]],
+    ["Stato", ["GV1", "GV2", "GV10"], ["GV2", "GV10", "GV1"]],
+  ]],
+])("%s supports both sorting directions without writes", async (_name, Page, props, rows, cases) => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  api.get.mockResolvedValue({ data: { righe: rows, totale_biglietti: 12, totale_centesimi: 3000 } });
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const order = () => [...container.querySelectorAll("tbody tr")].map(row => row.firstElementChild.textContent);
+  const click = async label => act(async () => [...container.querySelectorAll("th button")].find(b => b.textContent.startsWith(label)).click());
+  try {
+    await act(async () => root.render(<Page {...props} />));
+    expect(order()).toEqual(["GV1", "GV2", "GV10"]);
+    for (const [label, first, second] of cases) {
+      await click(label);
+      expect(order()).toEqual(first);
+      await click(label);
+      expect(order()).toEqual(second);
+    }
+    expect(rows.map(row => row.codice)).toEqual(["GV10", "GV2", "GV1"]);
+    expect(api.get).toHaveBeenCalledTimes(1);
     expect(api.post).not.toHaveBeenCalled();
     expect(api.put).not.toHaveBeenCalled();
   } finally {
