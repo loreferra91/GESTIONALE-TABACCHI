@@ -42,6 +42,7 @@ export default function AutoOrder() {
   const scrollPositionRef = useRef(null);
   const [acknowledgePartial, setAcknowledgePartial] = useState(false);
   const [partialReason, setPartialReason] = useState("");
+  const [acknowledgeExcess, setAcknowledgeExcess] = useState(false);
   const draftRowsRef = useRef([]);
   const originalDraftRef = useRef("[]");
   const allRighe = draftRows.filter(row => !excludedCategories.includes(row.categoria));
@@ -66,11 +67,13 @@ export default function AutoOrder() {
   const invalidRows = allRighe.filter(row => {
     const quantity = Number(row.qta_da_ordinare);
     const lot = Math.max(1, Number(row.lotto_ordine) || 1);
-    const maximum = orderPolicy === "AUTO_ORDER_3_1" ? Number(row.quantita_3_1_massima || 0) : Number(row.quantita_integrativa_massima || 0);
     return !Number.isInteger(quantity) || quantity <= 0 || quantity % lot !== 0 ||
-      (orderPolicy !== "AUTO_ORDER_3_1" && Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) ||
-      (orderPolicy === "AUTO_ORDER_3_1" && !row.aggiunto_manualmente && quantity > maximum);
+      (orderPolicy !== "AUTO_ORDER_3_1" && Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0));
   });
+  const excessRows = orderPolicy === "AUTO_ORDER_3_1" ? allRighe.filter(row =>
+    !row.aggiunto_manualmente && Number.isInteger(Number(row.qta_da_ordinare)) &&
+    Number(row.qta_da_ordinare) > Number(row.quantita_3_1_massima || 0)) : [];
+  const savedCurrentBatch = Boolean(savedBatchKey && savedConfirmationKey === confirmationKey);
   const pendingPieces = [...(data?.righe || []), ...(data?.esclusi || [])].reduce((sum, row) => sum + (Number(row.quantita_in_arrivo) || 0) + (Number(row.quantita_senza_data) || 0), 0);
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
@@ -181,6 +184,7 @@ export default function AutoOrder() {
         righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare, ...(row.aggiunto_manualmente ? { aggiunto_manualmente: true } : {}) })),
         conferma_dati_parziali: acknowledgePartial,
         motivo_deroga: acknowledgePartial ? partialReason.trim() : null,
+        conferma_quantita_superiori: excessRows.length > 0 && acknowledgeExcess,
       });
       if (snapshotKey) setConfirmedKeys(keys => new Set(keys).add(confirmationKey));
       setSavedBatchKey(r.data.batch_key || "");
@@ -362,13 +366,13 @@ export default function AutoOrder() {
 
       <div className="flex flex-wrap gap-3 mb-4">
         <button data-testid="ao-refresh" onClick={() => load(true)} disabled={loading} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">{loading ? "Calcolo…" : "Ricalcola"}</button>
-        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-pdf" onClick={() => downloadOrder("pdf")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || (excessRows.length > 0 && !savedCurrentBatch) || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta PDF fornitore
         </button>
-        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
+        <button data-testid="ao-excel" onClick={() => downloadOrder("excel")} disabled={!ordiniCategoria.length || invalidRows.length > 0 || (excessRows.length > 0 && !savedCurrentBatch) || supplierChanged} className="border border-slate-900 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors disabled:opacity-40">
           Esporta Excel fornitore
         </button>
-        <button data-testid="ao-conferma" onClick={() => setConfirmOpen(true)} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI" || (orderPolicy === "AUTO_ORDER_3_1" && (!comparison?.operational_ready || !comparison?.policy_snapshot_key))} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
+        <button data-testid="ao-conferma" onClick={() => { setAcknowledgeExcess(false); setConfirmOpen(true); }} disabled={!allRighe.length || confirming || alreadyConfirmed || supplierChanged || invalidRows.length > 0 || data?.data_quality === "DATI_INCOERENTI" || (orderPolicy === "AUTO_ORDER_3_1" && (!comparison?.operational_ready || !comparison?.policy_snapshot_key))} title={alreadyConfirmed ? "Proposta gia confermata" : invalidRows.length ? "Correggi le quantità e i lotti" : supplierChanged ? "Ricalcola dopo la modifica dei dati" : ""} className="bg-slate-900 text-white rounded-md px-4 py-2 text-sm hover:bg-slate-800 transition-colors disabled:opacity-40">
           {confirming ? "Salvataggio..." : alreadyConfirmed ? "Ordine fornitore salvato" : "Salva ordine fornitore"}
         </button>
         <button data-testid="ao-toggle-excluded" onClick={() => setMostraEsclusi(v => !v)} className="border border-slate-300 bg-white text-slate-900 rounded-md px-4 py-2 text-sm hover:bg-slate-50 transition-colors">
@@ -394,9 +398,9 @@ export default function AutoOrder() {
         const quantity = Number(row.qta_da_ordinare);
         const lot = Math.max(1, Number(row.lotto_ordine) || 1);
         if (!Number.isInteger(quantity) || quantity <= 0 || quantity % lot !== 0) return `${row.codice} (multipli del lotto ${lot})`;
-        if (orderPolicy === "AUTO_ORDER_3_1") return `${row.codice} (massimo previsto ${row.quantita_3_1_massima || 0})`;
         return `${row.codice} (massimo integrativo ${row.quantita_integrativa_massima || 0})`;
       }).join(", ")}.</p>}
+      {excessRows.length > 0 && <p role="status" className="mb-4 text-sm font-semibold text-amber-800">{excessRows.length} quantità superiori alla proposta 3.1. Apri «Salva ordine fornitore» per confermarle. PDF ed Excel saranno disponibili dopo il salvataggio.</p>}
       {supplierChanged && <p role="alert" className="mb-4 text-sm font-semibold text-amber-800">Dati di pianificazione modificati: ricalcola Auto-Order per aggiornare la proposta.</p>}
       {data?.data_quality && <p className={`mb-4 rounded border p-3 text-sm ${data.data_quality === "DATI_AFFIDABILI" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}>Qualità dati: <b>{data.data_quality.replaceAll("_", " ")}</b>. {data.data_quality === "DATI_INCOERENTI" ? "Correggi le anomalie di forniture prima di confermare." : data.data_quality === "DATI_PARZIALI" ? "Verifica le vendite native e gli articoli segnalati prima di procedere." : "Vendite e giacenze operative disponibili nel database."}</p>}
       {data?.giorni_ritardo_dati > 1 && <p className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Ultima vendita nativa registrata {data.giorni_ritardo_dati} giorni fa. Verifica che le vendite siano aggiornate prima di confermare.</p>}
@@ -635,11 +639,16 @@ export default function AutoOrder() {
         title={`Confermare Auto-Order ${orderPolicy === "AUTO_ORDER_3_1" ? "3.1" : "2.0"}?`}
         confirmLabel="Crea ordine fornitore"
         loading={confirming}
-        confirmDisabled={data?.data_quality === "DATI_PARZIALI" && (!acknowledgePartial || partialReason.trim().length < 10)}
+        confirmDisabled={(excessRows.length > 0 && !acknowledgeExcess) || (data?.data_quality === "DATI_PARZIALI" && (!acknowledgePartial || partialReason.trim().length < 10))}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={conferma}
       >
         <p>Politica selezionata: <b>{orderPolicy === "AUTO_ORDER_3_1" ? "Auto-Order 3.1 (validazione server)" : "Auto-Order 2.0 (fallback)"}</b>. Verranno create <b>{formatNum(allRighe.length)}</b> righe ordine fornitore per un totale di <b>{formatEur(allRighe.reduce((sum, row) => sum + (row.totale || 0), 0))}</b>.</p>
+        {excessRows.length > 0 && <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+          <p className="font-semibold">Hai aumentato {excessRows.length} quantità rispetto alla proposta 3.1:</p>
+          <ul className="mt-2 max-h-32 list-disc overflow-y-auto pl-5">{excessRows.map(row => <li key={row.codice}>{row.descrizione || row.codice}: {row.quantita_3_1_massima || 0} → {row.qta_da_ordinare}</li>)}</ul>
+          <label className="mt-3 flex items-start gap-2"><input data-testid="ao-acknowledge-excess" type="checkbox" checked={acknowledgeExcess} onChange={event => setAcknowledgeExcess(event.target.checked)} /> Confermo queste quantità e voglio creare l’ordine fornitore.</label>
+        </div>}
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <label className="text-sm">Fornitore <input value={supplierName} onChange={event => setSupplierName(event.target.value)} maxLength={120} placeholder="Nome fornitore (facoltativo)" className="mt-1 w-full rounded border px-2 py-1" /></label>
           <label className="text-sm">Consegna prevista <input type="date" value={expectedDelivery} readOnly={orderPolicy === "AUTO_ORDER_3_1" && Boolean(comparison?.delivery_schedule)} onChange={event => setExpectedDelivery(event.target.value)} className="mt-1 w-full rounded border px-2 py-1" /></label>

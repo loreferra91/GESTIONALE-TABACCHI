@@ -24,6 +24,29 @@ from backend.auto_order_3_operational import (
 from backend.auto_order_router import AutoOrderConfermaIn, AutoOrderRigaIn
 
 
+def test_31_excess_requires_explicit_confirmation_and_is_recorded():
+    ao = fixture_ao(righe=[{
+        "codice": "P", "descrizione": "P", "prezzo": 5, "lotto_ordine": 10,
+        "giacenza_negozio": 0, "qta_da_ordinare": 10,
+    }], esclusi=[])
+    comparison = {"rows": [{
+        "codice": "P", "quantita_suggerita": 20,
+        "qualita_previsione": "OSSERVABILE", "anomalie": [],
+    }]}
+    requested = [AutoOrderRigaIn(codice="P", quantita=30)]
+    with pytest.raises(HTTPException) as blocked:
+        select_operational_rows(ao, comparison, requested, lambda price, qty: price * qty)
+    assert blocked.value.status_code == 422
+    rows = select_operational_rows(ao, comparison, requested, lambda price, qty: price * qty,
+                                   allow_excess=True)
+    assert rows[0]["qta_da_ordinare"] == 30
+    assert rows[0]["quantita_3_1_massima"] == 20
+    assert rows[0]["quantita_superiore_confermata"] is True
+    with pytest.raises(HTTPException):
+        select_operational_rows(ao, comparison, [AutoOrderRigaIn(codice="P", quantita=25)],
+                                lambda price, qty: price * qty, allow_excess=True)
+
+
 def fixture_ao(**changes):
     base = {
         "snapshot_key": "auto-order:old",

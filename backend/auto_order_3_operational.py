@@ -108,6 +108,7 @@ def select_operational_rows(
     comparison: dict,
     requested: list,
     multiply_money: Callable[[Any, Any], float],
+    allow_excess: bool = False,
 ) -> list[dict]:
     """Derive persisted order lines from live server data."""
     if not requested:
@@ -135,7 +136,7 @@ def select_operational_rows(
         lot = int(old.get("lotto_ordine") or 1)
         quantity = int(item.quantita)
         if not (lot > 0 and quantity > 0 and quantity % lot == 0 and
-                (manual or (maximum > 0 and quantity <= maximum))):
+                (manual or (maximum > 0 and (quantity <= maximum or allow_excess)))):
             raise HTTPException(422, f"Quantità 3.1 per {code} non valida (lotto {lot}, massimo {maximum})")
         if manual and int(old.get("quantita_in_arrivo") or 0) > 0:
             raise HTTPException(422, f"Fornitura già in arrivo per {code}: aggiunta manuale non disponibile")
@@ -151,6 +152,7 @@ def select_operational_rows(
             "motivo": (candidate or {}).get("motivazione") or "Aggiunto manualmente all'ordine 3.1",
             "policy_version": POLICY_31,
             "quantita_3_1_massima": maximum,
+            "quantita_superiore_confermata": bool(not manual and quantity > maximum and allow_excess),
             "aggiunto_manualmente": manual,
             "modello_negozio": (candidate or {}).get("metodo_negozio"),
             "modello_vending": (candidate or {}).get("metodo_vending"),

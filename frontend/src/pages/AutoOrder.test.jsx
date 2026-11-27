@@ -308,6 +308,32 @@ test("una quantità frazionaria blocca la conferma senza arrotondamenti silenzio
   expect(container.querySelector('[role="alert"]').textContent).toContain("Quantità non valide");
 });
 
+test("3.1 chiede conferma delle quantità superiori e invia la deroga al salvataggio", async () => {
+  const forecast = {
+    mode: "CONFRONTO_SENZA_CONFERMA", operational_ready: true,
+    policy_snapshot_key: "snapshot-excess", native_history_days: 90,
+    summary: { stockout_risk: 0, supplementary_orders: 0, already_on_order: 0, vending_refills: 0 },
+    rows: [{ codice: "AUTO1", quantita_suggerita: 10, qualita_previsione: "OSSERVABILE", anomalie: [] }],
+  };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto" ? forecast : url === "/auto-order" ? response : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  await act(async () => container.querySelector('[data-testid="ao-use-3-1"]').click());
+  await write(container.querySelector('[data-testid="ao-quantity-AUTO1"]'), "12");
+  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(false);
+  expect(container.textContent).toContain("quantità superiori alla proposta 3.1");
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const submit = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  expect(submit.disabled).toBe(true);
+  expect(container.textContent).toContain("10 → 12");
+  await act(async () => container.querySelector('[data-testid="ao-acknowledge-excess"]').click());
+  expect(submit.disabled).toBe(false);
+  await act(async () => submit.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    conferma_quantita_superiori: true,
+    righe: [{ codice: "AUTO1", quantita: 12 }],
+  }));
+});
+
 test("3.1 non segnala come errore una proposta valida oltre il limite 2.0 e permette aggiunte manuali", async () => {
   const forecast = {
     mode: "CONFRONTO_SENZA_CONFERMA", operational_ready: true,
