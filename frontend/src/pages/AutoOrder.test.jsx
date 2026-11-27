@@ -308,6 +308,51 @@ test("una quantità frazionaria blocca la conferma senza arrotondamenti silenzio
   expect(container.querySelector('[role="alert"]').textContent).toContain("Quantità non valide");
 });
 
+test("3.1 non segnala come errore una proposta valida oltre il limite 2.0 e permette aggiunte manuali", async () => {
+  const forecast = {
+    mode: "CONFRONTO_SENZA_CONFERMA", operational_ready: true,
+    policy_snapshot_key: "snapshot-manual", native_history_days: 90,
+    summary: { pieces_2: 5, pieces_3: 20 },
+    rows: [
+      { codice: "AUTO1", quantita_suggerita: 20, qualita_previsione: "OSSERVABILE", anomalie: [] },
+      { codice: "AMMS100", quantita_suggerita: 0, qualita_previsione: "OSSERVABILE", anomalie: [] },
+    ],
+  };
+  api.get.mockImplementation(url => Promise.resolve({ data: url === "/auto-order/confronto" ? forecast : url === "/auto-order" ? {
+    ...response, righe: [{ ...automaticProduct, lotto_ordine: 10, quantita_integrativa_massima: 10 }],
+  } : [] }));
+  await act(async () => container.querySelector('[data-testid="ao-refresh"]').click());
+  expect(container.querySelector('[data-testid="ao-toggle-planning"]').getAttribute("aria-expanded")).toBe("false");
+  expect(document.getElementById("ao-planning-content").hidden).toBe(true);
+  await act(async () => container.querySelector('[data-testid="ao-toggle-planning"]').click());
+  expect(document.getElementById("ao-planning-content").hidden).toBe(false);
+  await act(async () => container.querySelector('[data-testid="ao-use-3-1"]').click());
+  expect(container.querySelector('[data-testid="ao-quantity-AUTO1"]').value).toBe("20");
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(container.querySelector('[data-testid="ao-conferma"]').disabled).toBe(false);
+
+  await write(container.querySelector('[data-testid="ao-add-product"]'), "AMMS100");
+  const result = container.querySelector('[data-testid="ao-product-result-AMMS100"]');
+  expect(result.disabled).toBe(false);
+  await act(async () => result.click());
+  await act(async () => container.querySelector('[data-testid="ao-add-product-btn"]').click());
+  expect(container.querySelector('[data-testid="ao-quantity-AMMS100"]').value).toBe("10");
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  const prompt = jest.spyOn(window, "prompt").mockReturnValue("Fornitore test");
+  const open = jest.spyOn(window, "open").mockImplementation(() => null);
+  await act(async () => container.querySelector('[data-testid="ao-pdf"]').click());
+  expect(JSON.parse(new URL(open.mock.calls[0][0], "https://example.test").searchParams.get("selezione")))
+    .toContainEqual({ codice: "AMMS100", quantita: 10, aggiunto_manualmente: true });
+  prompt.mockRestore();
+  open.mockRestore();
+  await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
+  const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");
+  await act(async () => confirm.click());
+  expect(api.post).toHaveBeenCalledWith("/auto-order/conferma", expect.objectContaining({
+    righe: [{ codice: "AUTO1", quantita: 20 }, { codice: "AMMS100", quantita: 10, aggiunto_manualmente: true }],
+  }));
+});
+
 test("la conferma invia lo snapshot usato per la proposta", async () => {
   await act(async () => container.querySelector('[data-testid="ao-conferma"]').click());
   const confirm = [...container.querySelectorAll("button")].find(button => button.textContent === "Crea ordine fornitore");

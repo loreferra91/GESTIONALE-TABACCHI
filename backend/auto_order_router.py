@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover
 class AutoOrderRigaIn(BaseModel):
     codice: str
     quantita: int = Field(gt=0, le=100000)
+    aggiunto_manualmente: bool = False
 
 
 class AutoOrderConfermaIn(BaseModel):
@@ -911,7 +912,7 @@ def create_auto_order_router(
         explicit_key = header_key or (body.idempotency_key if body else None) or (body.batch_key if body else None)
         if not explicit_key and supplied_snapshot and requested_rows is not None:
             early_selection = hashlib.sha256(json.dumps(
-                [{"codice": item.codice.strip(), "quantita": item.quantita} for item in requested_rows],
+                [{"codice": item.codice.strip(), "quantita": item.quantita, "aggiunto_manualmente": item.aggiunto_manualmente} for item in requested_rows],
                 ensure_ascii=False, sort_keys=True,
             ).encode("utf-8")).hexdigest()[:24]
             explicit_key = f"{policy_key if policy == POLICY_31 else supplied_snapshot}:selezione:{early_selection}"

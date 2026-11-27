@@ -111,6 +111,24 @@ def test_31_selector_allows_verified_supplementary_order_not_unbounded_override(
         assert err.value.status_code == 422
 
 
+def test_31_selector_allows_explicit_manual_product_without_forecast_quantity():
+    ao = fixture_ao(esclusi=[{**fixture_ao()["esclusi"][0], "quantita_in_arrivo": 0}])
+    comparison = fixture_comparison(rows=[{**fixture_comparison()["rows"][0], "quantita_suggerita": 0}])
+    with pytest.raises(HTTPException):
+        select_operational_rows(ao, comparison, [AutoOrderRigaIn(codice="P", quantita=10)], lambda p, q: p*q)
+    rows = select_operational_rows(
+        ao, comparison, [AutoOrderRigaIn(codice="P", quantita=20, aggiunto_manualmente=True)],
+        lambda p, q: p*q,
+    )
+    assert rows[0]["qta_da_ordinare"] == 20
+    assert rows[0]["aggiunto_manualmente"] is True
+    comparison["rows"][0]["qualita_previsione"] = "STORICO INSUFFICIENTE"
+    assert select_operational_rows(ao, comparison, [AutoOrderRigaIn(codice="P", quantita=10, aggiunto_manualmente=True)], lambda p, q: p*q)[0]["qta_da_ordinare"] == 10
+    assert select_operational_rows(ao, {"rows": []}, [AutoOrderRigaIn(codice="P", quantita=10, aggiunto_manualmente=True)], lambda p, q: p*q)[0]["qta_da_ordinare"] == 10
+    with pytest.raises(HTTPException):
+        select_operational_rows(ao, comparison, [AutoOrderRigaIn(codice="P", quantita=7, aggiunto_manualmente=True)], lambda p, q: p*q)
+
+
 def test_31_selector_rejects_anomalies_low_quality_and_duplicate_products():
     ao, forecast = fixture_ao(), fixture_comparison()
     with pytest.raises(HTTPException) as err:
