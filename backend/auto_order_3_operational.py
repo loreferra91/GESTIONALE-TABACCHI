@@ -109,7 +109,7 @@ def select_operational_rows(
     requested: list,
     multiply_money: Callable[[Any, Any], float],
 ) -> list[dict]:
-    """Derive persisted order lines from server data, with strict positive upper cap."""
+    """Derive persisted order lines from live server data."""
     if not requested:
         raise HTTPException(422, "Selezionare almeno un articolo per l'ordine 3.1.")
     baseline = {row["codice"]: row for row in [*(ao.get("righe") or []), *(ao.get("esclusi") or [])]}
@@ -123,18 +123,22 @@ def select_operational_rows(
         seen.add(code)
         old = baseline.get(code)
         candidate = proposals.get(code)
-        if not old or not candidate:
+        manual = bool(item.aggiunto_manualmente)
+        if not old or (not candidate and not manual):
             raise HTTPException(422, f"Articolo non riconosciuto nella proposta 3.1: {code}")
         if (old.get("anomalia") or old.get("anomalie_riconciliazione")
             or old.get("anomalie_forniture") or int(old.get("quantita_senza_data") or 0)):
             raise HTTPException(409, f"Anomalie operative da risolvere per {code}")
-        if candidate.get("anomalie") or candidate.get("qualita_previsione") != "OSSERVABILE":
+        if candidate and (candidate.get("anomalie") or (not manual and candidate.get("qualita_previsione") != "OSSERVABILE")):
             raise HTTPException(409, f"Previsione 3.1 non certificabile per {code}")
-        maximum = int(candidate.get("quantita_suggerita") or 0)
+        maximum = int(candidate.get("quantita_suggerita") or 0) if candidate else 0
         lot = int(old.get("lotto_ordine") or 1)
         quantity = int(item.quantita)
-        if not (maximum > 0 and lot > 0 and 0 < quantity <= maximum and quantity % lot == 0):
+        if not (lot > 0 and quantity > 0 and quantity % lot == 0 and
+                (manual or (maximum > 0 and quantity <= maximum))):
             raise HTTPException(422, f"Quantità 3.1 per {code} non valida (lotto {lot}, massimo {maximum})")
+        if manual and int(old.get("quantita_in_arrivo") or 0) > 0:
+            raise HTTPException(422, f"Fornitura già in arrivo per {code}: aggiunta manuale non disponibile")
         result.append({
             **old,
             "stato": "ORDINA ORA",
@@ -144,10 +148,11 @@ def select_operational_rows(
                 multiply_money(old.get("costo_unitario_acquisto"), quantity)
                 if old.get("costo_unitario_acquisto") is not None else None
             ),
-            "motivo": candidate.get("motivazione") or "Riordino Auto-Order 3.1",
+            "motivo": (candidate or {}).get("motivazione") or "Aggiunto manualmente all'ordine 3.1",
             "policy_version": POLICY_31,
             "quantita_3_1_massima": maximum,
-            "modello_negozio": candidate.get("metodo_negozio"),
-            "modello_vending": candidate.get("metodo_vending"),
+            "aggiunto_manualmente": manual,
+            "modello_negozio": (candidate or {}).get("metodo_negozio"),
+            "modello_vending": (candidate or {}).get("metodo_vending"),
         })
     return result

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Layout from "../components/Layout";
 import { api, API, apiErrorMessage } from "../lib/api";
 import { Card, KpiCard, Badge, formatEur, formatNum } from "../components/UI";
 import { useSortSearch, Th, SearchBar } from "../lib/tableHooks";
 import { toast } from "sonner";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { shortCategory } from "../lib/categories";
 
 const receiptDateLabel = value => {
@@ -38,6 +38,8 @@ export default function AutoOrder() {
   const [selectedToAdd, setSelectedToAdd] = useState("");
   const [productSearch, setProductSearch] = useState("");
   const [manualQuantity, setManualQuantity] = useState("");
+  const [planningOpen, setPlanningOpen] = useState(false);
+  const scrollPositionRef = useRef(null);
   const [acknowledgePartial, setAcknowledgePartial] = useState(false);
   const [partialReason, setPartialReason] = useState("");
   const draftRowsRef = useRef([]);
@@ -58,10 +60,17 @@ export default function AutoOrder() {
   const breveGg = data?.finestra_breve_gg || 10;
   const lungoGg = data?.finestra_lunga_gg || 30;
   const snapshotKey = data?.snapshot_key || "";
-  const draftSignature = JSON.stringify(allRighe.map(r => [r.codice, r.qta_da_ordinare]).sort((a, b) => a[0].localeCompare(b[0])));
+  const draftSignature = JSON.stringify(allRighe.map(r => [r.codice, r.qta_da_ordinare, Boolean(r.aggiunto_manualmente)]).sort((a, b) => a[0].localeCompare(b[0])));
   const confirmationKey = `${orderPolicy}:${snapshotKey}:${orderPolicy === "AUTO_ORDER_3_1" ? comparison?.policy_snapshot_key || "" : ""}:${draftSignature}`;
   const alreadyConfirmed = Boolean(snapshotKey && confirmedKeys.has(confirmationKey));
-  const invalidRows = allRighe.filter(row => !Number.isInteger(Number(row.qta_da_ordinare)) || Number(row.qta_da_ordinare) <= 0 || Number(row.qta_da_ordinare) % Math.max(1, Number(row.lotto_ordine) || 1) !== 0 || ((orderPolicy === "AUTO_ORDER_3_1" || Number(row.quantita_in_arrivo || 0) > 0) && Number(row.qta_da_ordinare) > Number(row.quantita_integrativa_massima || 0)));
+  const invalidRows = allRighe.filter(row => {
+    const quantity = Number(row.qta_da_ordinare);
+    const lot = Math.max(1, Number(row.lotto_ordine) || 1);
+    const maximum = orderPolicy === "AUTO_ORDER_3_1" ? Number(row.quantita_3_1_massima || 0) : Number(row.quantita_integrativa_massima || 0);
+    return !Number.isInteger(quantity) || quantity <= 0 || quantity % lot !== 0 ||
+      (orderPolicy !== "AUTO_ORDER_3_1" && Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) ||
+      (orderPolicy === "AUTO_ORDER_3_1" && !row.aggiunto_manualmente && quantity > maximum);
+  });
   const pendingPieces = [...(data?.righe || []), ...(data?.esclusi || [])].reduce((sum, row) => sum + (Number(row.quantita_in_arrivo) || 0) + (Number(row.quantita_senza_data) || 0), 0);
   const dataRiferimento = data?.data_riferimento_domanda
     ? new Date(`${data.data_riferimento_domanda}T00:00:00`).toLocaleDateString("it-IT")
@@ -82,7 +91,7 @@ export default function AutoOrder() {
         return {
           ...source, stato: "ORDINA ORA", qta_da_ordinare: quantity,
           totale: Math.round(Number(source.prezzo || 0) * quantity * 100) / 100,
-          quantita_integrativa_massima: quantity, motivo: row.motivazione,
+          quantita_3_1_massima: quantity, motivo: row.motivazione,
         };
       }).filter(Boolean);
   };
@@ -154,6 +163,11 @@ export default function AutoOrder() {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+  useLayoutEffect(() => {
+    if (scrollPositionRef.current === null) return;
+    if (window.scrollY !== scrollPositionRef.current) window.scrollTo(0, scrollPositionRef.current);
+    scrollPositionRef.current = null;
+  }, [draftRows]);
 
   const conferma = async () => {
     setConfirming(true);
@@ -164,7 +178,7 @@ export default function AutoOrder() {
         policy_snapshot_key: orderPolicy === "AUTO_ORDER_3_1" ? comparison?.policy_snapshot_key : null,
         fornitore: supplierName.trim() || null,
         data_consegna_prevista: expectedDelivery || null,
-        righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare })),
+        righe: allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare, ...(row.aggiunto_manualmente ? { aggiunto_manualmente: true } : {}) })),
         conferma_dati_parziali: acknowledgePartial,
         motivo_deroga: acknowledgePartial ? partialReason.trim() : null,
       });
@@ -233,13 +247,14 @@ export default function AutoOrder() {
         params.set("policy_snapshot_key", comparison?.policy_snapshot_key || "");
       }
       params.set("snapshot_key", snapshotKey);
-      params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare }))));
+      params.set("selezione", JSON.stringify(allRighe.map(row => ({ codice: row.codice, quantita: row.qta_da_ordinare, ...(row.aggiunto_manualmente ? { aggiunto_manualmente: true } : {}) }))));
     }
     const url = `${API}/auto-order/${format}?${params.toString()}`;
     window.open(url, "_blank");
   };
 
   const changeQuantity = (codice, value) => {
+    scrollPositionRef.current = window.scrollY;
     const quantity = value === "" ? "" : Number(value);
     setDraftRows(rows => {
       const next = rows.map(row => row.codice === codice
@@ -254,16 +269,14 @@ export default function AutoOrder() {
     setDraftRows(rows => { const next = rows.filter(row => row.codice !== codice); draftRowsRef.current = next; return next; });
   };
 
-  const canManuallyAdd = row => orderPolicy === "AUTO_ORDER_3_1"
-    ? Boolean(row && comparison?.operational_ready && !draftCodes.has(row.codice) &&
-        comparison.rows.some(candidate => candidate.codice === row.codice &&
-          candidate.quantita_suggerita > 0 && candidate.qualita_previsione === "OSSERVABILE" &&
-          !(candidate.anomalie || []).length))
-    : Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
-    && (!Number(row.quantita_in_arrivo || 0) || (row.stato === "ORDINA ORA" && Number(row.quantita_integrativa_massima || 0) > 0))
+  const canManuallyAdd = row => Boolean(row && !row.anomalia && !(row.anomalie_riconciliazione || []).length
+    && !(row.anomalie_forniture || []).length
+    && (!Number(row.quantita_in_arrivo || 0) || (orderPolicy !== "AUTO_ORDER_3_1" && row.stato === "ORDINA ORA" && Number(row.quantita_integrativa_massima || 0) > 0))
     && !Number(row.quantita_senza_data || 0)
     && row.stato !== "ORDINE IN ARRIVO" && !excludedCategories.includes(row.categoria)
-    && !draftCodes.has(row.codice));
+    && !draftCodes.has(row.codice)
+    && (orderPolicy !== "AUTO_ORDER_3_1" || (comparison?.operational_ready &&
+      !comparison.rows.some(candidate => candidate.codice === row.codice && (candidate.anomalie || []).length))));
 
   const addRow = (codice = selectedToAdd, requestedQuantity = manualQuantity) => {
     const row = sourceRows.find(item => item.codice === codice);
@@ -275,10 +288,6 @@ export default function AutoOrder() {
       return;
     }
     const forecastMax = comparison?.rows?.find(item => item.codice === codice)?.quantita_suggerita;
-    if (orderPolicy === "AUTO_ORDER_3_1" && (forecastMax == null || quantity > Number(forecastMax))) {
-      toast.error(`La quantità massima 3.1 per ${row.descrizione} è ${forecastMax ?? 0}`);
-      return;
-    }
     if (orderPolicy !== "AUTO_ORDER_3_1" && Number(row.quantita_in_arrivo || 0) > 0 && quantity > Number(row.quantita_integrativa_massima || 0)) {
       toast.error(`La quantità integrativa massima per ${row.descrizione} è ${row.quantita_integrativa_massima}`);
       return;
@@ -288,7 +297,8 @@ export default function AutoOrder() {
       stato: "ORDINA ORA",
       motivo: `AGGIUNTO MANUALMENTE · ${row.motivo}`,
       qta_da_ordinare: quantity,
-      quantita_integrativa_massima: orderPolicy === "AUTO_ORDER_3_1" ? Number(forecastMax) : row.quantita_integrativa_massima,
+      aggiunto_manualmente: orderPolicy === "AUTO_ORDER_3_1",
+      quantita_3_1_massima: orderPolicy === "AUTO_ORDER_3_1" ? Number(forecastMax || 0) : undefined,
       totale: Math.round(quantity * (row.prezzo || 0) * 100) / 100,
     }]; draftRowsRef.current = next; return next; });
     setSelectedToAdd("");
@@ -329,7 +339,7 @@ export default function AutoOrder() {
     if (event.key !== "Enter") return;
     event.preventDefault();
     if (selectedToAdd) addRow(selectedToAdd, manualQuantity);
-    else if (productSearchResults[0]) selectProduct(productSearchResults[0]);
+    else if (productSearchResults.find(canManuallyAdd)) selectProduct(productSearchResults.find(canManuallyAdd));
   };
 
   return (
@@ -380,7 +390,13 @@ export default function AutoOrder() {
         </div>
         <p className="mt-2 text-xs text-slate-500">Le categorie spente sono escluse dalla bozza, dal PDF e dall’Excel. Riattivale per ripristinare gli articoli proposti.</p>
       </Card>
-      {invalidRows.length > 0 && <p role="alert" className="mb-4 text-sm font-semibold text-red-700">Quantità non valide: {invalidRows.map(row => `${row.codice} (lotto ${row.lotto_ordine || 1})`).join(", ")}. Inserisci multipli interi del lotto.</p>}
+      {invalidRows.length > 0 && <p role="alert" className="mb-4 text-sm font-semibold text-red-700">Quantità non valide: {invalidRows.map(row => {
+        const quantity = Number(row.qta_da_ordinare);
+        const lot = Math.max(1, Number(row.lotto_ordine) || 1);
+        if (!Number.isInteger(quantity) || quantity <= 0 || quantity % lot !== 0) return `${row.codice} (multipli del lotto ${lot})`;
+        if (orderPolicy === "AUTO_ORDER_3_1") return `${row.codice} (massimo previsto ${row.quantita_3_1_massima || 0})`;
+        return `${row.codice} (massimo integrativo ${row.quantita_integrativa_massima || 0})`;
+      }).join(", ")}.</p>}
       {supplierChanged && <p role="alert" className="mb-4 text-sm font-semibold text-amber-800">Dati di pianificazione modificati: ricalcola Auto-Order per aggiornare la proposta.</p>}
       {data?.data_quality && <p className={`mb-4 rounded border p-3 text-sm ${data.data_quality === "DATI_AFFIDABILI" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-amber-300 bg-amber-50 text-amber-900"}`}>Qualità dati: <b>{data.data_quality.replaceAll("_", " ")}</b>. {data.data_quality === "DATI_INCOERENTI" ? "Correggi le anomalie di forniture prima di confermare." : data.data_quality === "DATI_PARZIALI" ? "Verifica le vendite native e gli articoli segnalati prima di procedere." : "Vendite e giacenze operative disponibili nel database."}</p>}
       {data?.giorni_ritardo_dati > 1 && <p className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Ultima vendita nativa registrata {data.giorni_ritardo_dati} giorni fa. Verifica che le vendite siano aggiornate prima di confermare.</p>}
@@ -478,7 +494,10 @@ export default function AutoOrder() {
       )}
 
       <Card className="mb-4 p-4" data-testid="ao-planning-comparison">
-        <h2 className="text-lg font-bold text-slate-900">Previsione e pianificazione</h2>
+        <button type="button" data-testid="ao-toggle-planning" aria-expanded={planningOpen} aria-controls="ao-planning-content" onClick={() => setPlanningOpen(open => !open)} className="flex w-full items-center justify-between gap-3 text-left text-lg font-bold text-slate-900">
+          Previsione e pianificazione <ChevronDown size={20} className={`shrink-0 transition-transform ${planningOpen ? "rotate-180" : ""}`} />
+        </button>
+        <div id="ao-planning-content" hidden={!planningOpen}>
         <p className="mt-1 text-sm text-slate-600">L'algoritmo 3.1 usa lo storico nativo, le scorte reali, le consegne e le ricariche vending. Le conferme vengono ricalcolate dal backend. Nessun acquisto è automatico.</p>
         {comparison?.delivery_schedule && <div data-testid="ao-friday-schedule" className="mt-2 rounded border border-sky-200 bg-sky-50 p-3 text-sm text-slate-800">
           <p><b>Ordine settimanale tabacchi:</b> preferibilmente lunedì, entro mercoledì alle <b>11:00</b> (ora italiana) per ricevere venerdì della stessa settimana.</p>
@@ -532,9 +551,10 @@ export default function AutoOrder() {
           </div>
           {Object.keys(comparison.summary.forecast_errors_by_class || {}).length > 0 && <p className="mt-2 text-xs text-slate-500">MAE medio negozio per classe: {Object.entries(comparison.summary.forecast_errors_by_class).map(([name, score]) => `${name} ${score.mean_shop_mae} (${score.products})`).join(" · ")}</p>}
         </>}
+        </div>
       </Card>
 
-      <div data-testid="ao-calculation-note" className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+      <div data-testid="ao-calculation-note" hidden={!planningOpen} className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
         Domanda giornaliera: <b>{Math.round((data?.peso_breve ?? 0.7) * 100)}% ultimi {breveGg}gg + {Math.round((data?.peso_lungo ?? 0.3) * 100)}% ultimi {lungoGg}gg</b>{dataRiferimento ? <> fino al <b>{dataRiferimento}</b></> : null}.
         Il magazzino reale è la <b>giacenza negozio fisica</b> registrata nella WebApp. Il fabbisogno complessivo considera separatamente vending e forniture con data entro l'orizzonte. Ordina sotto {coperturaMin}gg verso il target di {data?.parametri?.GIORNI_COPERTURA_TARGET || 14}gg, con sicurezza ×{data?.fattore_sicurezza || 1.15}.
         Il calcolo interpreta i dati reali: giacenza e carichi completati rappresentano ciò che è arrivato, le vendite rappresentano ciò che è uscito e la domanda recente viene usata per stimare il fabbisogno futuro. Solo le forniture senza data futura affidabile richiedono verifica manuale. Il valore listino non rappresenta il costo di acquisto.
