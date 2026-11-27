@@ -43,6 +43,7 @@ class AutoOrderConfermaIn(BaseModel):
     righe: Optional[List[AutoOrderRigaIn]] = None
     conferma_dati_parziali: bool = False
     motivo_deroga: Optional[str] = Field(default=None, max_length=500)
+    conferma_quantita_superiori: bool = False
     policy_version: str = POLICY_2
     policy_snapshot_key: Optional[str] = None
 
@@ -907,6 +908,7 @@ def create_auto_order_router(
             "data_consegna_prevista": body.data_consegna_prevista.isoformat() if body and body.data_consegna_prevista else None,
             "conferma_dati_parziali": bool(body and body.conferma_dati_parziali),
             "motivo_deroga": (body.motivo_deroga or "").strip() if body else "",
+            "conferma_quantita_superiori": bool(body and body.conferma_quantita_superiori),
         }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         header_key = idempotency_key if isinstance(idempotency_key, str) else None
         explicit_key = header_key or (body.idempotency_key if body else None) or (body.batch_key if body else None)
@@ -955,7 +957,8 @@ def create_auto_order_router(
                         + ". Dopo mercoledì ore 11 si passa al venerdì successivo.",
                     )
                 effective_delivery = scheduled_date
-            righe = select_operational_rows(ao, comparison, requested_rows, multiply_money)
+            righe = select_operational_rows(ao, comparison, requested_rows, multiply_money,
+                                           allow_excess=bool(body and body.conferma_quantita_superiori))
         else:
             righe = auto_order_selected_rows(ao, requested_rows)
         if not righe:
@@ -1010,6 +1013,11 @@ def create_auto_order_router(
             "costi_non_disponibili": sum(1 for row in righe if row.get("totale_costo_stimato") is None),
             "deroga_qualita": {"motivo": override_reason, "stato": ao.get("data_quality"),
                                "source_watermarks": ao.get("source_watermarks")} if partial_quality else None,
+            "quantita_superiori_confermate": [
+                {"codice": row["codice"], "prevista": row["quantita_3_1_massima"],
+                 "ordinata": row["qta_da_ordinare"]}
+                for row in righe if row.get("quantita_superiore_confermata")
+            ],
         }
         async def persist(session):
             kwargs = {"session": session} if session is not None else {}
@@ -1055,6 +1063,7 @@ def create_auto_order_router(
                     "motivo": row.get("motivo", ""),
                     "policy_version": policy,
                     "quantita_3_1_massima": row.get("quantita_3_1_massima") if policy == POLICY_31 else None,
+                    "quantita_superiore_confermata": bool(row.get("quantita_superiore_confermata")),
                     "modello_negozio": row.get("modello_negozio") if policy == POLICY_31 else None,
                     "modello_vending": row.get("modello_vending") if policy == POLICY_31 else None,
                     }
