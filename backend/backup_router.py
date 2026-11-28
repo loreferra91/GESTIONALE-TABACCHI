@@ -26,6 +26,7 @@ BACKUP_COLLECTIONS = [
     "anomalie_ignorate", "smart_venue", "smart_venue_hidden",
     "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce", "rettifiche_inventario",
     "rettifiche_venduti", "reconciliation_cases", "audit_events",
+    "gratta_vinci_prodotti", "gratta_vinci_movimenti",
 ]
 BACKUP_FILE_FORMAT = "gestionale-tabacchi-backup"
 BACKUP_FILE_VERSION = 1
@@ -36,6 +37,7 @@ OPTIONAL_BACKUP_COLLECTIONS = {
     "smart_venue_hidden", "smart_venue_values", "smart_venue_movimenti", "ricezioni_merce",
     "rettifiche_inventario", "rettifiche_venduti", "reconciliation_cases",
     "audit_events", "auto_order_import_state",
+    "gratta_vinci_prodotti", "gratta_vinci_movimenti",
 }
 BACKUP_RETENTION_LIMIT = 3
 BACKUP_PARTIAL_RETENTION_LIMIT = 6
